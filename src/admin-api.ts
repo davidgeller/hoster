@@ -10,6 +10,7 @@ import {
   getStatusCodeBreakdown, getSiteStats,
   getAllowedCountries, setAllowedCountries
 } from "./analytics";
+import { createMcpToken, listMcpTokens, deleteMcpToken, getMcpAuditLog } from "./mcp";
 
 function json(data: any, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data), {
@@ -128,8 +129,8 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   const settingsMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/settings$/);
   if (settingsMatch && req.method === "POST") {
     const slug = settingsMatch[1];
-    const body = await req.json() as { root_dir?: string | null; spa?: boolean };
-    const ok = updateSiteSettings(slug, body.root_dir ?? null, body.spa ?? false);
+    const body = await req.json() as { root_dir?: string | null; spa?: boolean; mcp_enabled?: boolean; mcp_read_only?: boolean };
+    const ok = updateSiteSettings(slug, body.root_dir ?? null, body.spa ?? false, body.mcp_enabled, body.mcp_read_only);
     return ok ? json({ ok: true }) : json({ error: "Not found" }, 404);
   }
 
@@ -216,6 +217,30 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     const body = await req.json() as { countries?: string[] };
     setAllowedCountries(body.countries || []);
     return json({ ok: true, countries: getAllowedCountries() });
+  }
+
+  // --- MCP token management ---
+  if (path === "/_admin/api/mcp/tokens" && req.method === "GET") {
+    return json({ tokens: listMcpTokens() });
+  }
+  if (path === "/_admin/api/mcp/tokens" && req.method === "POST") {
+    const body = await req.json() as { label?: string; site_slug?: string; expires_in_days?: number };
+    const label = body.label?.trim();
+    if (!label) return json({ error: "Label is required" }, 400);
+    const token = createMcpToken(label, body.site_slug || null, body.expires_in_days || null);
+    return json({ token });
+  }
+  const mcpTokenDeleteMatch = path.match(/^\/_admin\/api\/mcp\/tokens\/(\d+)$/);
+  if (mcpTokenDeleteMatch && req.method === "DELETE") {
+    const id = parseInt(mcpTokenDeleteMatch[1]);
+    const ok = deleteMcpToken(id);
+    return ok ? json({ ok: true }) : json({ error: "Token not found" }, 404);
+  }
+
+  // --- MCP audit log ---
+  if (path === "/_admin/api/mcp/audit" && req.method === "GET") {
+    const limit = parseInt(new URL(req.url).searchParams.get("limit") || "50");
+    return json({ entries: getMcpAuditLog(Math.min(limit, 500)) });
   }
 
   // --- Session cleanup ---

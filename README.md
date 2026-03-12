@@ -14,6 +14,7 @@ Upload a ZIP file through the web admin panel and your site is live at `https://
 - **Secure auth** — Argon2id password hashing, session tokens, rate-limited login
 - **Light/Dark/Auto themes** — admin panel respects system preference
 - **Single binary** — compiles to a standalone executable with no runtime dependencies
+- **MCP server** — expose site files to AI tools (Claude Code, Cursor, etc.) via the Model Context Protocol
 - **Tiny footprint** — runs comfortably on a Raspberry Pi with minimal resources
 
 ## How It Works
@@ -152,6 +153,60 @@ Hoster automatically detects Angular, React, and Vue builds:
 
 You can adjust these settings per site via the **Settings** button on each site card.
 
+## MCP (Model Context Protocol) Support
+
+Hoster includes a built-in MCP server that lets AI tools like Claude Code, Cursor, and other MCP-compatible clients read and write files on your hosted sites.
+
+### Enabling MCP for a Site
+
+1. Go to **Sites** in the admin panel
+2. Click **Settings** on a site card
+3. Check **MCP Access** (optionally enable **Read Only** to block writes)
+
+### Generating an Access Token
+
+1. Go to **Settings** → **MCP Access Tokens**
+2. Enter a label, choose a scope (all sites or a specific site), and set an expiration
+3. Click **Generate** — the token is shown once, so copy it immediately
+4. Click **Copy Config** to get the full JSON config ready to paste into your AI tool
+
+### Connecting Your AI Tool
+
+**Claude Code (CLI):**
+
+```bash
+claude mcp add --transport http hoster https://yourdomain.com/_mcp \
+  --header "Authorization: Bearer <your-token>"
+```
+
+**JSON config** (Claude Code `settings.json`, Cursor, etc.):
+
+```json
+{
+  "mcpServers": {
+    "hoster": {
+      "type": "http",
+      "url": "https://yourdomain.com/_mcp",
+      "headers": {
+        "Authorization": "Bearer <your-token>"
+      }
+    }
+  }
+}
+```
+
+### Available MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `list_sites` | List all MCP-enabled sites |
+| `list_files` | List all files in a site's current deployment |
+| `read_file` | Read a file (text or base64 for binary) |
+| `write_file` | Write/overwrite a file (blocked in read-only mode) |
+| `delete_file` | Delete a file (blocked in read-only mode) |
+
+Tokens can be scoped to a single site, set to expire, and revoked at any time. All MCP activity is logged in the **MCP Activity Log** in Settings.
+
 ## Upgrading Hoster
 
 On your build machine:
@@ -194,6 +249,7 @@ hoster/
 │   ├── admin-api.ts    # Admin REST API
 │   ├── analytics.ts    # Request logging & dashboard queries
 │   ├── sites.ts        # Site management & versioning
+│   ├── mcp.ts          # MCP server & token management
 │   ├── db.ts           # SQLite database setup
 │   └── setup.ts        # CLI password setup
 ├── deploy/
@@ -249,6 +305,15 @@ Hoster is designed to be safe for public exposure. Since the source code is publ
 - After extraction, all **symlinks are removed** to prevent symlink-based escapes
 - Post-extraction verification ensures no files escaped the target directory (zip slip protection)
 - Site slugs validated against strict regex (`[a-z0-9-]+`, no leading/trailing hyphens)
+
+### MCP Access
+
+- Bearer tokens are SHA-256 hashed before storage — raw tokens are never persisted
+- Token validation uses **constant-time comparison** to prevent timing attacks
+- Tokens can be scoped to a single site, given an expiration date, and revoked instantly
+- File path traversal protection (same as static file serving) prevents escape from site directories
+- Per-site **read-only mode** blocks write and delete operations
+- All MCP tool calls are logged with token label, tool name, site, path, and success/failure
 
 ### Data Protection
 

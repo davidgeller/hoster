@@ -1,6 +1,7 @@
 import { existsSync, statSync } from "fs";
 import { join, resolve } from "path";
 import { handleAdminApi } from "./admin-api";
+import { handleMcp } from "./mcp";
 import { logRequest, extractRequestMeta, shouldTrack, isCountryAllowed } from "./analytics";
 import { resolveSitePath } from "./sites";
 
@@ -109,13 +110,21 @@ export function createServer(port: number) {
           });
         }
 
-        // --- Country restriction (skip for admin) ---
-        if (!path.startsWith("/_admin")) {
+        // --- Country restriction (skip for admin and MCP) ---
+        if (!path.startsWith("/_admin") && path !== "/_mcp") {
           if (!isCountryAllowed(meta.country)) {
             status = 403;
             logReq();
             return new Response("Access denied", { status: 403 });
           }
+        }
+
+        // --- MCP endpoint ---
+        if (path === "/_mcp") {
+          const res = await handleMcp(req);
+          status = res.status;
+          logReq();
+          return addSecurityHeaders(res);
         }
 
         // --- Admin API ---

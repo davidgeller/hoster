@@ -19,6 +19,8 @@ export interface Site {
   current_version: string | null;
   root_dir: string | null;  // e.g. "browser" for Angular apps
   spa: number;              // 1 = SPA mode (fallback to index.html)
+  mcp_enabled: number;      // 1 = MCP file access enabled
+  mcp_read_only: number;    // 1 = MCP can only read, not write/delete
 }
 
 export interface SiteVersion {
@@ -50,6 +52,8 @@ db.exec(`
 try { db.exec("ALTER TABLE sites ADD COLUMN current_version TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN root_dir TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN spa INTEGER DEFAULT 0"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN mcp_enabled INTEGER DEFAULT 0"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN mcp_read_only INTEGER DEFAULT 0"); } catch (_) {}
 
 export function listSites(): Site[] {
   return db.query("SELECT * FROM sites ORDER BY name").all() as Site[];
@@ -304,10 +308,20 @@ export function toggleSite(slug: string, active: boolean): boolean {
   return result.changes > 0;
 }
 
-export function updateSiteSettings(slug: string, rootDir: string | null, spa: boolean): boolean {
+export function updateSiteSettings(
+  slug: string, rootDir: string | null, spa: boolean,
+  mcpEnabled?: boolean, mcpReadOnly?: boolean
+): boolean {
   const result = db.run(
-    "UPDATE sites SET root_dir = ?, spa = ?, updated_at = datetime('now') WHERE slug = ?",
-    rootDir, spa ? 1 : 0, slug
+    `UPDATE sites SET root_dir = ?, spa = ?,
+      mcp_enabled = COALESCE(?, mcp_enabled),
+      mcp_read_only = COALESCE(?, mcp_read_only),
+      updated_at = datetime('now')
+    WHERE slug = ?`,
+    rootDir, spa ? 1 : 0,
+    mcpEnabled !== undefined ? (mcpEnabled ? 1 : 0) : null,
+    mcpReadOnly !== undefined ? (mcpReadOnly ? 1 : 0) : null,
+    slug
   );
   return result.changes > 0;
 }

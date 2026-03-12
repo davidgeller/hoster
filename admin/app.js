@@ -258,6 +258,228 @@ async function loadSettings() {
     const data = await api("/settings/countries");
     document.getElementById("allowed-countries").value = (data.countries || []).join(", ");
   } catch (_) {}
+
+  loadMcpTokens();
+  loadMcpAudit();
+}
+
+async function loadMcpTokens() {
+  const container = document.getElementById("mcp-token-list");
+  if (!container) return;
+  try {
+    const [{ tokens }, { sites }] = await Promise.all([
+      api("/mcp/tokens"),
+      api("/sites"),
+    ]);
+    const mcpSites = sites.filter(s => s.mcp_enabled);
+
+    let html = "";
+    if (tokens.length) {
+      html += `<table style="width:100%;font-size:0.85rem;margin-bottom:12px">
+        <thead><tr><th style="text-align:left">Label</th><th style="text-align:left">Scope</th><th style="text-align:left">Expires</th><th></th></tr></thead>
+        <tbody>`;
+      for (const t of tokens) {
+        const scopeText = t.site_slug ? esc(t.site_slug) : "All sites";
+        const expiresText = t.expired ? '<span style="color:var(--danger)">Expired</span>' : timeUntil(t.expires_at);
+        html += `<tr>
+          <td>${esc(t.label)}</td>
+          <td><code>${scopeText}</code></td>
+          <td>${expiresText}</td>
+          <td style="text-align:right;white-space:nowrap">
+            <button class="btn btn-sm" data-setup-token="${t.id}">Setup</button>
+            <button class="btn btn-sm btn-danger" data-delete-token="${t.id}">Revoke</button>
+          </td>
+        </tr>`;
+      }
+      html += "</tbody></table>";
+    } else {
+      html += `<p class="text-muted" style="margin-bottom:12px">No tokens. Generate one to enable MCP access.</p>`;
+    }
+
+    // Generate form
+    html += `<div style="border-top:1px solid var(--border);padding-top:12px;margin-top:4px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end">
+        <label style="flex:1;min-width:120px;margin:0">
+          <small>Label</small>
+          <input type="text" id="mcp-token-label" placeholder="e.g. Claude Code" style="margin:0">
+        </label>
+        <label style="min-width:120px;margin:0">
+          <small>Scope</small>
+          <select id="mcp-token-scope" style="margin:0">
+            <option value="">All MCP sites</option>
+            ${mcpSites.map(s => `<option value="${esc(s.slug)}">${esc(s.name)}</option>`).join("")}
+          </select>
+        </label>
+        <label style="min-width:100px;margin:0">
+          <small>Expires</small>
+          <select id="mcp-token-expires" style="margin:0">
+            <option value="30">30 days</option>
+            <option value="90" selected>90 days</option>
+            <option value="365">1 year</option>
+            <option value="">Never</option>
+          </select>
+        </label>
+        <button class="btn btn-primary btn-sm" id="mcp-generate-btn" style="height:38px">Generate</button>
+      </div>
+    </div>`;
+
+    container.innerHTML = html;
+
+    // Bind delete buttons
+    container.querySelectorAll("[data-delete-token]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("Revoke this token? It will immediately stop working.")) return;
+        await api(`/mcp/tokens/${btn.dataset.deleteToken}`, { method: "DELETE" });
+        loadMcpTokens();
+      });
+    });
+
+    // Bind setup buttons
+    container.querySelectorAll("[data-setup-token]").forEach(btn => {
+      btn.addEventListener("click", () => showMcpSetup());
+    });
+
+    // Bind generate button
+    document.getElementById("mcp-generate-btn")?.addEventListener("click", async () => {
+      const label = document.getElementById("mcp-token-label").value.trim();
+      if (!label) { alert("Label is required"); return; }
+      const siteSlug = document.getElementById("mcp-token-scope").value || undefined;
+      const expiresVal = document.getElementById("mcp-token-expires").value;
+      const expiresInDays = expiresVal ? parseInt(expiresVal) : undefined;
+      try {
+        const { token } = await api("/mcp/tokens", {
+          method: "POST",
+          body: JSON.stringify({ label, site_slug: siteSlug, expires_in_days: expiresInDays }),
+        });
+        showMcpToken(token);
+        loadMcpTokens();
+      } catch (err) { alert(err.message); }
+    });
+  } catch (_) {}
+}
+
+async function loadMcpAudit() {
+  const container = document.getElementById("mcp-audit-log");
+  if (!container) return;
+  try {
+    const { entries } = await api("/mcp/audit?limit=20");
+    if (!entries.length) {
+      container.innerHTML = `<p class="text-muted">No MCP activity yet.</p>`;
+      return;
+    }
+    container.innerHTML = `<table style="width:100%;font-size:0.8rem">
+      <thead><tr><th style="text-align:left">Time</th><th style="text-align:left">Token</th><th style="text-align:left">Tool</th><th style="text-align:left">Site</th><th style="text-align:left">Path</th><th></th></tr></thead>
+      <tbody>${entries.map(e => `<tr>
+        <td>${timeAgo(e.created_at)}</td>
+        <td>${esc(e.token_label || "—")}</td>
+        <td><code>${esc(e.tool)}</code></td>
+        <td>${esc(e.site_slug || "—")}</td>
+        <td class="truncate" style="max-width:150px" title="${esc(e.path || "")}">${esc(e.path || "—")}</td>
+        <td>${e.success ? '<span style="color:var(--success)">OK</span>' : '<span style="color:var(--danger)" title="' + esc(e.error || "") + '">ERR</span>'}</td>
+      </tr>`).join("")}</tbody>
+    </table>`;
+  } catch (_) {}
+}
+
+function getMcpConfigJson(token) {
+  const origin = window.location.origin;
+  return JSON.stringify({
+    mcpServers: {
+      hoster: {
+        type: "http",
+        url: `${origin}/_mcp`,
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    },
+  }, null, 2);
+}
+
+function showMcpToken(token) {
+  const configJson = getMcpConfigJson(token);
+  const modal = document.createElement("div");
+  modal.className = "modal";
+  modal.innerHTML = `
+    <div class="modal-backdrop"></div>
+    <div class="modal-content" style="max-width:560px">
+      <h2>MCP Token Generated</h2>
+      <p style="margin-bottom:12px;color:var(--text-muted)">Copy this token now — it won't be shown again.</p>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-family:monospace;font-size:0.85rem;word-break:break-all;margin-bottom:16px;user-select:all">${esc(token)}</div>
+      <h3 style="font-size:0.9rem;margin-bottom:8px">MCP Configuration</h3>
+      <p class="text-sm text-muted" style="margin-bottom:8px">Add this to your AI tool's MCP settings (e.g. Claude Code <code>settings.json</code>, Cursor, etc.):</p>
+      <pre style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:0.8rem;overflow-x:auto;margin-bottom:16px;white-space:pre-wrap">${esc(configJson)}</pre>
+      <div class="modal-actions" style="gap:8px">
+        <button class="btn btn-sm" id="mcp-copy-token">Copy Token</button>
+        <button class="btn btn-sm btn-primary" id="mcp-copy-config">Copy Config</button>
+        <button class="btn btn-ghost close-modal">Close</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  modal.querySelector(".modal-backdrop").addEventListener("click", () => modal.remove());
+  modal.querySelector(".close-modal").addEventListener("click", () => modal.remove());
+  modal.querySelector("#mcp-copy-token").addEventListener("click", () => {
+    navigator.clipboard.writeText(token);
+    modal.querySelector("#mcp-copy-token").textContent = "Copied!";
+  });
+  modal.querySelector("#mcp-copy-config").addEventListener("click", () => {
+    navigator.clipboard.writeText(configJson);
+    modal.querySelector("#mcp-copy-config").textContent = "Copied!";
+  });
+}
+
+function showMcpSetup() {
+  const origin = window.location.origin;
+  const configTemplate = JSON.stringify({
+    mcpServers: {
+      hoster: {
+        type: "http",
+        url: `${origin}/_mcp`,
+        headers: {
+          Authorization: "Bearer <your-token>",
+        },
+      },
+    },
+  }, null, 2);
+
+  const cliCommand = `claude mcp add --transport http hoster ${origin}/_mcp --header "Authorization: Bearer <your-token>"`;
+
+  const modal = document.createElement("div");
+  modal.className = "modal";
+  modal.innerHTML = `
+    <div class="modal-backdrop"></div>
+    <div class="modal-content" style="max-width:600px">
+      <h2>MCP Setup Instructions</h2>
+      <p class="text-sm text-muted" style="margin-bottom:16px">Connect your AI tool to this Hoster instance via the Model Context Protocol (MCP). You'll need an access token — generate one above if you haven't already.</p>
+
+      <h3 style="font-size:0.9rem;margin-bottom:8px">Option 1: JSON Config</h3>
+      <p class="text-sm text-muted" style="margin-bottom:8px">Add to your tool's MCP settings file (e.g. Claude Code <code>settings.json</code>, Cursor config, etc.):</p>
+      <pre id="mcp-setup-json" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:0.8rem;overflow-x:auto;margin-bottom:8px;white-space:pre-wrap">${esc(configTemplate)}</pre>
+      <button class="btn btn-sm" id="mcp-copy-setup-json" style="margin-bottom:16px">Copy JSON</button>
+
+      <h3 style="font-size:0.9rem;margin-bottom:8px">Option 2: Claude Code CLI</h3>
+      <pre id="mcp-setup-cli" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:0.8rem;overflow-x:auto;margin-bottom:8px;white-space:pre-wrap">${esc(cliCommand)}</pre>
+      <button class="btn btn-sm" id="mcp-copy-setup-cli" style="margin-bottom:16px">Copy Command</button>
+
+      <p class="text-sm text-muted" style="margin-bottom:16px">Replace <code>&lt;your-token&gt;</code> with the token shown when you generate one. Restart your AI tool after adding the config.</p>
+
+      <div class="modal-actions">
+        <button class="btn btn-ghost close-modal">Close</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  modal.querySelector(".modal-backdrop").addEventListener("click", () => modal.remove());
+  modal.querySelector(".close-modal").addEventListener("click", () => modal.remove());
+  modal.querySelector("#mcp-copy-setup-json").addEventListener("click", () => {
+    navigator.clipboard.writeText(configTemplate);
+    modal.querySelector("#mcp-copy-setup-json").textContent = "Copied!";
+  });
+  modal.querySelector("#mcp-copy-setup-cli").addEventListener("click", () => {
+    navigator.clipboard.writeText(cliCommand);
+    modal.querySelector("#mcp-copy-setup-cli").textContent = "Copied!";
+  });
 }
 
 async function loadAbout() {
@@ -327,6 +549,7 @@ async function loadSites() {
             ${s.current_version ? `v${s.current_version}` : "no version"}
             ${s.root_dir ? ` · root: <code>${esc(s.root_dir)}</code>` : ""}
             ${s.spa ? " · SPA" : ""}
+            ${s.mcp_enabled ? (s.mcp_read_only ? " · MCP (read-only)" : " · MCP") : ""}
           </div>
         </div>
         <span class="site-badge ${s.active ? "badge-active" : "badge-inactive"}">
@@ -356,7 +579,7 @@ async function loadSites() {
     btn.addEventListener("click", () => {
       const slug = btn.dataset.settings;
       const site = sites.find((s) => s.slug === slug);
-      if (site) showSiteSettings(slug, site.root_dir, site.spa);
+      if (site) showSiteSettings(slug, site.root_dir, site.spa, site.mcp_enabled, site.mcp_read_only);
     });
   });
 }
@@ -413,7 +636,7 @@ window.deleteVersionBtn = async function (slug, version) {
   } catch (err) { alert(err.message); }
 };
 
-window.showSiteSettings = function (slug, rootDir, spa) {
+window.showSiteSettings = function (slug, rootDir, spa, mcpEnabled, mcpReadOnly) {
   const modal = document.createElement("div");
   modal.className = "modal site-settings-modal";
   modal.innerHTML = `
@@ -429,6 +652,14 @@ window.showSiteSettings = function (slug, rootDir, spa) {
         <label style="display:flex;align-items:center;gap:10px;flex-direction:row">
           <input type="checkbox" id="settings-spa" ${spa ? "checked" : ""} style="width:auto;margin:0">
           <span>SPA Mode <small style="display:inline;margin:0">(serve index.html for all unmatched routes)</small></span>
+        </label>
+        <label style="display:flex;align-items:center;gap:10px;flex-direction:row">
+          <input type="checkbox" id="settings-mcp" ${mcpEnabled ? "checked" : ""} style="width:auto;margin:0">
+          <span>MCP Access <small style="display:inline;margin:0">(allow AI tools to access site files via MCP)</small></span>
+        </label>
+        <label style="display:flex;align-items:center;gap:10px;flex-direction:row;margin-left:28px">
+          <input type="checkbox" id="settings-mcp-readonly" ${mcpReadOnly ? "checked" : ""} style="width:auto;margin:0">
+          <span>Read Only <small style="display:inline;margin:0">(block write and delete operations)</small></span>
         </label>
         <div class="modal-actions">
           <button type="button" class="btn btn-ghost close-modal">Cancel</button>
@@ -446,10 +677,12 @@ window.showSiteSettings = function (slug, rootDir, spa) {
     e.preventDefault();
     const newRoot = document.getElementById("settings-root-dir").value.trim() || null;
     const newSpa = document.getElementById("settings-spa").checked;
+    const newMcp = document.getElementById("settings-mcp").checked;
+    const newMcpReadOnly = document.getElementById("settings-mcp-readonly").checked;
     try {
       await api(`/sites/${slug}/settings`, {
         method: "POST",
-        body: JSON.stringify({ root_dir: newRoot, spa: newSpa }),
+        body: JSON.stringify({ root_dir: newRoot, spa: newSpa, mcp_enabled: newMcp, mcp_read_only: newMcpReadOnly }),
       });
       modal.remove();
       loadSites();
@@ -614,5 +847,16 @@ function timeAgo(dateStr) {
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+  return date.toLocaleDateString();
+}
+
+function timeUntil(dateStr) {
+  if (!dateStr) return "Never";
+  const date = new Date(dateStr + (dateStr.includes("Z") ? "" : "Z"));
+  const diff = (date.getTime() - Date.now()) / 1000;
+  if (diff <= 0) return "Expired";
+  if (diff < 3600) return `in ${Math.floor(diff / 60)}m`;
+  if (diff < 86400) return `in ${Math.floor(diff / 3600)}h`;
+  if (diff < 604800) return `in ${Math.floor(diff / 86400)}d`;
   return date.toLocaleDateString();
 }

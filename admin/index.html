@@ -255,6 +255,16 @@
               <div class="form-success" id="pw-success"></div>
             </form>
           </div>
+          <div class="card mt-4" style="max-width:640px">
+            <h3>MCP Access Tokens</h3>
+            <p class="text-sm text-muted mb-2">Manage tokens for AI tools to access MCP-enabled sites. Tokens can be scoped to a single site and set to expire.</p>
+            <div id="mcp-token-list"></div>
+          </div>
+          <div class="card mt-4" style="max-width:640px">
+            <h3>MCP Activity Log</h3>
+            <p class="text-sm text-muted mb-2">Recent MCP tool calls across all tokens.</p>
+            <div id="mcp-audit-log"></div>
+          </div>
           <div class="card mt-4" style="max-width:480px">
             <h3>Country Restrictions</h3>
             <p class="text-sm text-muted mb-2">Only allow requests from specific countries. Leave empty to allow all. Uses 2-letter ISO country codes (e.g., US, GB, CA). Admin panel is always accessible.</p>
