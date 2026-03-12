@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hoster — Admin</title>
+  <link rel="stylesheet" href="/_admin/style.css?v=__BUILD_VERSION__">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏠</text></svg>">
+</head>
+<body>
+  <div id="app">
+    <!-- Setup screen -->
+    <div id="setup-screen" class="screen" hidden>
+      <div class="auth-card">
+        <div class="logo">HOSTER</div>
+        <p class="subtitle">Set your admin password to get started.</p>
+        <form id="setup-form">
+          <input type="password" id="setup-password" placeholder="Choose a password (8+ chars)" autocomplete="new-password" required minlength="8">
+          <input type="password" id="setup-confirm" placeholder="Confirm password" autocomplete="new-password" required>
+          <button type="submit" class="btn btn-primary btn-block">Create Account</button>
+          <div class="form-error" id="setup-error"></div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Login screen -->
+    <div id="login-screen" class="screen" hidden>
+      <div class="auth-card">
+        <div class="logo">HOSTER</div>
+        <p class="subtitle">Sign in to manage your sites.</p>
+        <form id="login-form">
+          <input type="password" id="login-password" placeholder="Admin password" autocomplete="current-password" required>
+          <button type="submit" class="btn btn-primary btn-block">Sign In</button>
+          <div class="form-error" id="login-error"></div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Main app -->
+    <div id="main-screen" class="screen" hidden>
+      <nav class="sidebar">
+        <div class="sidebar-header">
+          <span class="logo-sm">HOSTER</span>
+        </div>
+        <ul class="nav-links">
+          <li><a href="#" data-view="dashboard" class="active">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+            Dashboard
+          </a></li>
+          <li><a href="#" data-view="sites">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+            Sites
+          </a></li>
+          <li><a href="#" data-view="analytics">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22,12 18,12 15,21 9,3 6,12 2,12"/></svg>
+            Analytics
+          </a></li>
+          <li><a href="#" data-view="logs">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            Logs
+          </a></li>
+          <li><a href="#" data-view="settings">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            Settings
+          </a></li>
+          <li><a href="#" data-view="about">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+            About
+          </a></li>
+        </ul>
+        <div class="sidebar-footer">
+          <div class="theme-toggle">
+            <button data-theme="light" title="Light mode">☀️</button>
+            <button data-theme="dark" title="Dark mode">🌙</button>
+            <button data-theme="auto" title="System" class="active">⚙️</button>
+          </div>
+          <button id="logout-btn" class="btn btn-ghost btn-sm">Sign Out</button>
+        </div>
+      </nav>
+
+      <main class="content">
+        <!-- Dashboard View -->
+        <div id="view-dashboard" class="view">
+          <div class="view-header">
+            <h1>Dashboard</h1>
+            <div class="time-range">
+              <select id="dash-range">
+                <option value="1">Last hour</option>
+                <option value="24" selected>Last 24h</option>
+                <option value="168">Last 7 days</option>
+                <option value="720">Last 30 days</option>
+              </select>
+            </div>
+          </div>
+          <div class="stat-cards" id="dash-stats"></div>
+          <div class="grid-2">
+            <div class="card">
+              <h3>Traffic</h3>
+              <div id="dash-traffic-chart" class="chart-container"></div>
+            </div>
+            <div class="card">
+              <h3>Top Sites</h3>
+              <div id="dash-top-sites"></div>
+            </div>
+          </div>
+          <div class="grid-2">
+            <div class="card">
+              <h3>Countries</h3>
+              <div id="dash-countries"></div>
+            </div>
+            <div class="card">
+              <h3>Status Codes</h3>
+              <div id="dash-status-codes"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Sites View -->
+        <div id="view-sites" class="view" hidden>
+          <div class="view-header">
+            <h1>Sites</h1>
+            <button class="btn btn-primary" id="upload-btn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17,8 12,3 7,8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              Deploy Site
+            </button>
+          </div>
+          <div id="sites-list" class="sites-grid"></div>
+        </div>
+
+        <!-- Upload Modal -->
+        <div id="upload-modal" class="modal" hidden>
+          <div class="modal-backdrop"></div>
+          <div class="modal-content">
+            <h2>Deploy New Site</h2>
+            <form id="upload-form">
+              <label>
+                Slug (URL path)
+                <input type="text" id="upload-slug" placeholder="my-site" pattern="[a-z0-9][a-z0-9-]*[a-z0-9]" required>
+                <small>Lowercase letters, numbers, hyphens. Becomes <code>sprylylabs.net/<strong>slug</strong></code></small>
+              </label>
+              <label>
+                Display Name
+                <input type="text" id="upload-name" placeholder="My Awesome Site">
+              </label>
+              <label>
+                ZIP File
+                <div class="file-drop" id="file-drop">
+                  <input type="file" id="upload-file" accept=".zip" required>
+                  <p>Drop a .zip file here or <strong>click to browse</strong></p>
+                </div>
+              </label>
+              <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" id="upload-cancel">Cancel</button>
+                <button type="submit" class="btn btn-primary" id="upload-submit">Deploy</button>
+              </div>
+              <div class="form-error" id="upload-error"></div>
+              <div class="upload-progress" id="upload-progress" hidden>
+                <div class="progress-bar"><div class="progress-fill"></div></div>
+                <span>Deploying...</span>
+              </div>
+            </form>
+          </div>
+        </div>
+
+        <!-- Analytics View -->
+        <div id="view-analytics" class="view" hidden>
+          <div class="view-header">
+            <h1>Analytics</h1>
+            <div class="time-range">
+              <select id="analytics-range">
+                <option value="1">Last hour</option>
+                <option value="24" selected>Last 24h</option>
+                <option value="168">Last 7 days</option>
+                <option value="720">Last 30 days</option>
+              </select>
+            </div>
+          </div>
+          <div class="card">
+            <h3>Top Paths</h3>
+            <div id="analytics-paths"></div>
+          </div>
+          <div class="card">
+            <h3>User Agents</h3>
+            <div id="analytics-agents"></div>
+          </div>
+        </div>
+
+        <!-- Logs View -->
+        <div id="view-logs" class="view" hidden>
+          <div class="view-header">
+            <h1>Recent Requests</h1>
+            <button class="btn btn-ghost" id="refresh-logs">Refresh</button>
+          </div>
+          <div class="card table-wrap">
+            <table id="logs-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Method</th>
+                  <th>Path</th>
+                  <th>Status</th>
+                  <th>IP</th>
+                  <th>Country</th>
+                  <th>Speed</th>
+                </tr>
+              </thead>
+              <tbody id="logs-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Settings View -->
+        <div id="view-settings" class="view" hidden>
+          <div class="view-header">
+            <h1>Settings</h1>
+          </div>
+          <div class="card" style="max-width:480px">
+            <h3>Change Password</h3>
+            <form id="password-form">
+              <label>
+                Current Password
+                <input type="password" id="pw-current" required>
+              </label>
+              <label>
+                New Password
+                <input type="password" id="pw-new" required minlength="8">
+              </label>
+              <label>
+                Confirm New Password
+                <input type="password" id="pw-confirm" required>
+              </label>
+              <button type="submit" class="btn btn-primary">Update Password</button>
+              <div class="form-error" id="pw-error"></div>
+              <div class="form-success" id="pw-success"></div>
+            </form>
+          </div>
+        </div>
+
+        <!-- About View -->
+        <div id="view-about" class="view" hidden>
+          <div class="view-header">
+            <h1>About</h1>
+          </div>
+          <div class="card" style="max-width:600px">
+            <div style="text-align:center;margin-bottom:24px">
+              <div class="logo" style="font-size:2rem;margin-bottom:4px">HOSTER</div>
+              <p class="text-muted text-sm">Lightweight Web Hosting Platform</p>
+              <p class="text-muted text-sm" id="about-version"></p>
+            </div>
+            <p style="margin-bottom:16px;line-height:1.7">
+              Hoster is a self-hosted web hosting platform that turns any device into a web server.
+              Upload a ZIP file and your site is live — with versioning, SPA support, analytics, and
+              free HTTPS via Cloudflare Tunnel.
+            </p>
+            <p style="margin-bottom:16px;line-height:1.7">
+              No cloud providers, no monthly fees, no vendor lock-in. Just your code, your device, your domain.
+            </p>
+            <div style="border-top:1px solid var(--border);padding-top:16px;margin-top:16px">
+              <p style="margin-bottom:8px"><strong>Created by</strong> David Geller</p>
+              <p style="margin-bottom:8px">
+                <a href="https://github.com/davidgeller/hoster" target="_blank" style="display:inline-flex;align-items:center;gap:6px">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+                  github.com/davidgeller/hoster
+                </a>
+              </p>
+              <p class="text-muted text-sm">MIT License</p>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script src="/_admin/app.js?v=__BUILD_VERSION__"></script>
+</body>
+</html>

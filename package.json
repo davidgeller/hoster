@@ -1,0 +1,12 @@
+{
+  "name": "hoster",
+  "version": "1.0.0",
+  "description": "Lightweight web hosting platform for Raspberry Pi",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "start": "bun run src/index.ts",
+    "setup": "bun run src/setup.ts"
+  },
+  "dependencies": {}
+}

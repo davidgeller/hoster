@@ -1,0 +1,13 @@
+node_modules/
+data/
+sites/
+*.db
+*.db-wal
+*.db-shm
+firebase-debug.log
+error.log
+
+# Built artifacts
+hoster-pi.sh
+hoster-linux-arm64
+*.bak

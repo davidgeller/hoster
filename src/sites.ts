@@ -1,0 +1,314 @@
+import db from "./db";
+import { mkdirSync, rmSync, existsSync, readdirSync, statSync, symlinkSync, readlinkSync, unlinkSync } from "fs";
+import { join, resolve } from "path";
+
+import { dirname } from "path";
+const BASE_DIR = dirname(process.execPath);
+export const SITES_DIR = join(BASE_DIR, "sites");
+mkdirSync(SITES_DIR, { recursive: true });
+
+export interface Site {
+  id: number;
+  slug: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+  size_bytes: number;
+  file_count: number;
+  active: number;
+  current_version: string | null;
+  root_dir: string | null;  // e.g. "browser" for Angular apps
+  spa: number;              // 1 = SPA mode (fallback to index.html)
+}
+
+export interface SiteVersion {
+  id: number;
+  site_slug: string;
+  version: string;
+  label: string | null;
+  size_bytes: number;
+  file_count: number;
+  created_at: string;
+}
+
+// Ensure version tables exist
+db.exec(`
+  CREATE TABLE IF NOT EXISTS site_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_slug TEXT NOT NULL,
+    version TEXT NOT NULL,
+    label TEXT,
+    size_bytes INTEGER DEFAULT 0,
+    file_count INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(site_slug, version),
+    FOREIGN KEY (site_slug) REFERENCES sites(slug) ON DELETE CASCADE
+  );
+`);
+
+// Add columns if not present
+try { db.exec("ALTER TABLE sites ADD COLUMN current_version TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN root_dir TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN spa INTEGER DEFAULT 0"); } catch (_) {}
+
+export function listSites(): Site[] {
+  return db.query("SELECT * FROM sites ORDER BY name").all() as Site[];
+}
+
+export function getSite(slug: string): Site | null {
+  return db.query("SELECT * FROM sites WHERE slug = ?").get(slug) as Site | null;
+}
+
+export function listVersions(slug: string): SiteVersion[] {
+  return db.query(
+    "SELECT * FROM site_versions WHERE site_slug = ? ORDER BY created_at DESC"
+  ).all(slug) as SiteVersion[];
+}
+
+function calcDirStats(dir: string): { size: number; count: number } {
+  let size = 0;
+  let count = 0;
+  function walk(d: string) {
+    if (!existsSync(d)) return;
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      const full = join(d, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+      } else {
+        size += statSync(full).size;
+        count++;
+      }
+    }
+  }
+  walk(dir);
+  return { size, count };
+}
+
+function generateVersion(): string {
+  const now = new Date();
+  return now.toISOString().replace(/[-:T]/g, "").replace(/\..+/, ""); // 20260311143022
+}
+
+function updateCurrentSymlink(slug: string, version: string) {
+  const siteDir = join(SITES_DIR, slug);
+  const currentLink = join(siteDir, "_current");
+  const versionDir = join(siteDir, version);
+
+  if (existsSync(currentLink)) {
+    unlinkSync(currentLink);
+  }
+  symlinkSync(versionDir, currentLink);
+}
+
+export async function deploySite(slug: string, name: string, zipBuffer: ArrayBuffer, label?: string): Promise<{ site: Site; version: SiteVersion }> {
+  // Validate slug
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(slug)) {
+    throw new Error("Slug must be lowercase alphanumeric with hyphens, not starting/ending with hyphen");
+  }
+  if (slug.startsWith("_")) {
+    throw new Error("Slugs starting with _ are reserved");
+  }
+
+  const version = generateVersion();
+  const siteDir = join(SITES_DIR, slug);
+  const versionDir = join(siteDir, version);
+
+  mkdirSync(versionDir, { recursive: true });
+
+  // Extract zip
+  const tmpZip = join(versionDir, "__upload.zip");
+  await Bun.write(tmpZip, zipBuffer);
+
+  const proc = Bun.spawn(["unzip", "-o", tmpZip, "-d", versionDir], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  await proc.exited;
+  rmSync(tmpZip);
+
+  // Check if zip contained a single root folder — hoist its contents
+  const entries = readdirSync(versionDir, { withFileTypes: true });
+  if (entries.length === 1 && entries[0].isDirectory()) {
+    const innerDir = join(versionDir, entries[0].name);
+    const innerEntries = readdirSync(innerDir);
+    for (const e of innerEntries) {
+      Bun.spawnSync(["mv", join(innerDir, e), join(versionDir, e)]);
+    }
+    rmSync(innerDir, { recursive: true });
+  }
+
+  // Calculate stats
+  const stats = calcDirStats(versionDir);
+
+  // Auto-detect root directory: look for subdirectory containing index.html
+  // Common patterns: browser/ (Angular), dist/ , build/ , public/ , out/
+  let detectedRoot: string | null = null;
+  let detectedSpa = 0;
+  const topIndex = join(versionDir, "index.html");
+  if (!existsSync(topIndex)) {
+    // No top-level index.html — look for one in subdirectories
+    const candidates = ["browser", "dist", "build", "public", "out", "www"];
+    for (const dir of candidates) {
+      if (existsSync(join(versionDir, dir, "index.html"))) {
+        detectedRoot = dir;
+        break;
+      }
+    }
+    // If not a known name, scan for any subdir with index.html
+    if (!detectedRoot) {
+      for (const entry of readdirSync(versionDir, { withFileTypes: true })) {
+        if (entry.isDirectory() && existsSync(join(versionDir, entry.name, "index.html"))) {
+          detectedRoot = entry.name;
+          break;
+        }
+      }
+    }
+  }
+
+  // Auto-detect SPA: look for JS bundles (Angular, React, Vue)
+  if (detectedRoot || existsSync(topIndex)) {
+    const checkDir = detectedRoot ? join(versionDir, detectedRoot) : versionDir;
+    const files = readdirSync(checkDir);
+    const hasJsBundle = files.some(f => /^(main|chunk|polyfills|vendor|runtime)[\w.-]*\.js$/.test(f));
+    if (hasJsBundle) detectedSpa = 1;
+  }
+
+  // Preserve existing root_dir/spa if site already exists (user may have overridden)
+  const existing = getSite(slug);
+  const rootDir = existing?.root_dir ?? detectedRoot;
+  const spa = existing?.spa ?? detectedSpa;
+
+  // Upsert site record
+  db.run(`
+    INSERT INTO sites (slug, name, size_bytes, file_count, current_version, root_dir, spa, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(slug) DO UPDATE SET
+      name = excluded.name,
+      size_bytes = excluded.size_bytes,
+      file_count = excluded.file_count,
+      current_version = excluded.current_version,
+      root_dir = excluded.root_dir,
+      spa = excluded.spa,
+      updated_at = datetime('now')
+  `, slug, name, stats.size, stats.count, version, rootDir, spa);
+
+  // Insert version record
+  db.run(`
+    INSERT INTO site_versions (site_slug, version, label, size_bytes, file_count)
+    VALUES (?, ?, ?, ?, ?)
+  `, slug, version, label || null, stats.size, stats.count);
+
+  // Point _current symlink to this version
+  updateCurrentSymlink(slug, version);
+
+  return { site: getSite(slug)!, version: getVersion(slug, version)! };
+}
+
+function getVersion(slug: string, version: string): SiteVersion | null {
+  return db.query(
+    "SELECT * FROM site_versions WHERE site_slug = ? AND version = ?"
+  ).get(slug, version) as SiteVersion | null;
+}
+
+export function switchVersion(slug: string, version: string): boolean {
+  const v = getVersion(slug, version);
+  if (!v) return false;
+
+  const versionDir = join(SITES_DIR, slug, version);
+  if (!existsSync(versionDir)) return false;
+
+  updateCurrentSymlink(slug, version);
+
+  const stats = calcDirStats(versionDir);
+  db.run(
+    "UPDATE sites SET current_version = ?, size_bytes = ?, file_count = ?, updated_at = datetime('now') WHERE slug = ?",
+    version, stats.size, stats.count, slug
+  );
+  return true;
+}
+
+export function deleteVersion(slug: string, version: string): boolean {
+  const site = getSite(slug);
+  if (!site) return false;
+
+  // Don't delete the current version
+  if (site.current_version === version) {
+    throw new Error("Cannot delete the active version. Switch to another version first.");
+  }
+
+  const versionDir = join(SITES_DIR, slug, version);
+  if (existsSync(versionDir)) {
+    rmSync(versionDir, { recursive: true });
+  }
+  db.run("DELETE FROM site_versions WHERE site_slug = ? AND version = ?", slug, version);
+  return true;
+}
+
+export function deleteSite(slug: string): boolean {
+  const site = getSite(slug);
+  if (!site) return false;
+
+  const siteDir = join(SITES_DIR, slug);
+  if (existsSync(siteDir)) {
+    rmSync(siteDir, { recursive: true });
+  }
+  db.run("DELETE FROM sites WHERE slug = ?", slug);
+  db.run("DELETE FROM site_versions WHERE site_slug = ?", slug);
+  db.run("DELETE FROM requests WHERE site_slug = ?", slug);
+  return true;
+}
+
+export function toggleSite(slug: string, active: boolean): boolean {
+  const result = db.run("UPDATE sites SET active = ? WHERE slug = ?", active ? 1 : 0, slug);
+  return result.changes > 0;
+}
+
+export function updateSiteSettings(slug: string, rootDir: string | null, spa: boolean): boolean {
+  const result = db.run(
+    "UPDATE sites SET root_dir = ?, spa = ?, updated_at = datetime('now') WHERE slug = ?",
+    rootDir, spa ? 1 : 0, slug
+  );
+  return result.changes > 0;
+}
+
+export function resolveSitePath(slug: string, filePath: string): string | null {
+  const site = getSite(slug);
+  if (!site || !site.active) return null;
+
+  const siteDir = join(SITES_DIR, slug, "_current");
+  if (!existsSync(siteDir)) return null;
+
+  // If site has a root_dir (e.g. "browser"), serve files from that subdirectory
+  const contentDir = site.root_dir ? join(siteDir, site.root_dir) : siteDir;
+  if (!existsSync(contentDir)) return null;
+
+  let resolved = resolve(contentDir, filePath);
+
+  // Security: prevent path traversal
+  const realSiteDir = resolve(SITES_DIR, slug);
+  if (!resolved.startsWith(realSiteDir)) return null;
+
+  // Try exact file
+  if (existsSync(resolved) && statSync(resolved).isFile()) {
+    return resolved;
+  }
+
+  // Try with index.html for directories
+  if (existsSync(resolved) && statSync(resolved).isDirectory()) {
+    const index = join(resolved, "index.html");
+    if (existsSync(index)) return index;
+  }
+
+  // Try appending .html
+  if (existsSync(resolved + ".html")) {
+    return resolved + ".html";
+  }
+
+  // SPA fallback: serve index.html for any unmatched route
+  if (site.spa) {
+    const spaIndex = join(contentDir, "index.html");
+    if (existsSync(spaIndex)) return spaIndex;
+  }
+
+  return null;
+}
