@@ -15,18 +15,96 @@ export interface RequestLog {
   accept_language: string | null;
 }
 
+// --- Extensions to track parsed browser info ---
+try { db.exec("ALTER TABLE requests ADD COLUMN browser TEXT"); } catch (_) {}
+
 const insertStmt = db.prepare(`
-  INSERT INTO requests (site_slug, path, method, status, response_time_ms, ip, country, city, user_agent, referrer, content_type, accept_language)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO requests (site_slug, path, method, status, response_time_ms, ip, country, city, user_agent, referrer, content_type, accept_language, browser)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
+
+// --- File extensions we DON'T want to track ---
+const SKIP_EXTENSIONS = new Set([
+  ".js", ".css", ".map", ".woff", ".woff2", ".ttf", ".otf", ".eot",
+  ".ico", ".svg",
+]);
+
+export function shouldTrack(path: string): boolean {
+  const ext = path.substring(path.lastIndexOf(".")).toLowerCase();
+  if (SKIP_EXTENSIONS.has(ext)) return false;
+  // Skip admin assets
+  if (path.startsWith("/_admin/") && path !== "/_admin/") return false;
+  return true;
+}
+
+// --- User Agent Parsing ---
+export function parseUserAgent(ua: string | null): string {
+  if (!ua) return "Unknown";
+
+  // Bots
+  if (/googlebot/i.test(ua)) return "Googlebot";
+  if (/bingbot/i.test(ua)) return "Bingbot";
+  if (/yandexbot/i.test(ua)) return "YandexBot";
+  if (/baiduspider/i.test(ua)) return "Baidu Spider";
+  if (/duckduckbot/i.test(ua)) return "DuckDuckBot";
+  if (/slurp/i.test(ua)) return "Yahoo Slurp";
+  if (/facebookexternalhit/i.test(ua)) return "Facebook Bot";
+  if (/twitterbot/i.test(ua)) return "Twitter Bot";
+  if (/linkedinbot/i.test(ua)) return "LinkedIn Bot";
+  if (/bot|crawl|spider|scrape/i.test(ua)) return "Bot";
+  if (/curl/i.test(ua)) return "curl";
+  if (/wget/i.test(ua)) return "wget";
+  if (/python-requests|python-urllib/i.test(ua)) return "Python";
+  if (/Go-http-client/i.test(ua)) return "Go HTTP";
+
+  // Device
+  const isMobile = /Mobile|Android|iPhone|iPad/i.test(ua);
+  const isTablet = /iPad|Tablet/i.test(ua);
+  const device = isTablet ? "Tablet" : isMobile ? "Mobile" : "Desktop";
+
+  // Browser detection (order matters — check specific before generic)
+  let browser = "Unknown";
+  if (/EdgA?\//.test(ua)) browser = "Edge";
+  else if (/OPR\/|Opera/.test(ua)) browser = "Opera";
+  else if (/Brave/.test(ua)) browser = "Brave";
+  else if (/Vivaldi/.test(ua)) browser = "Vivaldi";
+  else if (/SamsungBrowser/.test(ua)) browser = "Samsung Browser";
+  else if (/CriOS/.test(ua)) browser = "Chrome (iOS)";
+  else if (/FxiOS/.test(ua)) browser = "Firefox (iOS)";
+  else if (/Chrome\//.test(ua) && !/Chromium/.test(ua)) browser = "Chrome";
+  else if (/Firefox\//.test(ua)) browser = "Firefox";
+  else if (/Safari\//.test(ua) && /Version\//.test(ua)) browser = "Safari";
+  else if (/MSIE|Trident/.test(ua)) browser = "IE";
+
+  return `${browser} (${device})`;
+}
+
+const MAX_LOG_ROWS = 500_000;
+let logCount = 0;
+let lastPruneCheck = 0;
 
 export function logRequest(log: RequestLog): void {
   try {
+    const browser = parseUserAgent(log.user_agent);
     insertStmt.run(
       log.site_slug, log.path, log.method, log.status, log.response_time_ms,
       log.ip, log.country, log.city, log.user_agent, log.referrer,
-      log.content_type, log.accept_language
+      log.content_type, log.accept_language, browser
     );
+
+    // Periodically prune old logs to prevent unbounded growth
+    logCount++;
+    const now = Date.now();
+    if (logCount >= 1000 || now - lastPruneCheck > 3600_000) {
+      logCount = 0;
+      lastPruneCheck = now;
+      const count = (db.query("SELECT COUNT(*) as cnt FROM requests").get() as any).cnt;
+      if (count > MAX_LOG_ROWS) {
+        db.run(`DELETE FROM requests WHERE id IN (
+          SELECT id FROM requests ORDER BY id ASC LIMIT ?
+        )`, count - MAX_LOG_ROWS);
+      }
+    }
   } catch (e) {
     console.error("Failed to log request:", e);
   }
@@ -43,21 +121,45 @@ export function extractRequestMeta(req: Request) {
   };
 }
 
+// --- Country restriction ---
+export function getAllowedCountries(): string[] {
+  const row = db.query("SELECT value FROM config WHERE key = 'allowed_countries'").get() as { value: string } | null;
+  if (!row || !row.value) return []; // empty = allow all
+  return row.value.split(",").map(c => c.trim().toUpperCase()).filter(Boolean);
+}
+
+export function setAllowedCountries(countries: string[]): void {
+  const value = countries.map(c => c.trim().toUpperCase()).filter(Boolean).join(",");
+  db.run(
+    "INSERT INTO config (key, value) VALUES ('allowed_countries', ?) ON CONFLICT(key) DO UPDATE SET value = ?",
+    value, value
+  );
+}
+
+export function isCountryAllowed(country: string | null): boolean {
+  const allowed = getAllowedCountries();
+  if (allowed.length === 0) return true; // no restriction
+  if (!country) return false; // unknown country blocked when restrictions are active
+  return allowed.includes(country.toUpperCase());
+}
+
 // --- Dashboard queries ---
 
 export function getOverviewStats(hours: number = 24) {
   const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
 
-  const totals = db.query(`
+  const requestStats = db.query(`
     SELECT
       COUNT(*) as total_requests,
       COUNT(DISTINCT ip) as unique_visitors,
-      COUNT(DISTINCT site_slug) as active_sites,
       ROUND(AVG(response_time_ms), 1) as avg_response_ms
     FROM requests WHERE created_at > ?
   `).get(cutoff) as any;
 
-  return totals;
+  // Active sites from the sites table, not requests
+  const siteCount = db.query("SELECT COUNT(*) as count FROM sites WHERE active = 1").get() as any;
+
+  return { ...requestStats, active_sites: siteCount.count };
 }
 
 export function getTopSites(hours: number = 24, limit: number = 10) {
@@ -106,20 +208,37 @@ export function getTopCountries(hours: number = 24, limit: number = 15) {
   `).all(cutoff, limit);
 }
 
-export function getTopUserAgents(hours: number = 24, limit: number = 10) {
+export function getTopBrowsers(hours: number = 24, limit: number = 10) {
   const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
   return db.query(`
-    SELECT user_agent, COUNT(*) as hits
-    FROM requests WHERE created_at > ? AND user_agent IS NOT NULL
-    GROUP BY user_agent ORDER BY hits DESC LIMIT ?
+    SELECT browser, COUNT(*) as hits
+    FROM requests WHERE created_at > ? AND browser IS NOT NULL
+    GROUP BY browser ORDER BY hits DESC LIMIT ?
   `).all(cutoff, limit);
 }
 
-export function getRecentRequests(limit: number = 50) {
+export function getRecentRequests(limit: number = 50, filters: {
+  status?: string;
+  country?: string;
+  site?: string;
+  search?: string;
+} = {}) {
+  let where = "1=1";
+  const params: any[] = [];
+
+  if (filters.status === "4xx") { where += " AND status >= 400 AND status < 500"; }
+  else if (filters.status === "5xx") { where += " AND status >= 500"; }
+  else if (filters.status === "2xx") { where += " AND status >= 200 AND status < 300"; }
+  else if (filters.status === "3xx") { where += " AND status >= 300 AND status < 400"; }
+
+  if (filters.country) { where += " AND country = ?"; params.push(filters.country.toUpperCase()); }
+  if (filters.site) { where += " AND site_slug = ?"; params.push(filters.site); }
+  if (filters.search) { where += " AND path LIKE ?"; params.push(`%${filters.search}%`); }
+
   return db.query(`
-    SELECT site_slug, path, method, status, response_time_ms, ip, country, city, user_agent, referrer, created_at
-    FROM requests ORDER BY id DESC LIMIT ?
-  `).all(limit);
+    SELECT site_slug, path, method, status, response_time_ms, ip, country, city, browser, referrer, created_at
+    FROM requests WHERE ${where} ORDER BY id DESC LIMIT ?
+  `).all(...params, limit);
 }
 
 export function getStatusCodeBreakdown(hours: number = 24) {

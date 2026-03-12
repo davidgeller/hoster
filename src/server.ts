@@ -1,8 +1,14 @@
 import { existsSync, statSync } from "fs";
-import { join } from "path";
+import { join, resolve } from "path";
 import { handleAdminApi } from "./admin-api";
-import { logRequest, extractRequestMeta } from "./analytics";
+import { logRequest, extractRequestMeta, shouldTrack, isCountryAllowed } from "./analytics";
 import { resolveSitePath } from "./sites";
+
+const SECURITY_HEADERS: Record<string, string> = {
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Referrer-Policy": "strict-origin-when-cross-origin",
+};
 
 import { dirname } from "path";
 const BASE_DIR = dirname(process.execPath);
@@ -35,6 +41,13 @@ const MIME_TYPES: Record<string, string> = {
   ".map": "application/json",
 };
 
+function addSecurityHeaders(res: Response): Response {
+  for (const [k, v] of Object.entries(SECURITY_HEADERS)) {
+    res.headers.set(k, v);
+  }
+  return res;
+}
+
 function getMime(path: string): string {
   const ext = path.substring(path.lastIndexOf(".")).toLowerCase();
   return MIME_TYPES[ext] || "application/octet-stream";
@@ -54,7 +67,8 @@ async function serveHtml(filePath: string, slug: string): Promise<Response> {
     });
   } catch (e: any) {
     console.error("serveHtml error:", filePath, e?.message);
-    return new Response("File error: " + e?.message, { status: 500 });
+    console.error("serveHtml file error:", e?.message);
+    return new Response("File error", { status: 500 });
   }
 }
 
@@ -70,7 +84,8 @@ async function serveFile(filePath: string, noCache = false): Promise<Response> {
     });
   } catch (e: any) {
     console.error("serveFile error:", filePath, e?.message);
-    return new Response("File error: " + e?.message, { status: 500 });
+    console.error("serveFile error:", e?.message);
+    return new Response("File error", { status: 500 });
   }
 }
 
@@ -94,13 +109,22 @@ export function createServer(port: number) {
           });
         }
 
+        // --- Country restriction (skip for admin) ---
+        if (!path.startsWith("/_admin")) {
+          if (!isCountryAllowed(meta.country)) {
+            status = 403;
+            logReq();
+            return new Response("Access denied", { status: 403 });
+          }
+        }
+
         // --- Admin API ---
         if (path.startsWith("/_admin/api/")) {
           const res = await handleAdminApi(req, path);
           if (res) {
             status = res.status;
             logReq();
-            return res;
+            return addSecurityHeaders(res);
           }
         }
 
@@ -120,7 +144,10 @@ export function createServer(port: number) {
           let adminPath = path.replace("/_admin", "") || "/index.html";
           if (adminPath === "/") adminPath = "/index.html";
           const adminFile = join(ADMIN_DIR, adminPath);
-          if (adminPath !== "/index.html" && existsSync(adminFile) && statSync(adminFile).isFile()) {
+          // Security: verify resolved path stays within admin directory
+          const resolvedAdmin = resolve(adminFile);
+          const resolvedAdminDir = resolve(ADMIN_DIR);
+          if (adminPath !== "/index.html" && resolvedAdmin.startsWith(resolvedAdminDir + "/") && existsSync(adminFile) && statSync(adminFile).isFile()) {
             logReq();
             return serveFile(adminFile, true);
           }
@@ -163,10 +190,11 @@ export function createServer(port: number) {
         console.error("Request error:", path, e?.message, e?.stack);
         status = 500;
         logReq();
-        return new Response("Internal Server Error: " + (e?.message || "unknown"), { status: 500 });
+        return new Response("Internal Server Error", { status: 500 });
       }
 
       function logReq() {
+        if (!shouldTrack(path)) return;
         const elapsed = performance.now() - start;
         logRequest({
           site_slug: siteSlug,
@@ -186,8 +214,8 @@ export function createServer(port: number) {
     },
     error(err) {
       const msg = err?.stack || err?.message || String(err);
-      Bun.write(join(process.cwd(), "error.log"), new Date().toISOString() + " " + msg + "\n");
-      return new Response(msg, { status: 500 });
+      console.error("Unhandled error:", msg);
+      return new Response("Internal Server Error", { status: 500 });
     },
   });
 }

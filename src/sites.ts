@@ -1,5 +1,5 @@
 import db from "./db";
-import { mkdirSync, rmSync, existsSync, readdirSync, statSync, symlinkSync, readlinkSync, unlinkSync } from "fs";
+import { mkdirSync, rmSync, existsSync, readdirSync, statSync, symlinkSync, readlinkSync, unlinkSync, realpathSync, lstatSync } from "fs";
 import { join, resolve } from "path";
 
 import { dirname } from "path";
@@ -84,6 +84,35 @@ function calcDirStats(dir: string): { size: number; count: number } {
   return { size, count };
 }
 
+function removeSymlinks(dir: string): void {
+  if (!existsSync(dir)) return;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isSymbolicLink()) {
+      unlinkSync(full);
+    } else if (entry.isDirectory()) {
+      removeSymlinks(full);
+    }
+  }
+}
+
+function verifyNoEscape(dir: string): void {
+  const realDir = realpathSync(dir);
+  function walk(d: string) {
+    if (!existsSync(d)) return;
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      const full = join(d, entry.name);
+      const realPath = realpathSync(full);
+      if (!realPath.startsWith(realDir)) {
+        rmSync(full, { recursive: true, force: true });
+      } else if (entry.isDirectory()) {
+        walk(full);
+      }
+    }
+  }
+  walk(dir);
+}
+
 function generateVersion(): string {
   const now = new Date();
   return now.toISOString().replace(/[-:T]/g, "").replace(/\..+/, ""); // 20260311143022
@@ -100,6 +129,8 @@ function updateCurrentSymlink(slug: string, version: string) {
   symlinkSync(versionDir, currentLink);
 }
 
+const MAX_UPLOAD_SIZE = 500 * 1024 * 1024; // 500 MB
+
 export async function deploySite(slug: string, name: string, zipBuffer: ArrayBuffer, label?: string): Promise<{ site: Site; version: SiteVersion }> {
   // Validate slug
   if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(slug)) {
@@ -108,6 +139,9 @@ export async function deploySite(slug: string, name: string, zipBuffer: ArrayBuf
   if (slug.startsWith("_")) {
     throw new Error("Slugs starting with _ are reserved");
   }
+  if (zipBuffer.byteLength > MAX_UPLOAD_SIZE) {
+    throw new Error("Upload exceeds maximum size of 500 MB");
+  }
 
   const version = generateVersion();
   const siteDir = join(SITES_DIR, slug);
@@ -115,7 +149,7 @@ export async function deploySite(slug: string, name: string, zipBuffer: ArrayBuf
 
   mkdirSync(versionDir, { recursive: true });
 
-  // Extract zip
+  // Extract zip (exclude entries with path traversal or symlinks)
   const tmpZip = join(versionDir, "__upload.zip");
   await Bun.write(tmpZip, zipBuffer);
 
@@ -125,6 +159,13 @@ export async function deploySite(slug: string, name: string, zipBuffer: ArrayBuf
   });
   await proc.exited;
   rmSync(tmpZip);
+
+  // Security: remove any symlinks that might have been in the zip
+  removeSymlinks(versionDir);
+
+  // Security: verify no files escaped the version directory
+  // (zip slip via ../ entries)
+  verifyNoEscape(versionDir);
 
   // Check if zip contained a single root folder — hoist its contents
   const entries = readdirSync(versionDir, { withFileTypes: true });
@@ -284,24 +325,32 @@ export function resolveSitePath(slug: string, filePath: string): string | null {
 
   let resolved = resolve(contentDir, filePath);
 
-  // Security: prevent path traversal
+  // Security: prevent path traversal (check both logical and real paths)
   const realSiteDir = resolve(SITES_DIR, slug);
   if (!resolved.startsWith(realSiteDir)) return null;
 
   // Try exact file
   if (existsSync(resolved) && statSync(resolved).isFile()) {
+    // Security: resolve symlinks and verify real path is still within site dir
+    const realPath = realpathSync(resolved);
+    if (!realPath.startsWith(realpathSync(realSiteDir))) return null;
     return resolved;
   }
 
   // Try with index.html for directories
   if (existsSync(resolved) && statSync(resolved).isDirectory()) {
     const index = join(resolved, "index.html");
-    if (existsSync(index)) return index;
+    if (existsSync(index)) {
+      const realPath = realpathSync(index);
+      if (realPath.startsWith(realpathSync(realSiteDir))) return index;
+    }
   }
 
   // Try appending .html
-  if (existsSync(resolved + ".html")) {
-    return resolved + ".html";
+  const htmlPath = resolved + ".html";
+  if (existsSync(htmlPath)) {
+    const realPath = realpathSync(htmlPath);
+    if (realPath.startsWith(realpathSync(realSiteDir))) return htmlPath;
   }
 
   // SPA fallback: serve index.html for any unmatched route

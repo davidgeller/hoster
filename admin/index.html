@@ -180,8 +180,8 @@
             <div id="analytics-paths"></div>
           </div>
           <div class="card">
-            <h3>User Agents</h3>
-            <div id="analytics-agents"></div>
+            <h3>Browsers</h3>
+            <div id="analytics-browsers"></div>
           </div>
         </div>
 
@@ -191,6 +191,26 @@
             <h1>Recent Requests</h1>
             <button class="btn btn-ghost" id="refresh-logs">Refresh</button>
           </div>
+          <div class="card" style="margin-bottom:16px">
+            <div class="log-filters">
+              <select id="log-filter-status">
+                <option value="">All Status</option>
+                <option value="2xx">2xx Success</option>
+                <option value="3xx">3xx Redirect</option>
+                <option value="4xx">4xx Client Error</option>
+                <option value="5xx">5xx Server Error</option>
+              </select>
+              <select id="log-filter-country">
+                <option value="">All Countries</option>
+              </select>
+              <select id="log-filter-site">
+                <option value="">All Sites</option>
+              </select>
+              <input type="text" id="log-filter-search" placeholder="Search paths..." style="max-width:200px">
+              <button class="btn btn-sm" id="apply-log-filters">Filter</button>
+              <button class="btn btn-sm btn-ghost" id="clear-log-filters">Clear</button>
+            </div>
+          </div>
           <div class="card table-wrap">
             <table id="logs-table">
               <thead>
@@ -199,6 +219,7 @@
                   <th>Method</th>
                   <th>Path</th>
                   <th>Status</th>
+                  <th>Browser</th>
                   <th>IP</th>
                   <th>Country</th>
                   <th>Speed</th>
@@ -232,6 +253,19 @@
               <button type="submit" class="btn btn-primary">Update Password</button>
               <div class="form-error" id="pw-error"></div>
               <div class="form-success" id="pw-success"></div>
+            </form>
+          </div>
+          <div class="card mt-4" style="max-width:480px">
+            <h3>Country Restrictions</h3>
+            <p class="text-sm text-muted mb-2">Only allow requests from specific countries. Leave empty to allow all. Uses 2-letter ISO country codes (e.g., US, GB, CA). Admin panel is always accessible.</p>
+            <form id="country-form">
+              <label>
+                Allowed Countries
+                <input type="text" id="allowed-countries" placeholder="US, GB, CA (empty = allow all)">
+              </label>
+              <button type="submit" class="btn btn-primary">Save</button>
+              <div class="form-error" id="country-error"></div>
+              <div class="form-success" id="country-success"></div>
             </form>
           </div>
         </div>

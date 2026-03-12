@@ -219,13 +219,53 @@ Runtime directories (created on the Pi, not in git):
 
 ## Security
 
-- Admin password is hashed with **Argon2id** (memory-hard, GPU-resistant)
-- Sessions use 256-bit random tokens with configurable expiration (default 72h)
-- Login is **rate-limited** (5 attempts per 15 minutes per IP)
-- Session cookies are `HttpOnly`, `Secure`, `SameSite=Strict`
-- Path traversal protection on all file serving
-- No ports exposed — all traffic goes through Cloudflare's encrypted tunnel
-- Cloudflare provides DDoS protection, WAF, and bot management at the edge
+Hoster is designed to be safe for public exposure. Since the source code is public, security relies on defense in depth rather than obscurity.
+
+### Authentication & Sessions
+
+- Admin password hashed with **Argon2id** (memory-hard, GPU-resistant; memoryCost=64KB, timeCost=3)
+- 256-bit cryptographically random session tokens
+- Session cookies are `HttpOnly`, `Secure`, `SameSite=Strict` — immune to XSS theft and CSRF
+- Login **rate-limited** to 5 attempts per 15 minutes per IP, with automatic lockout
+- Password change requires current password verification
+
+### Network & Transport
+
+- **No open ports** — all traffic enters through Cloudflare's encrypted tunnel
+- Cloudflare provides DDoS protection, WAF, bot management, and IP reputation filtering at the edge
+- Country-based access restriction (configurable, uses Cloudflare's `cf-ipcountry` header)
+- Security headers on responses: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`
+
+### File Serving & Path Traversal
+
+- All file paths validated with `resolve()` + `startsWith()` to prevent directory traversal
+- **Symlink resolution** — served files are verified via `realpathSync()` to ensure symlinks don't escape the site directory
+- Admin static file paths are bounds-checked against the admin directory
+- URL pathname normalization by the URL parser prevents encoded traversal (`%2e%2e`, etc.)
+
+### Upload & Deployment
+
+- Uploaded ZIPs are size-limited (500 MB max)
+- After extraction, all **symlinks are removed** to prevent symlink-based escapes
+- Post-extraction verification ensures no files escaped the target directory (zip slip protection)
+- Site slugs validated against strict regex (`[a-z0-9-]+`, no leading/trailing hyphens)
+
+### Data Protection
+
+- Error responses return generic messages — no stack traces, file paths, or SQL details leak to clients
+- Errors logged server-side only (visible via `journalctl`)
+- Request logs auto-rotate at 500K rows to prevent disk exhaustion
+- All SQL queries use parameterized statements (no SQL injection)
+- XSS protection via HTML entity escaping on all user-controlled output
+
+### What Cloudflare Handles
+
+- TLS termination (free SSL certificates)
+- DDoS mitigation and rate limiting
+- Bot detection and challenge pages
+- IP reputation and threat intelligence
+- HTTP/2 and HTTP/3 support
+- Edge caching (configurable per-path)
 
 ## Analytics
 

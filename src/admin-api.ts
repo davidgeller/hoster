@@ -6,8 +6,9 @@ import {
 import { listSites, getSite, deploySite, deleteSite, toggleSite, listVersions, switchVersion, deleteVersion, updateSiteSettings } from "./sites";
 import {
   getOverviewStats, getTopSites, getTopPaths, getTrafficOverTime,
-  getTopCountries, getTopUserAgents, getRecentRequests,
-  getStatusCodeBreakdown, getSiteStats
+  getTopCountries, getTopBrowsers, getRecentRequests,
+  getStatusCodeBreakdown, getSiteStats,
+  getAllowedCountries, setAllowedCountries
 } from "./analytics";
 
 function json(data: any, status = 200, headers: Record<string, string> = {}): Response {
@@ -179,9 +180,9 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     return json(getTopCountries(hours));
   }
 
-  if (path === "/_admin/api/analytics/user-agents") {
+  if (path === "/_admin/api/analytics/browsers") {
     const hours = parseInt(new URL(req.url).searchParams.get("hours") || "24");
-    return json(getTopUserAgents(hours));
+    return json(getTopBrowsers(hours));
   }
 
   if (path === "/_admin/api/analytics/status-codes") {
@@ -190,14 +191,31 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   }
 
   if (path === "/_admin/api/analytics/recent") {
-    const limit = parseInt(new URL(req.url).searchParams.get("limit") || "50");
-    return json(getRecentRequests(limit));
+    const url = new URL(req.url);
+    const limit = parseInt(url.searchParams.get("limit") || "100");
+    const filters = {
+      status: url.searchParams.get("status") || undefined,
+      country: url.searchParams.get("country") || undefined,
+      site: url.searchParams.get("site") || undefined,
+      search: url.searchParams.get("search") || undefined,
+    };
+    return json(getRecentRequests(limit, filters));
   }
 
   const siteStatsMatch = path.match(/^\/_admin\/api\/analytics\/site\/([a-z0-9-]+)$/);
   if (siteStatsMatch) {
     const hours = parseInt(new URL(req.url).searchParams.get("hours") || "24");
     return json(getSiteStats(siteStatsMatch[1], hours));
+  }
+
+  // --- Country restriction settings ---
+  if (path === "/_admin/api/settings/countries" && req.method === "GET") {
+    return json({ countries: getAllowedCountries() });
+  }
+  if (path === "/_admin/api/settings/countries" && req.method === "POST") {
+    const body = await req.json() as { countries?: string[] };
+    setAllowedCountries(body.countries || []);
+    return json({ ok: true, countries: getAllowedCountries() });
   }
 
   // --- Session cleanup ---

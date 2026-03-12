@@ -760,3 +760,19 @@ tr:hover td { background: var(--bg-hover); }
 .mt-4 { margin-top: 16px; }
 .mb-2 { margin-bottom: 8px; }
 .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; }
+
+/* --- Log Filters --- */
+.log-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.log-filters select,
+.log-filters input[type="text"] {
+  width: auto;
+  padding: 6px 10px;
+  font-size: 0.82rem;
+  margin: 0;
+}

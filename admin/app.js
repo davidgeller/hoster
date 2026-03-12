@@ -199,6 +199,37 @@ document.addEventListener("DOMContentLoaded", async () => {
       e.target.reset();
     } catch (err) { errEl.textContent = err.message; }
   });
+
+  // --- Log filters ---
+  document.getElementById("apply-log-filters").addEventListener("click", () => loadLogs());
+  document.getElementById("clear-log-filters").addEventListener("click", () => {
+    document.getElementById("log-filter-status").value = "";
+    document.getElementById("log-filter-country").value = "";
+    document.getElementById("log-filter-site").value = "";
+    document.getElementById("log-filter-search").value = "";
+    loadLogs();
+  });
+  document.getElementById("log-filter-search").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); loadLogs(); }
+  });
+
+  // --- Country restriction form ---
+  document.getElementById("country-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const errEl = document.getElementById("country-error");
+    const successEl = document.getElementById("country-success");
+    errEl.textContent = "";
+    successEl.textContent = "";
+    const input = document.getElementById("allowed-countries").value.trim();
+    const countries = input ? input.split(",").map(c => c.trim().toUpperCase()).filter(Boolean) : [];
+    try {
+      await api("/settings/countries", {
+        method: "POST",
+        body: JSON.stringify({ countries }),
+      });
+      successEl.textContent = countries.length ? `Restricted to: ${countries.join(", ")}` : "All countries allowed";
+    } catch (err) { errEl.textContent = err.message; }
+  });
 });
 
 function showScreen(id) {
@@ -218,7 +249,15 @@ function navigateTo(view) {
   else if (view === "sites") loadSites();
   else if (view === "analytics") loadAnalytics();
   else if (view === "logs") loadLogs();
+  else if (view === "settings") loadSettings();
   else if (view === "about") loadAbout();
+}
+
+async function loadSettings() {
+  try {
+    const data = await api("/settings/countries");
+    document.getElementById("allowed-countries").value = (data.countries || []).join(", ");
+  } catch (_) {}
 }
 
 async function loadAbout() {
@@ -441,22 +480,37 @@ window.confirmDeleteSite = async function (slug) {
 async function loadAnalytics() {
   const hours = document.getElementById("analytics-range").value;
 
-  const [paths, agents] = await Promise.all([
+  const [paths, browsers] = await Promise.all([
     api(`/analytics/top-paths?hours=${hours}`),
-    api(`/analytics/user-agents?hours=${hours}`),
+    api(`/analytics/browsers?hours=${hours}`),
   ]);
 
   renderRankedList("analytics-paths", paths, "path", "hits");
-  renderRankedList("analytics-agents", agents, "user_agent", "hits", true);
+  renderRankedList("analytics-browsers", browsers, "browser", "hits");
 }
 
 // --- Logs ---
 async function loadLogs() {
-  const logs = await api("/analytics/recent?limit=100");
+  // Build query string from filters
+  const params = new URLSearchParams({ limit: "200" });
+  const statusFilter = document.getElementById("log-filter-status").value;
+  const countryFilter = document.getElementById("log-filter-country").value;
+  const siteFilter = document.getElementById("log-filter-site").value;
+  const searchFilter = document.getElementById("log-filter-search").value.trim();
+
+  if (statusFilter) params.set("status", statusFilter);
+  if (countryFilter) params.set("country", countryFilter);
+  if (siteFilter) params.set("site", siteFilter);
+  if (searchFilter) params.set("search", searchFilter);
+
+  const logs = await api(`/analytics/recent?${params}`);
   const tbody = document.getElementById("logs-body");
 
+  // Populate filter dropdowns with unique values from results
+  populateLogFilterOptions(logs);
+
   if (!logs.length) {
-    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:24px;color:var(--text-muted)">No requests logged yet</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:24px;color:var(--text-muted)">No matching requests</td></tr>`;
     return;
   }
 
@@ -468,12 +522,29 @@ async function loadLogs() {
         <td>${r.method}</td>
         <td class="truncate" title="${esc(r.path)}">${esc(r.path)}</td>
         <td><span class="status-badge ${statusClass}">${r.status}</span></td>
+        <td class="text-sm">${esc(r.browser || "—")}</td>
         <td class="text-mono text-sm">${esc(r.ip)}</td>
         <td>${r.country || "—"}</td>
         <td class="text-mono text-sm">${r.response_time_ms?.toFixed(1) ?? "—"}ms</td>
       </tr>
     `;
   }).join("");
+}
+
+function populateLogFilterOptions(logs) {
+  // Countries
+  const countrySelect = document.getElementById("log-filter-country");
+  const currentCountry = countrySelect.value;
+  const countries = [...new Set(logs.map(r => r.country).filter(Boolean))].sort();
+  countrySelect.innerHTML = '<option value="">All Countries</option>' +
+    countries.map(c => `<option value="${esc(c)}" ${c === currentCountry ? "selected" : ""}>${esc(c)}</option>`).join("");
+
+  // Sites
+  const siteSelect = document.getElementById("log-filter-site");
+  const currentSite = siteSelect.value;
+  const sites = [...new Set(logs.map(r => r.site_slug).filter(Boolean))].sort();
+  siteSelect.innerHTML = '<option value="">All Sites</option>' +
+    sites.map(s => `<option value="${esc(s)}" ${s === currentSite ? "selected" : ""}>${esc(s)}</option>`).join("");
 }
 
 // --- Render Helpers ---
