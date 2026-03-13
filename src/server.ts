@@ -175,11 +175,12 @@ export function createServer(port: number) {
           return new Response(null, { status: 302, headers: { Location: "/_admin" } });
         }
 
-        siteSlug = parts[0];
+        const candidateSlug = parts[0];
         const filePath = parts.slice(1).join("/") || "index.html";
-        const resolved = resolveSitePath(siteSlug, filePath);
+        const resolved = resolveSitePath(candidateSlug, filePath);
 
         if (resolved) {
+          siteSlug = candidateSlug;
           logReq();
           // For HTML files, rewrite <base href="/"> to <base href="/slug/">
           if (resolved.endsWith(".html")) {

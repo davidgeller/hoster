@@ -10,7 +10,7 @@ Upload a ZIP file through the web admin panel and your site is live at `https://
 - **Web admin panel** — deploy, update, and manage sites from anywhere
 - **Version management** — each upload creates a new version; roll back instantly
 - **SPA support** — auto-detects Angular, React, and Vue builds; rewrites `<base href>` for subpath hosting
-- **Analytics dashboard** — request logs, visitor stats, countries, top pages, status codes
+- **Analytics dashboard** — request logs, visitor stats, countries, top pages, status codes, blocked request intelligence
 - **Secure auth** — Argon2id password hashing, session tokens, rate-limited login
 - **Light/Dark/Auto themes** — admin panel respects system preference
 - **Single binary** — compiles to a standalone executable with no runtime dependencies
@@ -342,6 +342,17 @@ Hoster captures request metadata for every visitor:
 - All data stored locally in SQLite — nothing sent to third parties
 
 The admin dashboard shows traffic over time, top sites, top paths, countries, status codes, and recent request logs.
+
+### Blocked Request Intelligence
+
+When country restrictions are active, the dashboard surfaces blocked request data to help identify bad actors:
+
+- **Blocked Requests card** — total blocked count prominently displayed in dashboard stats
+- **Blocked Countries** — which restricted countries are generating the most requests, with unique IP counts
+- **Blocked Paths** — most-targeted paths that were denied, revealing scanning or attack patterns
+- **Top Blocked IPs** — repeat offenders ranked by request volume
+- **Log viewer chips** — blocked requests in the log table are tagged with a red "Blocked" chip for quick identification
+- **Dedicated filter** — filter the log viewer to show only 403 Blocked requests
 
 ## Multiple Services on One Device
 

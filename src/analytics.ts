@@ -226,7 +226,8 @@ export function getRecentRequests(limit: number = 50, filters: {
   let where = "1=1";
   const params: any[] = [];
 
-  if (filters.status === "4xx") { where += " AND status >= 400 AND status < 500"; }
+  if (filters.status === "blocked") { where += " AND status = 403"; }
+  else if (filters.status === "4xx") { where += " AND status >= 400 AND status < 500"; }
   else if (filters.status === "5xx") { where += " AND status >= 500"; }
   else if (filters.status === "2xx") { where += " AND status >= 200 AND status < 300"; }
   else if (filters.status === "3xx") { where += " AND status >= 300 AND status < 400"; }
@@ -256,6 +257,34 @@ export function getStatusCodeBreakdown(hours: number = 24) {
     FROM requests WHERE created_at > ?
     GROUP BY status_group ORDER BY status_group
   `).all(cutoff);
+}
+
+export function getBlockedRequests(hours: number = 24, limit: number = 10) {
+  const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+
+  const totalBlocked = db.query(`
+    SELECT COUNT(*) as count FROM requests WHERE created_at > ? AND status = 403
+  `).get(cutoff) as any;
+
+  const blockedCountries = db.query(`
+    SELECT country, COUNT(*) as hits, COUNT(DISTINCT ip) as ips
+    FROM requests WHERE created_at > ? AND status = 403 AND country IS NOT NULL
+    GROUP BY country ORDER BY hits DESC LIMIT ?
+  `).all(cutoff, limit);
+
+  const blockedPaths = db.query(`
+    SELECT path, COUNT(*) as hits, COUNT(DISTINCT ip) as ips
+    FROM requests WHERE created_at > ? AND status = 403
+    GROUP BY path ORDER BY hits DESC LIMIT ?
+  `).all(cutoff, limit);
+
+  const blockedIps = db.query(`
+    SELECT ip, country, COUNT(*) as hits
+    FROM requests WHERE created_at > ? AND status = 403
+    GROUP BY ip ORDER BY hits DESC LIMIT ?
+  `).all(cutoff, limit);
+
+  return { total: totalBlocked.count, countries: blockedCountries, paths: blockedPaths, ips: blockedIps };
 }
 
 export function getSiteStats(slug: string, hours: number = 24) {

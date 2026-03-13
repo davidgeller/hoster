@@ -396,8 +396,14 @@ function getMcpConfigJson(token) {
   }, null, 2);
 }
 
+function getMcpCliCommand(token) {
+  const origin = window.location.origin;
+  return `claude mcp add --transport http hoster ${origin}/_mcp --header "Authorization: Bearer ${token}"`;
+}
+
 function showMcpToken(token) {
   const configJson = getMcpConfigJson(token);
+  const cliCommand = getMcpCliCommand(token);
   const modal = document.createElement("div");
   modal.className = "modal";
   modal.innerHTML = `
@@ -406,12 +412,19 @@ function showMcpToken(token) {
       <h2>MCP Token Generated</h2>
       <p style="margin-bottom:12px;color:var(--text-muted)">Copy this token now — it won't be shown again.</p>
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-family:monospace;font-size:0.85rem;word-break:break-all;margin-bottom:16px;user-select:all">${esc(token)}</div>
-      <h3 style="font-size:0.9rem;margin-bottom:8px">MCP Configuration</h3>
-      <p class="text-sm text-muted" style="margin-bottom:8px">Add this to your AI tool's MCP settings (e.g. Claude Code <code>settings.json</code>, Cursor, etc.):</p>
-      <pre style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:0.8rem;overflow-x:auto;margin-bottom:16px;white-space:pre-wrap">${esc(configJson)}</pre>
+
+      <h3 style="font-size:0.9rem;margin-bottom:8px">Option 1: JSON Config</h3>
+      <p class="text-sm text-muted" style="margin-bottom:8px">Add to your AI tool's MCP settings (e.g. Claude Code <code>settings.json</code>, Cursor, etc.):</p>
+      <pre style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:0.8rem;overflow-x:auto;margin-bottom:8px;white-space:pre-wrap">${esc(configJson)}</pre>
+      <button class="btn btn-sm" id="mcp-copy-config" style="margin-bottom:16px">Copy JSON</button>
+
+      <h3 style="font-size:0.9rem;margin-bottom:8px">Option 2: Claude Code CLI</h3>
+      <pre style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:0.8rem;overflow-x:auto;margin-bottom:8px;white-space:pre-wrap">${esc(cliCommand)}</pre>
+      <button class="btn btn-sm" id="mcp-copy-cli" style="margin-bottom:16px">Copy Command</button>
+
+      <p class="text-sm text-muted" style="margin-bottom:16px">Restart your AI tool after adding the config.</p>
       <div class="modal-actions" style="gap:8px">
-        <button class="btn btn-sm" id="mcp-copy-token">Copy Token</button>
-        <button class="btn btn-sm btn-primary" id="mcp-copy-config">Copy Config</button>
+        <button class="btn btn-sm" id="mcp-copy-token">Copy Token Only</button>
         <button class="btn btn-ghost close-modal">Close</button>
       </div>
     </div>
@@ -427,23 +440,18 @@ function showMcpToken(token) {
     navigator.clipboard.writeText(configJson);
     modal.querySelector("#mcp-copy-config").textContent = "Copied!";
   });
+  modal.querySelector("#mcp-copy-cli").addEventListener("click", () => {
+    navigator.clipboard.writeText(cliCommand);
+    modal.querySelector("#mcp-copy-cli").textContent = "Copied!";
+  });
 }
 
 function showMcpSetup() {
   const origin = window.location.origin;
-  const configTemplate = JSON.stringify({
-    mcpServers: {
-      hoster: {
-        type: "http",
-        url: `${origin}/_mcp`,
-        headers: {
-          Authorization: "Bearer <your-token>",
-        },
-      },
-    },
-  }, null, 2);
+  const placeholder = "<your-token>";
 
-  const cliCommand = `claude mcp add --transport http hoster ${origin}/_mcp --header "Authorization: Bearer <your-token>"`;
+  function buildConfig(token) { return getMcpConfigJson(token); }
+  function buildCli(token) { return getMcpCliCommand(token); }
 
   const modal = document.createElement("div");
   modal.className = "modal";
@@ -451,18 +459,21 @@ function showMcpSetup() {
     <div class="modal-backdrop"></div>
     <div class="modal-content" style="max-width:600px">
       <h2>MCP Setup Instructions</h2>
-      <p class="text-sm text-muted" style="margin-bottom:16px">Connect your AI tool to this Hoster instance via the Model Context Protocol (MCP). You'll need an access token — generate one above if you haven't already.</p>
+      <p class="text-sm text-muted" style="margin-bottom:16px">Connect your AI tool to this Hoster instance via the Model Context Protocol (MCP).</p>
+
+      <label style="font-size:0.85rem;font-weight:500;display:block;margin-bottom:4px">Your Token</label>
+      <input type="text" id="mcp-setup-token-input" placeholder="Paste your MCP token here" style="width:100%;padding:8px 10px;font-family:monospace;font-size:0.85rem;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);margin-bottom:16px;box-sizing:border-box">
 
       <h3 style="font-size:0.9rem;margin-bottom:8px">Option 1: JSON Config</h3>
       <p class="text-sm text-muted" style="margin-bottom:8px">Add to your tool's MCP settings file (e.g. Claude Code <code>settings.json</code>, Cursor config, etc.):</p>
-      <pre id="mcp-setup-json" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:0.8rem;overflow-x:auto;margin-bottom:8px;white-space:pre-wrap">${esc(configTemplate)}</pre>
+      <pre id="mcp-setup-json" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:0.8rem;overflow-x:auto;margin-bottom:8px;white-space:pre-wrap">${esc(buildConfig(placeholder))}</pre>
       <button class="btn btn-sm" id="mcp-copy-setup-json" style="margin-bottom:16px">Copy JSON</button>
 
       <h3 style="font-size:0.9rem;margin-bottom:8px">Option 2: Claude Code CLI</h3>
-      <pre id="mcp-setup-cli" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:0.8rem;overflow-x:auto;margin-bottom:8px;white-space:pre-wrap">${esc(cliCommand)}</pre>
+      <pre id="mcp-setup-cli" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:0.8rem;overflow-x:auto;margin-bottom:8px;white-space:pre-wrap">${esc(buildCli(placeholder))}</pre>
       <button class="btn btn-sm" id="mcp-copy-setup-cli" style="margin-bottom:16px">Copy Command</button>
 
-      <p class="text-sm text-muted" style="margin-bottom:16px">Replace <code>&lt;your-token&gt;</code> with the token shown when you generate one. Restart your AI tool after adding the config.</p>
+      <p class="text-sm text-muted" style="margin-bottom:16px">Paste your token above to fill in the config, then copy. Restart your AI tool after adding the config.</p>
 
       <div class="modal-actions">
         <button class="btn btn-ghost close-modal">Close</button>
@@ -472,12 +483,26 @@ function showMcpSetup() {
   document.body.appendChild(modal);
   modal.querySelector(".modal-backdrop").addEventListener("click", () => modal.remove());
   modal.querySelector(".close-modal").addEventListener("click", () => modal.remove());
+
+  const tokenInput = modal.querySelector("#mcp-setup-token-input");
+  const jsonPre = modal.querySelector("#mcp-setup-json");
+  const cliPre = modal.querySelector("#mcp-setup-cli");
+
+  function updateConfigs() {
+    const token = tokenInput.value.trim() || placeholder;
+    jsonPre.textContent = buildConfig(token);
+    cliPre.textContent = buildCli(token);
+  }
+  tokenInput.addEventListener("input", updateConfigs);
+
   modal.querySelector("#mcp-copy-setup-json").addEventListener("click", () => {
-    navigator.clipboard.writeText(configTemplate);
+    const token = tokenInput.value.trim() || placeholder;
+    navigator.clipboard.writeText(buildConfig(token));
     modal.querySelector("#mcp-copy-setup-json").textContent = "Copied!";
   });
   modal.querySelector("#mcp-copy-setup-cli").addEventListener("click", () => {
-    navigator.clipboard.writeText(cliCommand);
+    const token = tokenInput.value.trim() || placeholder;
+    navigator.clipboard.writeText(buildCli(token));
     modal.querySelector("#mcp-copy-setup-cli").textContent = "Copied!";
   });
 }
@@ -500,12 +525,13 @@ function closeUploadModal() {
 async function loadDashboard() {
   const hours = document.getElementById("dash-range").value;
 
-  const [overview, topSites, traffic, countries, statusCodes] = await Promise.all([
+  const [overview, topSites, traffic, countries, statusCodes, blocked] = await Promise.all([
     api(`/analytics/overview?hours=${hours}`),
     api(`/analytics/top-sites?hours=${hours}`),
     api(`/analytics/traffic?hours=${hours}`),
     api(`/analytics/countries?hours=${hours}`),
     api(`/analytics/status-codes?hours=${hours}`),
+    api(`/analytics/blocked?hours=${hours}`),
   ]);
 
   // Stats cards
@@ -514,6 +540,7 @@ async function loadDashboard() {
     <div class="stat-card"><div class="stat-label">Unique Visitors</div><div class="stat-value">${fmt(overview.unique_visitors)}</div></div>
     <div class="stat-card"><div class="stat-label">Active Sites</div><div class="stat-value">${fmt(overview.active_sites)}</div></div>
     <div class="stat-card"><div class="stat-label">Avg Response</div><div class="stat-value">${overview.avg_response_ms ?? 0}ms</div></div>
+    ${blocked.total > 0 ? `<div class="stat-card stat-card-blocked"><div class="stat-label">Blocked</div><div class="stat-value">${fmt(blocked.total)}</div></div>` : ""}
   `;
 
   // Traffic chart
@@ -527,6 +554,66 @@ async function loadDashboard() {
 
   // Status codes
   renderRankedList("dash-status-codes", statusCodes, "status_group", "count");
+
+  // Blocked requests section
+  const blockedEl = document.getElementById("dash-blocked");
+  if (blockedEl) {
+    if (blocked.total === 0) {
+      blockedEl.innerHTML = '<div class="empty-state"><p>No blocked requests</p></div>';
+    } else {
+      let html = "";
+
+      if (blocked.countries.length) {
+        html += `<h4 style="margin:0 0 8px;font-size:0.85rem;color:var(--text-muted)">Blocked Countries</h4>`;
+        html += `<ul class="ranked-list" style="margin-bottom:16px">`;
+        const maxC = Math.max(...blocked.countries.map(c => c.hits), 1);
+        for (const c of blocked.countries) {
+          html += `<li class="ranked-item">
+            <div style="flex:1;min-width:0">
+              <span class="label">${esc(c.country || "Unknown")}</span>
+              <span class="ranked-bar ranked-bar-blocked" style="width:${(c.hits / maxC) * 100}%"></span>
+            </div>
+            <span class="value" style="white-space:nowrap">${fmt(c.hits)} <span class="text-sm text-muted">(${c.ips} IP${c.ips !== 1 ? "s" : ""})</span></span>
+          </li>`;
+        }
+        html += `</ul>`;
+      }
+
+      if (blocked.paths.length) {
+        html += `<h4 style="margin:0 0 8px;font-size:0.85rem;color:var(--text-muted)">Blocked Paths</h4>`;
+        html += `<ul class="ranked-list" style="margin-bottom:16px">`;
+        const maxP = Math.max(...blocked.paths.map(p => p.hits), 1);
+        for (const p of blocked.paths) {
+          html += `<li class="ranked-item">
+            <div style="flex:1;min-width:0">
+              <span class="label truncate" title="${esc(p.path)}">${esc(p.path)}</span>
+              <span class="ranked-bar ranked-bar-blocked" style="width:${(p.hits / maxP) * 100}%"></span>
+            </div>
+            <span class="value">${fmt(p.hits)}</span>
+          </li>`;
+        }
+        html += `</ul>`;
+      }
+
+      if (blocked.ips.length) {
+        html += `<h4 style="margin:0 0 8px;font-size:0.85rem;color:var(--text-muted)">Top Blocked IPs</h4>`;
+        html += `<ul class="ranked-list">`;
+        const maxI = Math.max(...blocked.ips.map(i => i.hits), 1);
+        for (const i of blocked.ips) {
+          html += `<li class="ranked-item">
+            <div style="flex:1;min-width:0">
+              <span class="label text-mono">${esc(i.ip)}</span> <span class="text-sm text-muted">${esc(i.country || "")}</span>
+              <span class="ranked-bar ranked-bar-blocked" style="width:${(i.hits / maxI) * 100}%"></span>
+            </div>
+            <span class="value">${fmt(i.hits)}</span>
+          </li>`;
+        }
+        html += `</ul>`;
+      }
+
+      blockedEl.innerHTML = html;
+    }
+  }
 }
 
 // --- Sites ---
@@ -749,12 +836,13 @@ async function loadLogs() {
 
   tbody.innerHTML = logs.map((r) => {
     const statusClass = r.status < 300 ? "status-2xx" : r.status < 400 ? "status-3xx" : r.status < 500 ? "status-4xx" : "status-5xx";
+    const isBlocked = r.status === 403;
     return `
-      <tr>
+      <tr${isBlocked ? ' class="row-blocked"' : ""}>
         <td>${timeAgo(r.created_at)}</td>
         <td>${r.method}</td>
         <td class="truncate" title="${esc(r.path)}">${esc(r.path)}</td>
-        <td><span class="status-badge ${statusClass}">${r.status}</span></td>
+        <td><span class="status-badge ${statusClass}">${r.status}</span>${isBlocked ? ' <span class="chip-blocked">Blocked</span>' : ""}</td>
         <td class="text-sm">${esc(r.browser || "—")}</td>
         <td class="text-mono text-sm">${esc(r.ip)}</td>
         <td>${r.country || "—"}</td>

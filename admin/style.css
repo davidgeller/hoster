@@ -537,6 +537,36 @@ tr:hover td { background: var(--bg-hover); }
 .status-4xx { background: var(--warning-bg); color: var(--warning); }
 .status-5xx { background: var(--danger-bg); color: var(--danger); }
 
+/* --- Blocked chip & styles --- */
+.chip-blocked {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: var(--danger-bg);
+  color: var(--danger);
+  vertical-align: middle;
+  margin-left: 4px;
+}
+
+.row-blocked td { opacity: 0.85; }
+
+.stat-card-blocked {
+  border-left: 3px solid var(--danger);
+}
+.stat-card-blocked .stat-value { color: var(--danger); }
+
+.card-blocked { border-top: 2px solid var(--danger); }
+.card-blocked h3 { color: var(--danger); }
+
+.ranked-bar-blocked {
+  background: var(--danger) !important;
+  opacity: 0.18;
+}
+
 /* --- Chart Container --- */
 .chart-container {
   height: 200px;

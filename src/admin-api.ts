@@ -7,7 +7,7 @@ import { listSites, getSite, deploySite, deleteSite, toggleSite, listVersions, s
 import {
   getOverviewStats, getTopSites, getTopPaths, getTrafficOverTime,
   getTopCountries, getTopBrowsers, getRecentRequests,
-  getStatusCodeBreakdown, getSiteStats,
+  getStatusCodeBreakdown, getSiteStats, getBlockedRequests,
   getAllowedCountries, setAllowedCountries
 } from "./analytics";
 import { createMcpToken, listMcpTokens, deleteMcpToken, getMcpAuditLog } from "./mcp";
@@ -189,6 +189,11 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   if (path === "/_admin/api/analytics/status-codes") {
     const hours = parseInt(new URL(req.url).searchParams.get("hours") || "24");
     return json(getStatusCodeBreakdown(hours));
+  }
+
+  if (path === "/_admin/api/analytics/blocked") {
+    const hours = parseInt(new URL(req.url).searchParams.get("hours") || "24");
+    return json(getBlockedRequests(hours));
   }
 
   if (path === "/_admin/api/analytics/recent") {

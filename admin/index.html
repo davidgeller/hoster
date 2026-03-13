@@ -113,6 +113,13 @@
               <div id="dash-status-codes"></div>
             </div>
           </div>
+          <div class="card card-blocked">
+            <h3>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+              Blocked Requests
+            </h3>
+            <div id="dash-blocked"></div>
+          </div>
         </div>
 
         <!-- Sites View -->
@@ -198,6 +205,7 @@
                 <option value="2xx">2xx Success</option>
                 <option value="3xx">3xx Redirect</option>
                 <option value="4xx">4xx Client Error</option>
+                <option value="blocked">403 Blocked</option>
                 <option value="5xx">5xx Server Error</option>
               </select>
               <select id="log-filter-country">
