@@ -516,7 +516,11 @@ async function loadMcpTokens() {
 
     // Bind setup buttons
     container.querySelectorAll("[data-setup-token]").forEach(btn => {
-      btn.addEventListener("click", () => showMcpSetup());
+      btn.addEventListener("click", () => {
+        const tokenId = btn.dataset.setupToken;
+        const tokenData = tokens.find(t => String(t.id) === tokenId);
+        showMcpSetup(tokenData?.label);
+      });
     });
 
     // Bind generate button
@@ -531,7 +535,7 @@ async function loadMcpTokens() {
           method: "POST",
           body: JSON.stringify({ label, site_slug: siteSlug, expires_in_days: expiresInDays }),
         });
-        showMcpToken(token);
+        showMcpToken(token, label);
         loadMcpTokens();
       } catch (err) { alert(err.message); }
     });
@@ -561,11 +565,17 @@ async function loadMcpAudit() {
   } catch (_) {}
 }
 
-function getMcpConfigJson(token) {
+function mcpServerName(label) {
+  // Convert label to a slug-like name for use as the MCP server identifier
+  return (label || "hoster").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "hoster";
+}
+
+function getMcpConfigJson(token, label) {
   const origin = window.location.origin;
+  const name = mcpServerName(label);
   return JSON.stringify({
     mcpServers: {
-      hoster: {
+      [name]: {
         type: "http",
         url: `${origin}/_mcp`,
         headers: {
@@ -576,14 +586,15 @@ function getMcpConfigJson(token) {
   }, null, 2);
 }
 
-function getMcpCliCommand(token) {
+function getMcpCliCommand(token, label) {
   const origin = window.location.origin;
-  return `claude mcp add --transport http hoster ${origin}/_mcp --header "Authorization: Bearer ${token}"`;
+  const name = mcpServerName(label);
+  return `claude mcp add --transport http ${name} ${origin}/_mcp --header "Authorization: Bearer ${token}"`;
 }
 
-function showMcpToken(token) {
-  const configJson = getMcpConfigJson(token);
-  const cliCommand = getMcpCliCommand(token);
+function showMcpToken(token, label) {
+  const configJson = getMcpConfigJson(token, label);
+  const cliCommand = getMcpCliCommand(token, label);
   const modal = document.createElement("div");
   modal.className = "modal";
   modal.innerHTML = `
@@ -626,12 +637,12 @@ function showMcpToken(token) {
   });
 }
 
-function showMcpSetup() {
+function showMcpSetup(label) {
   const origin = window.location.origin;
   const placeholder = "<your-token>";
 
-  function buildConfig(token) { return getMcpConfigJson(token); }
-  function buildCli(token) { return getMcpCliCommand(token); }
+  function buildConfig(token) { return getMcpConfigJson(token, label); }
+  function buildCli(token) { return getMcpCliCommand(token, label); }
 
   const modal = document.createElement("div");
   modal.className = "modal";
