@@ -4,6 +4,8 @@ A lightweight, self-hosted web hosting platform that runs on a Raspberry Pi (or 
 
 Upload a ZIP file through the web admin panel and your site is live at `https://yourdomain.com/your-site/` within seconds.
 
+![Dashboard](assets/dashboard.jpg)
+
 ## Features
 
 - **Zero-config HTTPS** — Cloudflare handles SSL termination automatically
@@ -143,6 +145,8 @@ With 2FA enabled, login requires both your password and a code from your authent
 
 ## Deploying Sites
 
+![Sites](assets/sites.jpg)
+
 1. Go to `https://yourdomain.com/_admin`
 2. Click **Deploy Site**
 3. Enter a slug (e.g., `my-app`) — this becomes the URL path
@@ -216,6 +220,8 @@ claude mcp add --transport http hoster https://yourdomain.com/_mcp \
 | `delete_file` | Delete a file (blocked in read-only mode) |
 
 Tokens can be scoped to a single site, set to expire, and revoked at any time. All MCP activity is logged in the **MCP Activity Log** in Settings.
+
+![MCP Activity Log](assets/mcp.jpg)
 
 ## Upgrading Hoster
 
@@ -362,6 +368,8 @@ Hoster captures request metadata for every visitor:
 - All data stored locally in SQLite — nothing sent to third parties
 
 The admin dashboard shows traffic over time, top sites, top paths, countries, status codes, and recent request logs.
+
+![Request Logs](assets/log.jpg)
 
 ### Blocked Request Intelligence
 
