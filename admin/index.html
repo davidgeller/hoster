@@ -36,6 +36,23 @@
       </div>
     </div>
 
+    <!-- 2FA Verification screen -->
+    <div id="totp-screen" class="screen" hidden>
+      <div class="auth-card">
+        <div class="logo">HOSTER</div>
+        <p class="subtitle">Enter the 6-digit code from your authenticator app.</p>
+        <form id="totp-form">
+          <input type="text" id="totp-code" placeholder="000000" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9\-\s]*" maxlength="12" required style="text-align:center;font-size:1.5rem;letter-spacing:0.3em;font-family:monospace">
+          <button type="submit" class="btn btn-primary btn-block">Verify</button>
+          <div class="form-error" id="totp-error"></div>
+        </form>
+        <p style="margin-top:12px;font-size:0.8rem;color:var(--text-muted);text-align:center">
+          Lost your device? Enter a recovery code instead.
+        </p>
+        <button class="btn btn-ghost btn-sm" id="totp-back-btn" style="display:block;margin:8px auto 0">Back to login</button>
+      </div>
+    </div>
+
     <!-- Main app -->
     <div id="main-screen" class="screen" hidden>
       <nav class="sidebar">
@@ -262,6 +279,10 @@
               <div class="form-error" id="pw-error"></div>
               <div class="form-success" id="pw-success"></div>
             </form>
+          </div>
+          <div class="card mt-4" style="max-width:480px" id="totp-settings-card">
+            <h3>Two-Factor Authentication</h3>
+            <div id="totp-settings"></div>
           </div>
           <div class="card mt-4" style="max-width:640px">
             <h3>MCP Access Tokens</h3>

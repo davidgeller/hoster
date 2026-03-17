@@ -1,7 +1,15 @@
 import {
   verifyPassword, createSession, destroySession, validateSession,
   getSessionToken, getClientIp, isRateLimited, isSetup, setAdminPassword,
-  sessionCookie, cleanExpiredSessions
+  sessionCookie, cleanExpiredSessions, validateCsrf, getCsrfToken,
+  isTotpEnabled, generateTotpSecret, getTotpQrDataUrl, verifyTotpCode,
+  getTotpSecret, enableTotp, disableTotp, generateRecoveryCodes,
+  useRecoveryCode, getRemainingRecoveryCodes,
+  setPendingTotpSecret, getPendingTotpSecret, clearPendingTotpSecret,
+  createPending2faToken, consumePending2faToken,
+  cleanExpiredPending2fa,
+  isTotpRateLimited, recordTotpAttempt,
+  auditLog, getAuditLog
 } from "./auth";
 import { listSites, getSite, deploySite, deleteSite, toggleSite, listVersions, switchVersion, deleteVersion, updateSiteSettings } from "./sites";
 import {
@@ -23,6 +31,16 @@ function unauthorized(): Response {
   return json({ error: "Unauthorized" }, 401);
 }
 
+function sessionResponse(ip: string): Response {
+  const { sessionToken, csrfToken } = createSession(ip);
+  return json({ ok: true, csrf_token: csrfToken }, 200, { "Set-Cookie": sessionCookie(sessionToken) });
+}
+
+function clampInt(value: string | null, defaultVal: number, min: number, max: number): number {
+  const parsed = parseInt(value || String(defaultVal)) || defaultVal;
+  return Math.min(Math.max(min, parsed), max);
+}
+
 export async function handleAdminApi(req: Request, path: string): Promise<Response | null> {
   const ip = getClientIp(req);
 
@@ -34,8 +52,8 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
       return json({ error: "Password must be at least 8 characters" }, 400);
     }
     await setAdminPassword(body.password);
-    const token = createSession(ip);
-    return json({ ok: true }, 200, { "Set-Cookie": sessionCookie(token) });
+    auditLog("setup", "Initial admin password set", ip);
+    return sessionResponse(ip);
   }
 
   // --- Login ---
@@ -45,9 +63,46 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     const body = await req.json() as { password?: string };
     if (!body.password) return json({ error: "Password required" }, 400);
     const valid = await verifyPassword(body.password, ip);
-    if (!valid) return json({ error: "Invalid password" }, 401);
-    const token = createSession(ip);
-    return json({ ok: true }, 200, { "Set-Cookie": sessionCookie(token) });
+    if (!valid) {
+      auditLog("login_failed", null, ip);
+      return json({ error: "Invalid credentials" }, 401);
+    }
+
+    // If 2FA is enabled, don't create a session yet — issue a pending 2FA token
+    if (isTotpEnabled()) {
+      const pendingToken = createPending2faToken(ip);
+      return json({ requires_2fa: true, pending_token: pendingToken });
+    }
+
+    auditLog("login", null, ip);
+    return sessionResponse(ip);
+  }
+
+  // --- 2FA Verification (during login) ---
+  if (path === "/_admin/api/login/2fa" && req.method === "POST") {
+    if (isTotpRateLimited(ip)) return json({ error: "Too many attempts. Try again later." }, 429);
+    const body = await req.json() as { pending_token?: string; code?: string };
+    if (!body.pending_token || !body.code) return json({ error: "Token and code required" }, 400);
+
+    const secret = getTotpSecret();
+    if (!secret) return json({ error: "2FA not configured" }, 500);
+
+    const code = body.code.trim().replace(/\s/g, "");
+
+    // Try TOTP code first, then recovery code
+    if (verifyTotpCode(secret, code) || useRecoveryCode(code)) {
+      // Atomically consume the pending token — prevents race conditions
+      if (!consumePending2faToken(body.pending_token)) {
+        return json({ error: "Session expired. Please log in again." }, 401);
+      }
+      recordTotpAttempt(ip, true);
+      auditLog("login_2fa", null, ip);
+      return sessionResponse(ip);
+    }
+
+    recordTotpAttempt(ip, false);
+    auditLog("login_2fa_failed", null, ip);
+    return json({ error: "Invalid code" }, 401);
   }
 
   // --- Logout ---
@@ -59,13 +114,21 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
 
   // --- Auth check ---
   if (path === "/_admin/api/auth-check") {
-    const authed = validateSession(getSessionToken(req));
-    return json({ authenticated: authed, setup: isSetup() });
+    const token = getSessionToken(req);
+    const authed = validateSession(token, ip);
+    const csrf = authed ? getCsrfToken(token) : null;
+    return json({ authenticated: authed, setup: isSetup(), totp_enabled: isTotpEnabled(), csrf_token: csrf });
   }
 
   // All remaining admin API routes require auth
-  if (!validateSession(getSessionToken(req))) {
+  const sessionToken = getSessionToken(req);
+  if (!validateSession(sessionToken, ip)) {
     return unauthorized();
+  }
+
+  // CSRF validation for all state-changing requests
+  if (req.method !== "GET" && !validateCsrf(req, sessionToken)) {
+    return json({ error: "Invalid CSRF token" }, 403);
   }
 
   // --- Change password ---
@@ -76,7 +139,71 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     if (!valid) return json({ error: "Current password is incorrect" }, 401);
     if (body.password.length < 8) return json({ error: "Password must be at least 8 characters" }, 400);
     await setAdminPassword(body.password);
+    auditLog("password_changed", null, ip);
     return json({ ok: true });
+  }
+
+  // --- TOTP 2FA Management ---
+  if (path === "/_admin/api/totp/status" && req.method === "GET") {
+    return json({
+      enabled: isTotpEnabled(),
+      recovery_codes_remaining: isTotpEnabled() ? getRemainingRecoveryCodes() : 0,
+    });
+  }
+
+  if (path === "/_admin/api/totp/setup" && req.method === "POST") {
+    if (isTotpEnabled()) return json({ error: "2FA is already enabled" }, 400);
+    const { secret, uri } = generateTotpSecret();
+    setPendingTotpSecret(secret);
+    const qrDataUrl = await getTotpQrDataUrl(uri);
+    return json({ secret, qr: qrDataUrl });
+  }
+
+  if (path === "/_admin/api/totp/confirm" && req.method === "POST") {
+    const body = await req.json() as { code?: string };
+    if (!body.code) return json({ error: "Verification code required" }, 400);
+
+    const pendingSecret = getPendingTotpSecret();
+    if (!pendingSecret) return json({ error: "No pending 2FA setup. Start setup first." }, 400);
+
+    if (!verifyTotpCode(pendingSecret, body.code.trim())) {
+      return json({ error: "Invalid code. Check your authenticator app and try again." }, 400);
+    }
+
+    const recoveryCodes = generateRecoveryCodes();
+    enableTotp(pendingSecret, recoveryCodes);
+    clearPendingTotpSecret();
+    auditLog("totp_enabled", null, ip);
+
+    return json({ ok: true, recovery_codes: recoveryCodes });
+  }
+
+  if (path === "/_admin/api/totp/disable" && req.method === "POST") {
+    const body = await req.json() as { password?: string };
+    if (!body.password) return json({ error: "Password required to disable 2FA" }, 400);
+
+    const valid = await verifyPassword(body.password, ip);
+    if (!valid) return json({ error: "Invalid password" }, 401);
+
+    disableTotp();
+    auditLog("totp_disabled", null, ip);
+    return json({ ok: true });
+  }
+
+  if (path === "/_admin/api/totp/recovery-codes" && req.method === "POST") {
+    const body = await req.json() as { password?: string };
+    if (!body.password) return json({ error: "Password required" }, 400);
+
+    const valid = await verifyPassword(body.password, ip);
+    if (!valid) return json({ error: "Invalid password" }, 401);
+
+    if (!isTotpEnabled()) return json({ error: "2FA is not enabled" }, 400);
+
+    const secret = getTotpSecret()!;
+    const recoveryCodes = generateRecoveryCodes();
+    enableTotp(secret, recoveryCodes);
+
+    return json({ recovery_codes: recoveryCodes });
   }
 
   // --- Sites CRUD ---
@@ -113,6 +240,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     }
     if (req.method === "DELETE") {
       const ok = deleteSite(slug);
+      if (ok) auditLog("site_deleted", slug, ip);
       return ok ? json({ ok: true }) : json({ error: "Not found" }, 404);
     }
   }
@@ -130,8 +258,12 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   if (settingsMatch && req.method === "POST") {
     const slug = settingsMatch[1];
     const body = await req.json() as { root_dir?: string | null; spa?: boolean; mcp_enabled?: boolean; mcp_read_only?: boolean };
-    const ok = updateSiteSettings(slug, body.root_dir ?? null, body.spa ?? false, body.mcp_enabled, body.mcp_read_only);
-    return ok ? json({ ok: true }) : json({ error: "Not found" }, 404);
+    try {
+      const ok = updateSiteSettings(slug, body.root_dir ?? null, body.spa ?? false, body.mcp_enabled, body.mcp_read_only);
+      return ok ? json({ ok: true }) : json({ error: "Not found" }, 404);
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
   }
 
   // --- Version management ---
@@ -155,50 +287,50 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
 
   // --- Analytics ---
   if (path === "/_admin/api/analytics/overview") {
-    const hours = parseInt(new URL(req.url).searchParams.get("hours") || "24");
+    const hours = clampInt(new URL(req.url).searchParams.get("hours"), 24, 1, 8760);
     return json(getOverviewStats(hours));
   }
 
   if (path === "/_admin/api/analytics/top-sites") {
-    const hours = parseInt(new URL(req.url).searchParams.get("hours") || "24");
+    const hours = clampInt(new URL(req.url).searchParams.get("hours"), 24, 1, 8760);
     return json(getTopSites(hours));
   }
 
   if (path === "/_admin/api/analytics/top-paths") {
     const url = new URL(req.url);
-    const hours = parseInt(url.searchParams.get("hours") || "24");
+    const hours = clampInt(url.searchParams.get("hours"), 24, 1, 8760);
     const site = url.searchParams.get("site") || null;
     return json(getTopPaths(site, hours));
   }
 
   if (path === "/_admin/api/analytics/traffic") {
-    const hours = parseInt(new URL(req.url).searchParams.get("hours") || "24");
+    const hours = clampInt(new URL(req.url).searchParams.get("hours"), 24, 1, 8760);
     return json(getTrafficOverTime(hours));
   }
 
   if (path === "/_admin/api/analytics/countries") {
-    const hours = parseInt(new URL(req.url).searchParams.get("hours") || "24");
+    const hours = clampInt(new URL(req.url).searchParams.get("hours"), 24, 1, 8760);
     return json(getTopCountries(hours));
   }
 
   if (path === "/_admin/api/analytics/browsers") {
-    const hours = parseInt(new URL(req.url).searchParams.get("hours") || "24");
+    const hours = clampInt(new URL(req.url).searchParams.get("hours"), 24, 1, 8760);
     return json(getTopBrowsers(hours));
   }
 
   if (path === "/_admin/api/analytics/status-codes") {
-    const hours = parseInt(new URL(req.url).searchParams.get("hours") || "24");
+    const hours = clampInt(new URL(req.url).searchParams.get("hours"), 24, 1, 8760);
     return json(getStatusCodeBreakdown(hours));
   }
 
   if (path === "/_admin/api/analytics/blocked") {
-    const hours = parseInt(new URL(req.url).searchParams.get("hours") || "24");
+    const hours = clampInt(new URL(req.url).searchParams.get("hours"), 24, 1, 8760);
     return json(getBlockedRequests(hours));
   }
 
   if (path === "/_admin/api/analytics/recent") {
     const url = new URL(req.url);
-    const limit = parseInt(url.searchParams.get("limit") || "100");
+    const limit = clampInt(url.searchParams.get("limit"), 100, 1, 500);
     const filters = {
       status: url.searchParams.get("status") || undefined,
       country: url.searchParams.get("country") || undefined,
@@ -210,7 +342,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
 
   const siteStatsMatch = path.match(/^\/_admin\/api\/analytics\/site\/([a-z0-9-]+)$/);
   if (siteStatsMatch) {
-    const hours = parseInt(new URL(req.url).searchParams.get("hours") || "24");
+    const hours = clampInt(new URL(req.url).searchParams.get("hours"), 24, 1, 8760);
     return json(getSiteStats(siteStatsMatch[1], hours));
   }
 
@@ -244,13 +376,20 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
 
   // --- MCP audit log ---
   if (path === "/_admin/api/mcp/audit" && req.method === "GET") {
-    const limit = parseInt(new URL(req.url).searchParams.get("limit") || "50");
-    return json({ entries: getMcpAuditLog(Math.min(limit, 500)) });
+    const limit = clampInt(new URL(req.url).searchParams.get("limit"), 50, 1, 500);
+    return json({ entries: getMcpAuditLog(limit) });
+  }
+
+  // --- Audit log ---
+  if (path === "/_admin/api/audit" && req.method === "GET") {
+    const limit = clampInt(new URL(req.url).searchParams.get("limit"), 50, 1, 500);
+    return json({ entries: getAuditLog(limit) });
   }
 
   // --- Session cleanup ---
   if (path === "/_admin/api/cleanup" && req.method === "POST") {
     cleanExpiredSessions();
+    cleanExpiredPending2fa();
     return json({ ok: true });
   }
 

@@ -111,8 +111,13 @@ export function logRequest(log: RequestLog): void {
 }
 
 export function extractRequestMeta(req: Request) {
+  // Only trust proxy headers when Cloudflare signal is present
+  const hasCfSignal = req.headers.get("cf-ipcountry");
+  const ip = hasCfSignal
+    ? (req.headers.get("cf-connecting-ip") || req.headers.get("x-real-ip") || "unknown")
+    : (req.headers.get("x-real-ip") || "unknown");
   return {
-    ip: req.headers.get("cf-connecting-ip") || req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown",
+    ip,
     country: req.headers.get("cf-ipcountry") || null,
     city: req.headers.get("cf-ipcity") || null,
     user_agent: req.headers.get("user-agent") || null,
@@ -234,7 +239,11 @@ export function getRecentRequests(limit: number = 50, filters: {
 
   if (filters.country) { where += " AND country = ?"; params.push(filters.country.toUpperCase()); }
   if (filters.site) { where += " AND site_slug = ?"; params.push(filters.site); }
-  if (filters.search) { where += " AND path LIKE ?"; params.push(`%${filters.search}%`); }
+  if (filters.search) {
+    const escaped = filters.search.replace(/[%_\\]/g, "\\$&");
+    where += " AND path LIKE ? ESCAPE '\\'";
+    params.push(`%${escaped}%`);
+  }
 
   return db.query(`
     SELECT site_slug, path, method, status, response_time_ms, ip, country, city, browser, referrer, created_at

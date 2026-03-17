@@ -11,7 +11,7 @@ Upload a ZIP file through the web admin panel and your site is live at `https://
 - **Version management** — each upload creates a new version; roll back instantly
 - **SPA support** — auto-detects Angular, React, and Vue builds; rewrites `<base href>` for subpath hosting
 - **Analytics dashboard** — request logs, visitor stats, countries, top pages, status codes, blocked request intelligence
-- **Secure auth** — Argon2id password hashing, session tokens, rate-limited login
+- **Secure auth** — Argon2id password hashing, TOTP two-factor authentication, session tokens, CSRF protection, rate-limited login
 - **Light/Dark/Auto themes** — admin panel respects system preference
 - **Single binary** — compiles to a standalone executable with no runtime dependencies
 - **MCP server** — expose site files to AI tools (Claude Code, Cursor, etc.) via the Model Context Protocol
@@ -130,6 +130,16 @@ sudo journalctl -u hoster -f
 ### 8. Set Your Admin Password
 
 Open `https://yourdomain.com/_admin` in your browser. On first visit, you'll be prompted to create an admin password (minimum 8 characters).
+
+### 9. Enable Two-Factor Authentication (Recommended)
+
+After logging in, go to **Settings** and click **Enable 2FA** to add TOTP-based two-factor authentication:
+
+1. Scan the QR code with any authenticator app (Authy, Google Authenticator, 1Password, etc.)
+2. Enter the 6-digit code to confirm
+3. Save the recovery codes in a safe place — each can only be used once
+
+With 2FA enabled, login requires both your password and a code from your authenticator app. Recovery codes work as a backup if you lose your device.
 
 ## Deploying Sites
 
@@ -280,17 +290,23 @@ Hoster is designed to be safe for public exposure. Since the source code is publ
 ### Authentication & Sessions
 
 - Admin password hashed with **Argon2id** (memory-hard, GPU-resistant; memoryCost=64KB, timeCost=3)
-- 256-bit cryptographically random session tokens
-- Session cookies are `HttpOnly`, `Secure`, `SameSite=Strict` — immune to XSS theft and CSRF
-- Login **rate-limited** to 5 attempts per 15 minutes per IP, with automatic lockout
+- **TOTP two-factor authentication** — RFC 6238 compliant, compatible with all major authenticator apps
+- 8 one-time **recovery codes** (SHA-256 hashed, constant-time comparison) for account recovery
+- 256-bit cryptographically random session tokens with per-session **CSRF tokens**
+- Session cookies are `HttpOnly`, `Secure`, `SameSite=Strict`
+- Sessions bound to IP address — stolen tokens cannot be used from a different IP
+- Login **rate-limited** to 5 attempts per 15 minutes per IP; 2FA verification separately rate-limited
+- 24-hour session duration
 - Password change requires current password verification
+- **Audit logging** — login, password changes, 2FA enable/disable, and site deletion are logged with IP and timestamp
 
 ### Network & Transport
 
 - **No open ports** — all traffic enters through Cloudflare's encrypted tunnel
 - Cloudflare provides DDoS protection, WAF, bot management, and IP reputation filtering at the edge
 - Country-based access restriction (configurable, uses Cloudflare's `cf-ipcountry` header)
-- Security headers on responses: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`
+- Proxy header trust validation — `cf-connecting-ip` only trusted when Cloudflare signal headers are present
+- Security headers: `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Strict-Transport-Security`, `Content-Security-Policy`, `Permissions-Policy`
 
 ### File Serving & Path Traversal
 
@@ -302,9 +318,11 @@ Hoster is designed to be safe for public exposure. Since the source code is publ
 ### Upload & Deployment
 
 - Uploaded ZIPs are size-limited (500 MB max)
-- After extraction, all **symlinks are removed** to prevent symlink-based escapes
+- ZIP files are extracted to a **staging directory**, validated, then moved to the final location — no unvalidated content is ever served
+- All **symlinks are removed** before content is published
 - Post-extraction verification ensures no files escaped the target directory (zip slip protection)
 - Site slugs validated against strict regex (`[a-z0-9-]+`, no leading/trailing hyphens)
+- `root_dir` setting validated at configuration time — rejects path traversal sequences
 
 ### MCP Access
 
@@ -321,6 +339,8 @@ Hoster is designed to be safe for public exposure. Since the source code is publ
 - Errors logged server-side only (visible via `journalctl`)
 - Request logs auto-rotate at 500K rows to prevent disk exhaustion
 - All SQL queries use parameterized statements (no SQL injection)
+- LIKE wildcard characters escaped in search queries
+- Query parameter bounds enforced on all analytics endpoints to prevent DoS
 - XSS protection via HTML entity escaping on all user-controlled output
 
 ### What Cloudflare Handles

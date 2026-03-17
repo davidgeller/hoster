@@ -8,5 +8,9 @@
     "start": "bun run src/index.ts",
     "setup": "bun run src/setup.ts"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@types/qrcode": "^1.5.6",
+    "otpauth": "^9.5.0",
+    "qrcode": "^1.5.4"
+  }
 }

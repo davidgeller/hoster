@@ -150,14 +150,15 @@ export async function deploySite(slug: string, name: string, zipBuffer: ArrayBuf
   const version = generateVersion();
   const siteDir = join(SITES_DIR, slug);
   const versionDir = join(siteDir, version);
+  const stagingDir = join(siteDir, `_staging_${version}`);
 
-  mkdirSync(versionDir, { recursive: true });
+  mkdirSync(stagingDir, { recursive: true });
 
-  // Extract zip (exclude entries with path traversal or symlinks)
-  const tmpZip = join(versionDir, "__upload.zip");
+  // Extract zip into staging directory first
+  const tmpZip = join(stagingDir, "__upload.zip");
   await Bun.write(tmpZip, zipBuffer);
 
-  const proc = Bun.spawn(["unzip", "-o", tmpZip, "-d", versionDir], {
+  const proc = Bun.spawn(["unzip", "-o", tmpZip, "-d", stagingDir], {
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -165,25 +166,27 @@ export async function deploySite(slug: string, name: string, zipBuffer: ArrayBuf
   rmSync(tmpZip);
 
   // Security: remove any symlinks that might have been in the zip
-  removeSymlinks(versionDir);
+  removeSymlinks(stagingDir);
 
-  // Security: verify no files escaped the version directory
-  // (zip slip via ../ entries)
-  verifyNoEscape(versionDir);
+  // Security: verify no files escaped the staging directory (zip slip via ../ entries)
+  verifyNoEscape(stagingDir);
 
   // Check if zip contained a single root folder — hoist its contents
-  const entries = readdirSync(versionDir, { withFileTypes: true });
+  const entries = readdirSync(stagingDir, { withFileTypes: true });
   if (entries.length === 1 && entries[0].isDirectory()) {
-    const innerDir = join(versionDir, entries[0].name);
+    const innerDir = join(stagingDir, entries[0].name);
     const innerEntries = readdirSync(innerDir);
     for (const e of innerEntries) {
-      Bun.spawnSync(["mv", join(innerDir, e), join(versionDir, e)]);
+      Bun.spawnSync(["mv", join(innerDir, e), join(stagingDir, e)]);
     }
     rmSync(innerDir, { recursive: true });
   }
 
   // Calculate stats
-  const stats = calcDirStats(versionDir);
+  const stats = calcDirStats(stagingDir);
+
+  // Validated — move staging to final version directory (atomic rename)
+  Bun.spawnSync(["mv", stagingDir, versionDir]);
 
   // Auto-detect root directory: look for subdirectory containing index.html
   // Common patterns: browser/ (Angular), dist/ , build/ , public/ , out/
@@ -312,6 +315,14 @@ export function updateSiteSettings(
   slug: string, rootDir: string | null, spa: boolean,
   mcpEnabled?: boolean, mcpReadOnly?: boolean
 ): boolean {
+  if (rootDir) {
+    if (rootDir.includes("..") || rootDir.startsWith("/") || rootDir.includes("\0")) {
+      throw new Error("Invalid root directory path");
+    }
+    if (!/^[a-zA-Z0-9._\-\/]+$/.test(rootDir)) {
+      throw new Error("Root directory contains invalid characters");
+    }
+  }
   const result = db.run(
     `UPDATE sites SET root_dir = ?, spa = ?,
       mcp_enabled = COALESCE(?, mcp_enabled),

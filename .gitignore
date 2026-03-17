@@ -10,4 +10,5 @@ error.log
 # Built artifacts
 hoster-pi.sh
 hoster-linux-arm64
+hoster
 *.bak

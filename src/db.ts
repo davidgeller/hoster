@@ -30,6 +30,7 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS sessions (
     token TEXT PRIMARY KEY,
+    csrf_token TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     expires_at TEXT NOT NULL,
     ip TEXT
@@ -64,6 +65,35 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_login_ip_created ON login_attempts(ip, created_at);
+
+  CREATE TABLE IF NOT EXISTS pending_2fa (
+    token_hash TEXT PRIMARY KEY,
+    created_at TEXT DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL,
+    ip TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS totp_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ip TEXT,
+    success INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_totp_attempts_ip_created ON totp_attempts(ip, created_at);
+
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action TEXT NOT NULL,
+    detail TEXT,
+    ip TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
 `);
+
+// Add columns if not present (for existing databases)
+try { db.exec("ALTER TABLE sessions ADD COLUMN csrf_token TEXT"); } catch (_) {}
 
 export default db;

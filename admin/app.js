@@ -4,6 +4,14 @@
 
 const API = "/_admin/api";
 
+// Country code to name resolver (uses browser's built-in Intl API)
+const countryNames = new Intl.DisplayNames(["en"], { type: "region" });
+function countryName(code) {
+  if (!code) return "Unknown";
+  try { return countryNames.of(code.toUpperCase()) || code; }
+  catch { return code; }
+}
+
 // --- Theme Management ---
 function initTheme() {
   const saved = localStorage.getItem("hoster-theme") || "auto";
@@ -38,17 +46,23 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () 
 
 // --- API Helpers ---
 async function api(path, opts = {}) {
-  const res = await fetch(API + path, {
-    headers: { "Content-Type": "application/json", ...opts.headers },
-    ...opts,
-  });
+  const headers = { "Content-Type": "application/json", ...opts.headers };
+  const method = (opts.method || "GET").toUpperCase();
+  if (method !== "GET" && csrfToken) {
+    headers["X-CSRF-Token"] = csrfToken;
+  }
+  const res = await fetch(API + path, { ...opts, headers });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "Request failed");
+  // Capture CSRF token from responses that provide one
+  if (data.csrf_token) csrfToken = data.csrf_token;
   return data;
 }
 
 async function apiForm(path, formData) {
-  const res = await fetch(API + path, { method: "POST", body: formData });
+  const headers = {};
+  if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
+  const res = await fetch(API + path, { method: "POST", body: formData, headers });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "Upload failed");
   return data;
@@ -56,6 +70,8 @@ async function apiForm(path, formData) {
 
 // --- App State ---
 let currentView = "dashboard";
+let pendingTotpToken = null;
+let csrfToken = null;
 
 // --- Init ---
 document.addEventListener("DOMContentLoaded", async () => {
@@ -63,6 +79,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   try {
     const auth = await api("/auth-check");
+    if (auth.csrf_token) csrfToken = auth.csrf_token;
     if (!auth.setup) {
       showScreen("setup-screen");
     } else if (!auth.authenticated) {
@@ -97,10 +114,48 @@ document.addEventListener("DOMContentLoaded", async () => {
     const errEl = document.getElementById("login-error");
     errEl.textContent = "";
     try {
-      await api("/login", { method: "POST", body: JSON.stringify({ password: pw }) });
+      const res = await fetch(API + "/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: pw }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Login failed");
+
+      if (data.requires_2fa) {
+        pendingTotpToken = data.pending_token;
+        showScreen("totp-screen");
+        document.getElementById("totp-code").value = "";
+        document.getElementById("totp-code").focus();
+        return;
+      }
+
+      if (data.csrf_token) csrfToken = data.csrf_token;
       showScreen("main-screen");
       navigateTo("dashboard");
     } catch (err) { errEl.textContent = err.message; }
+  });
+
+  // --- 2FA Verification Form ---
+  document.getElementById("totp-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const code = document.getElementById("totp-code").value;
+    const errEl = document.getElementById("totp-error");
+    errEl.textContent = "";
+    try {
+      await api("/login/2fa", {
+        method: "POST",
+        body: JSON.stringify({ pending_token: pendingTotpToken, code }),
+      });
+      pendingTotpToken = null;
+      showScreen("main-screen");
+      navigateTo("dashboard");
+    } catch (err) { errEl.textContent = err.message; }
+  });
+
+  document.getElementById("totp-back-btn").addEventListener("click", () => {
+    pendingTotpToken = null;
+    showScreen("login-screen");
   });
 
   // --- Navigation ---
@@ -259,8 +314,133 @@ async function loadSettings() {
     document.getElementById("allowed-countries").value = (data.countries || []).join(", ");
   } catch (_) {}
 
+  loadTotpSettings();
   loadMcpTokens();
   loadMcpAudit();
+}
+
+async function loadTotpSettings() {
+  const container = document.getElementById("totp-settings");
+  if (!container) return;
+  try {
+    const status = await api("/totp/status");
+    if (status.enabled) {
+      container.innerHTML = `
+        <p style="margin-bottom:12px;color:var(--success);font-weight:500">2FA is enabled</p>
+        <p class="text-sm text-muted" style="margin-bottom:12px">Recovery codes remaining: <strong>${status.recovery_codes_remaining}</strong></p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-sm" id="totp-regen-recovery">Regenerate Recovery Codes</button>
+          <button class="btn btn-sm btn-danger" id="totp-disable-btn">Disable 2FA</button>
+        </div>
+        <div class="form-error" id="totp-settings-error" style="margin-top:8px"></div>
+      `;
+      document.getElementById("totp-disable-btn").addEventListener("click", async () => {
+        const password = prompt("Enter your password to disable 2FA:");
+        if (!password) return;
+        const errEl = document.getElementById("totp-settings-error");
+        errEl.textContent = "";
+        try {
+          await api("/totp/disable", {
+            method: "POST",
+            body: JSON.stringify({ password }),
+          });
+          loadTotpSettings();
+        } catch (err) { errEl.textContent = err.message; }
+      });
+      document.getElementById("totp-regen-recovery").addEventListener("click", async () => {
+        const password = prompt("Enter your password to regenerate recovery codes:");
+        if (!password) return;
+        const errEl = document.getElementById("totp-settings-error");
+        errEl.textContent = "";
+        try {
+          const data = await api("/totp/recovery-codes", {
+            method: "POST",
+            body: JSON.stringify({ password }),
+          });
+          showRecoveryCodes(data.recovery_codes);
+          loadTotpSettings();
+        } catch (err) { errEl.textContent = err.message; }
+      });
+    } else {
+      container.innerHTML = `
+        <p class="text-sm text-muted" style="margin-bottom:12px">Add an extra layer of security by requiring a code from an authenticator app (like Authy, Google Authenticator, or 1Password) when you sign in.</p>
+        <button class="btn btn-primary btn-sm" id="totp-setup-btn">Enable 2FA</button>
+      `;
+      document.getElementById("totp-setup-btn").addEventListener("click", startTotpSetup);
+    }
+  } catch (_) {}
+}
+
+async function startTotpSetup() {
+  try {
+    const data = await api("/totp/setup", { method: "POST" });
+    const modal = document.createElement("div");
+    modal.className = "modal totp-setup-modal";
+    modal.innerHTML = `
+      <div class="modal-backdrop"></div>
+      <div class="modal-content" style="max-width:420px">
+        <h2>Set Up 2FA</h2>
+        <p class="text-sm text-muted" style="margin-bottom:16px">Scan this QR code with your authenticator app, then enter the 6-digit code to confirm.</p>
+        <div style="text-align:center;margin-bottom:16px">
+          <img src="${data.qr}" alt="QR Code" style="width:200px;height:200px;image-rendering:pixelated;border-radius:8px">
+        </div>
+        <p class="text-sm text-muted" style="margin-bottom:4px">Or enter this key manually:</p>
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-family:monospace;font-size:0.85rem;word-break:break-all;margin-bottom:16px;user-select:all;text-align:center;letter-spacing:0.1em">${data.secret}</div>
+        <form id="totp-confirm-form">
+          <input type="text" id="totp-confirm-code" placeholder="000000" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]*" maxlength="6" required style="text-align:center;font-size:1.3rem;letter-spacing:0.3em;font-family:monospace">
+          <div class="modal-actions" style="margin-top:12px">
+            <button type="button" class="btn btn-ghost close-modal">Cancel</button>
+            <button type="submit" class="btn btn-primary">Verify & Enable</button>
+          </div>
+          <div class="form-error" id="totp-confirm-error" style="margin-top:8px"></div>
+        </form>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    modal.querySelector(".modal-backdrop").addEventListener("click", () => modal.remove());
+    modal.querySelector(".close-modal").addEventListener("click", () => modal.remove());
+    modal.querySelector("#totp-confirm-code").focus();
+
+    modal.querySelector("#totp-confirm-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const code = document.getElementById("totp-confirm-code").value;
+      const errEl = document.getElementById("totp-confirm-error");
+      errEl.textContent = "";
+      try {
+        const result = await api("/totp/confirm", {
+          method: "POST",
+          body: JSON.stringify({ code }),
+        });
+        modal.remove();
+        showRecoveryCodes(result.recovery_codes);
+        loadTotpSettings();
+      } catch (err) { errEl.textContent = err.message; }
+    });
+  } catch (err) { alert(err.message); }
+}
+
+function showRecoveryCodes(codes) {
+  const modal = document.createElement("div");
+  modal.className = "modal";
+  modal.innerHTML = `
+    <div class="modal-backdrop"></div>
+    <div class="modal-content" style="max-width:420px">
+      <h2>Recovery Codes</h2>
+      <p class="text-sm" style="margin-bottom:12px;color:var(--danger);font-weight:500">Save these codes in a safe place. Each code can only be used once.</p>
+      <p class="text-sm text-muted" style="margin-bottom:16px">If you lose access to your authenticator app, you can use one of these codes to sign in.</p>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:16px;font-family:monospace;font-size:0.95rem;margin-bottom:16px;column-count:2;column-gap:16px;line-height:2">${codes.map(c => `<div>${c}</div>`).join("")}</div>
+      <div class="modal-actions" style="gap:8px">
+        <button class="btn btn-sm" id="recovery-copy-btn">Copy Codes</button>
+        <button class="btn btn-primary close-modal">I've Saved These</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  modal.querySelector(".close-modal").addEventListener("click", () => modal.remove());
+  modal.querySelector("#recovery-copy-btn").addEventListener("click", () => {
+    navigator.clipboard.writeText(codes.join("\n"));
+    modal.querySelector("#recovery-copy-btn").textContent = "Copied!";
+  });
 }
 
 async function loadMcpTokens() {
@@ -549,8 +729,9 @@ async function loadDashboard() {
   // Top sites
   renderRankedList("dash-top-sites", topSites, "site_slug", "hits");
 
-  // Countries
-  renderRankedList("dash-countries", countries, "country", "hits");
+  // Countries — resolve codes to full names
+  const countriesNamed = countries.map(c => ({ ...c, countryLabel: countryName(c.country) }));
+  renderRankedList("dash-countries", countriesNamed, "countryLabel", "hits");
 
   // Status codes
   renderRankedList("dash-status-codes", statusCodes, "status_group", "count");
@@ -570,7 +751,7 @@ async function loadDashboard() {
         for (const c of blocked.countries) {
           html += `<li class="ranked-item">
             <div style="flex:1;min-width:0">
-              <span class="label">${esc(c.country || "Unknown")}</span>
+              <span class="label">${esc(countryName(c.country))}</span>
               <span class="ranked-bar ranked-bar-blocked" style="width:${(c.hits / maxC) * 100}%"></span>
             </div>
             <span class="value" style="white-space:nowrap">${fmt(c.hits)} <span class="text-sm text-muted">(${c.ips} IP${c.ips !== 1 ? "s" : ""})</span></span>
@@ -602,7 +783,7 @@ async function loadDashboard() {
         for (const i of blocked.ips) {
           html += `<li class="ranked-item">
             <div style="flex:1;min-width:0">
-              <span class="label text-mono">${esc(i.ip)}</span> <span class="text-sm text-muted">${esc(i.country || "")}</span>
+              <span class="label text-mono">${esc(i.ip)}</span> <span class="text-sm text-muted">${esc(i.country ? countryName(i.country) : "")}</span>
               <span class="ranked-bar ranked-bar-blocked" style="width:${(i.hits / maxI) * 100}%"></span>
             </div>
             <span class="value">${fmt(i.hits)}</span>
@@ -845,7 +1026,7 @@ async function loadLogs() {
         <td><span class="status-badge ${statusClass}">${r.status}</span>${isBlocked ? ' <span class="chip-blocked">Blocked</span>' : ""}</td>
         <td class="text-sm">${esc(r.browser || "—")}</td>
         <td class="text-mono text-sm">${esc(r.ip)}</td>
-        <td>${r.country || "—"}</td>
+        <td>${countryName(r.country)}</td>
         <td class="text-mono text-sm">${r.response_time_ms?.toFixed(1) ?? "—"}ms</td>
       </tr>
     `;
@@ -858,7 +1039,7 @@ function populateLogFilterOptions(logs) {
   const currentCountry = countrySelect.value;
   const countries = [...new Set(logs.map(r => r.country).filter(Boolean))].sort();
   countrySelect.innerHTML = '<option value="">All Countries</option>' +
-    countries.map(c => `<option value="${esc(c)}" ${c === currentCountry ? "selected" : ""}>${esc(c)}</option>`).join("");
+    countries.map(c => `<option value="${esc(c)}" ${c === currentCountry ? "selected" : ""}>${esc(countryName(c))}</option>`).join("");
 
   // Sites
   const siteSelect = document.getElementById("log-filter-site");
