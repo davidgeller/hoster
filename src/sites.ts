@@ -55,12 +55,35 @@ try { db.exec("ALTER TABLE sites ADD COLUMN spa INTEGER DEFAULT 0"); } catch (_)
 try { db.exec("ALTER TABLE sites ADD COLUMN mcp_enabled INTEGER DEFAULT 0"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN mcp_read_only INTEGER DEFAULT 0"); } catch (_) {}
 
+// --- Site config cache (avoids DB + filesystem hits on every request) ---
+const siteCache = new Map<string, { site: Site; ts: number }>();
+const SITE_CACHE_TTL = 60_000; // 60 seconds
+
+export function invalidateSiteCache(slug?: string): void {
+  if (slug) {
+    siteCache.delete(slug);
+  } else {
+    siteCache.clear();
+  }
+}
+
 export function listSites(): Site[] {
   return db.query("SELECT * FROM sites ORDER BY name").all() as Site[];
 }
 
 export function getSite(slug: string): Site | null {
-  return db.query("SELECT * FROM sites WHERE slug = ?").get(slug) as Site | null;
+  const now = Date.now();
+  const cached = siteCache.get(slug);
+  if (cached && now - cached.ts < SITE_CACHE_TTL) {
+    return cached.site;
+  }
+  const site = db.query("SELECT * FROM sites WHERE slug = ?").get(slug) as Site | null;
+  if (site) {
+    siteCache.set(slug, { site, ts: now });
+  } else {
+    siteCache.delete(slug);
+  }
+  return site;
 }
 
 export function listVersions(slug: string): SiteVersion[] {
@@ -248,6 +271,7 @@ export async function deploySite(slug: string, name: string, zipBuffer: ArrayBuf
 
   // Point _current symlink to this version
   updateCurrentSymlink(slug, version);
+  invalidateSiteCache(slug);
 
   return { site: getSite(slug)!, version: getVersion(slug, version)! };
 }
@@ -272,6 +296,7 @@ export function switchVersion(slug: string, version: string): boolean {
     "UPDATE sites SET current_version = ?, size_bytes = ?, file_count = ?, updated_at = datetime('now') WHERE slug = ?",
     version, stats.size, stats.count, slug
   );
+  invalidateSiteCache(slug);
   return true;
 }
 
@@ -303,11 +328,13 @@ export function deleteSite(slug: string): boolean {
   db.run("DELETE FROM sites WHERE slug = ?", slug);
   db.run("DELETE FROM site_versions WHERE site_slug = ?", slug);
   db.run("DELETE FROM requests WHERE site_slug = ?", slug);
+  invalidateSiteCache(slug);
   return true;
 }
 
 export function toggleSite(slug: string, active: boolean): boolean {
   const result = db.run("UPDATE sites SET active = ? WHERE slug = ?", active ? 1 : 0, slug);
+  invalidateSiteCache(slug);
   return result.changes > 0;
 }
 
@@ -334,7 +361,20 @@ export function updateSiteSettings(
     mcpReadOnly !== undefined ? (mcpReadOnly ? 1 : 0) : null,
     slug
   );
+  invalidateSiteCache(slug);
   return result.changes > 0;
+}
+
+// Cache resolved real paths for site directories (cleared on deploy/switch/delete)
+const realPathCache = new Map<string, { realPath: string; ts: number }>();
+
+function getCachedRealPath(dir: string): string {
+  const now = Date.now();
+  const cached = realPathCache.get(dir);
+  if (cached && now - cached.ts < SITE_CACHE_TTL) return cached.realPath;
+  const realPath = realpathSync(dir);
+  realPathCache.set(dir, { realPath, ts: now });
+  return realPath;
 }
 
 export function resolveSitePath(slug: string, filePath: string): string | null {
@@ -354,11 +394,13 @@ export function resolveSitePath(slug: string, filePath: string): string | null {
   const realSiteDir = resolve(SITES_DIR, slug);
   if (!resolved.startsWith(realSiteDir)) return null;
 
+  // Cache the realpath of the site dir — it's the same for all files in this site
+  const realSiteDirResolved = getCachedRealPath(realSiteDir);
+
   // Try exact file
   if (existsSync(resolved) && statSync(resolved).isFile()) {
-    // Security: resolve symlinks and verify real path is still within site dir
     const realPath = realpathSync(resolved);
-    if (!realPath.startsWith(realpathSync(realSiteDir))) return null;
+    if (!realPath.startsWith(realSiteDirResolved)) return null;
     return resolved;
   }
 
@@ -367,7 +409,7 @@ export function resolveSitePath(slug: string, filePath: string): string | null {
     const index = join(resolved, "index.html");
     if (existsSync(index)) {
       const realPath = realpathSync(index);
-      if (realPath.startsWith(realpathSync(realSiteDir))) return index;
+      if (realPath.startsWith(realSiteDirResolved)) return index;
     }
   }
 
@@ -375,7 +417,7 @@ export function resolveSitePath(slug: string, filePath: string): string | null {
   const htmlPath = resolved + ".html";
   if (existsSync(htmlPath)) {
     const realPath = realpathSync(htmlPath);
-    if (realPath.startsWith(realpathSync(realSiteDir))) return htmlPath;
+    if (realPath.startsWith(realSiteDirResolved)) return htmlPath;
   }
 
   // SPA fallback: serve index.html for any unmatched route

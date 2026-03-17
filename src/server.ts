@@ -57,38 +57,67 @@ function getMime(path: string): string {
   return MIME_TYPES[ext] || "application/octet-stream";
 }
 
-async function serveHtml(filePath: string, slug: string): Promise<Response> {
+// Generate a weak ETag from file mtime + size (fast, no file read needed)
+function generateEtag(filePath: string): string | null {
   try {
+    const stat = statSync(filePath);
+    return `W/"${stat.mtimeMs.toString(36)}-${stat.size.toString(36)}"`;
+  } catch {
+    return null;
+  }
+}
+
+// Check If-None-Match header — return 304 if ETag matches
+function checkNotModified(req: Request, etag: string | null): Response | null {
+  if (!etag) return null;
+  const ifNoneMatch = req.headers.get("if-none-match");
+  if (ifNoneMatch && ifNoneMatch === etag) {
+    return new Response(null, { status: 304, headers: { "ETag": etag } });
+  }
+  return null;
+}
+
+async function serveHtml(filePath: string, slug: string, req: Request): Promise<Response> {
+  try {
+    const etag = generateEtag(filePath);
+    const notModified = checkNotModified(req, etag);
+    if (notModified) return notModified;
+
     const file = Bun.file(filePath);
     let html = await file.text();
     // Rewrite base href to include the site slug prefix
     html = html.replace(/<base\s+href="\/"\s*\/?>/i, `<base href="/${slug}/">`);
-    return new Response(html, {
-      headers: {
-        "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "no-cache",
-      },
-    });
+    const headers: Record<string, string> = {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-cache",
+    };
+    if (etag) headers["ETag"] = etag;
+    return new Response(html, { headers });
   } catch (e: any) {
     console.error("serveHtml error:", filePath, e?.message);
-    console.error("serveHtml file error:", e?.message);
     return new Response("File error", { status: 500 });
   }
 }
 
-async function serveFile(filePath: string, noCache = false): Promise<Response> {
+function serveFile(filePath: string, req: Request, noCache = false): Response {
   try {
+    const etag = generateEtag(filePath);
+
+    if (!noCache) {
+      const notModified = checkNotModified(req, etag);
+      if (notModified) return notModified;
+    }
+
+    // Use Bun.file() — Bun streams this via sendfile, zero-copy
     const file = Bun.file(filePath);
-    const bytes = await file.arrayBuffer();
-    return new Response(bytes, {
-      headers: {
-        "Content-Type": getMime(filePath),
-        "Cache-Control": noCache ? "no-cache, no-store, must-revalidate" : "public, max-age=3600",
-      },
-    });
+    const headers: Record<string, string> = {
+      "Content-Type": getMime(filePath),
+      "Cache-Control": noCache ? "no-cache, no-store, must-revalidate" : "public, max-age=3600",
+    };
+    if (etag) headers["ETag"] = etag;
+    return new Response(file, { headers });
   } catch (e: any) {
     console.error("serveFile error:", filePath, e?.message);
-    console.error("serveFile error:", e?.message);
     return new Response("File error", { status: 500 });
   }
 }
@@ -161,11 +190,11 @@ export function createServer(port: number) {
           const resolvedAdminDir = resolve(ADMIN_DIR);
           if (adminPath !== "/index.html" && resolvedAdmin.startsWith(resolvedAdminDir + "/") && existsSync(adminFile) && statSync(adminFile).isFile()) {
             logReq();
-            return serveFile(adminFile, true);
+            return serveFile(adminFile, req, true);
           }
           // SPA fallback
           logReq();
-          return serveFile(join(ADMIN_DIR, "index.html"), true);
+          return serveFile(join(ADMIN_DIR, "index.html"), req, true);
         }
 
         // --- Hosted sites ---
@@ -187,9 +216,9 @@ export function createServer(port: number) {
           logReq();
           // For HTML files, rewrite <base href="/"> to <base href="/slug/">
           if (resolved.endsWith(".html")) {
-            return serveHtml(resolved, siteSlug);
+            return serveHtml(resolved, siteSlug, req);
           }
-          return serveFile(resolved);
+          return serveFile(resolved, req);
         }
 
         // 404
