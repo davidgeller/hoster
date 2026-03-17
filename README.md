@@ -186,10 +186,12 @@ Hoster includes a built-in MCP server that lets AI tools like Claude Code, Curso
 
 ### Connecting Your AI Tool
 
+When you generate a token, Hoster provides ready-to-copy config using the token's label as the server name. For example, a token labeled "My Project" produces:
+
 **Claude Code (CLI):**
 
 ```bash
-claude mcp add --transport http hoster https://yourdomain.com/_mcp \
+claude mcp add --transport http my-project https://yourdomain.com/_mcp \
   --header "Authorization: Bearer <your-token>"
 ```
 
@@ -198,7 +200,7 @@ claude mcp add --transport http hoster https://yourdomain.com/_mcp \
 ```json
 {
   "mcpServers": {
-    "hoster": {
+    "my-project": {
       "type": "http",
       "url": "https://yourdomain.com/_mcp",
       "headers": {
@@ -208,6 +210,8 @@ claude mcp add --transport http hoster https://yourdomain.com/_mcp \
   }
 }
 ```
+
+The server name is derived from the token label, so each token gets a distinct, recognizable name in your AI tool's config.
 
 ### Available MCP Tools
 
@@ -357,6 +361,17 @@ Hoster is designed to be safe for public exposure. Since the source code is publ
 - IP reputation and threat intelligence
 - HTTP/2 and HTTP/3 support
 - Edge caching (configurable per-path)
+
+## Performance
+
+Hoster is optimized for fast, low-memory static file serving:
+
+- **Zero-copy file streaming** — static files are served via Bun's `sendfile` path, never loaded into memory
+- **ETag support** — weak ETags based on file mtime+size enable `304 Not Modified` responses, saving bandwidth on repeat visits
+- **In-memory site config cache** — site configuration is cached with a 60-second TTL, eliminating database queries and filesystem stat calls from the hot path
+- **Cached path resolution** — resolved real paths for site directories are cached, cutting redundant syscalls per request
+
+On a Raspberry Pi 5, this comfortably handles hundreds of concurrent users. Bun.serve itself can handle tens of thousands of requests per second — the bottleneck is never the HTTP layer.
 
 ## Analytics
 

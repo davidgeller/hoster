@@ -190,3 +190,6 @@ Compatible with all major authenticator apps:
 - **CSRF protection:** Per-session tokens validated with constant-time comparison on all state-changing requests
 - **Audit trail:** Critical admin operations logged with IP and auto-pruned after 90 days
 - **ZIP upload security:** Staging directory pattern prevents exposure of unvalidated content
+- **File streaming:** Zero-copy sendfile serving — files never buffered in memory
+- **ETag caching:** Weak ETags enable 304 responses, reducing bandwidth and server load
+- **Config caching:** Site config and realpath results cached with TTL, reducing per-request DB and filesystem overhead
