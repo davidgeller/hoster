@@ -823,7 +823,7 @@ async function loadSites() {
       <div class="site-card-header">
         <div>
           <h2>${esc(s.name)}</h2>
-          <div class="site-slug">/${esc(s.slug)}</div>
+          <div class="site-slug">/${esc(s.slug)}${s.aliases && s.aliases.length ? ` <span class="text-muted text-sm">(also: ${s.aliases.map(a => "/" + esc(a)).join(", ")})</span>` : ""}</div>
           <div class="site-version-info">
             ${s.current_version ? `v${s.current_version}` : "no version"}
             ${s.root_dir ? ` · root: <code>${esc(s.root_dir)}</code>` : ""}
@@ -915,7 +915,14 @@ window.deleteVersionBtn = async function (slug, version) {
   } catch (err) { alert(err.message); }
 };
 
-window.showSiteSettings = function (slug, rootDir, spa, mcpEnabled, mcpReadOnly) {
+window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpReadOnly) {
+  // Fetch current aliases
+  let aliases = [];
+  try {
+    const data = await api(`/sites/${slug}/aliases`);
+    aliases = data.aliases || [];
+  } catch (_) {}
+
   const modal = document.createElement("div");
   modal.className = "modal site-settings-modal";
   modal.innerHTML = `
@@ -940,7 +947,25 @@ window.showSiteSettings = function (slug, rootDir, spa, mcpEnabled, mcpReadOnly)
           <input type="checkbox" id="settings-mcp-readonly" ${mcpReadOnly ? "checked" : ""} style="width:auto;margin:0">
           <span>Read Only <small style="display:inline;margin:0">(block write and delete operations)</small></span>
         </label>
-        <div class="modal-actions">
+        <hr style="border:none;border-top:1px solid var(--border);margin:12px 0">
+        <label>
+          Aliases
+          <small>Alternative URL paths that serve this site's content.</small>
+        </label>
+        <div id="settings-aliases-list" style="margin-bottom:8px">
+          ${aliases.length ? aliases.map(a => `
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px" data-alias="${esc(a)}">
+              <code style="flex:1">/${esc(a)}</code>
+              <button type="button" class="btn btn-sm btn-danger remove-alias-btn">Remove</button>
+            </div>
+          `).join("") : '<div class="text-sm text-muted" id="no-aliases-msg">No aliases configured.</div>'}
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input type="text" id="settings-new-alias" placeholder="e.g. ecg" style="flex:1" pattern="[a-z0-9][a-z0-9-]*[a-z0-9]?">
+          <button type="button" class="btn btn-sm btn-primary" id="add-alias-btn">Add Alias</button>
+        </div>
+        <div class="form-error" id="alias-error" style="margin-top:4px"></div>
+        <div class="modal-actions" style="margin-top:16px">
           <button type="button" class="btn btn-ghost close-modal">Cancel</button>
           <button type="submit" class="btn btn-primary">Save</button>
         </div>
@@ -952,6 +977,58 @@ window.showSiteSettings = function (slug, rootDir, spa, mcpEnabled, mcpReadOnly)
   document.body.appendChild(modal);
   modal.querySelector(".modal-backdrop").addEventListener("click", () => modal.remove());
   modal.querySelector(".close-modal").addEventListener("click", () => modal.remove());
+
+  // Add alias
+  modal.querySelector("#add-alias-btn").addEventListener("click", async () => {
+    const input = document.getElementById("settings-new-alias");
+    const alias = input.value.trim().toLowerCase();
+    const errEl = document.getElementById("alias-error");
+    errEl.textContent = "";
+    if (!alias) return;
+    try {
+      const data = await api(`/sites/${slug}/aliases`, {
+        method: "POST",
+        body: JSON.stringify({ alias }),
+      });
+      // Refresh alias list in modal
+      input.value = "";
+      const listEl = document.getElementById("settings-aliases-list");
+      const noMsg = document.getElementById("no-aliases-msg");
+      if (noMsg) noMsg.remove();
+      const div = document.createElement("div");
+      div.style.cssText = "display:flex;align-items:center;gap:8px;margin-bottom:4px";
+      div.dataset.alias = alias;
+      div.innerHTML = `<code style="flex:1">/${esc(alias)}</code><button type="button" class="btn btn-sm btn-danger remove-alias-btn">Remove</button>`;
+      div.querySelector(".remove-alias-btn").addEventListener("click", () => removeAliasHandler(div, alias));
+      listEl.appendChild(div);
+    } catch (err) {
+      errEl.textContent = err.message;
+    }
+  });
+
+  // Remove alias handler
+  async function removeAliasHandler(el, alias) {
+    const errEl = document.getElementById("alias-error");
+    errEl.textContent = "";
+    try {
+      await api(`/sites/${slug}/aliases/${alias}`, { method: "DELETE" });
+      el.remove();
+      const listEl = document.getElementById("settings-aliases-list");
+      if (!listEl.children.length) {
+        listEl.innerHTML = '<div class="text-sm text-muted" id="no-aliases-msg">No aliases configured.</div>';
+      }
+    } catch (err) {
+      errEl.textContent = err.message;
+    }
+  }
+
+  // Bind existing remove buttons
+  modal.querySelectorAll(".remove-alias-btn").forEach(btn => {
+    const alias = btn.closest("[data-alias]").dataset.alias;
+    btn.addEventListener("click", () => removeAliasHandler(btn.closest("[data-alias]"), alias));
+  });
+
+  // Save settings form
   modal.querySelector("#site-settings-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const newRoot = document.getElementById("settings-root-dir").value.trim() || null;

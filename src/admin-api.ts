@@ -11,7 +11,7 @@ import {
   isTotpRateLimited, recordTotpAttempt,
   auditLog, getAuditLog
 } from "./auth";
-import { listSites, getSite, deploySite, deleteSite, toggleSite, listVersions, switchVersion, deleteVersion, updateSiteSettings } from "./sites";
+import { listSites, getSite, deploySite, deleteSite, toggleSite, listVersions, switchVersion, deleteVersion, updateSiteSettings, getAliases, addAlias, removeAlias } from "./sites";
 import {
   getOverviewStats, getTopSites, getTopPaths, getTrafficOverTime,
   getTopCountries, getTopBrowsers, getRecentRequests,
@@ -208,7 +208,8 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
 
   // --- Sites CRUD ---
   if (path === "/_admin/api/sites" && req.method === "GET") {
-    return json({ sites: listSites() });
+    const sites = listSites().map(s => ({ ...s, aliases: getAliases(s.slug) }));
+    return json({ sites });
   }
 
   if (path === "/_admin/api/sites" && req.method === "POST") {
@@ -236,7 +237,8 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
       const site = getSite(slug);
       if (!site) return json({ error: "Not found" }, 404);
       const versions = listVersions(slug);
-      return json({ site, versions });
+      const aliases = getAliases(slug);
+      return json({ site, versions, aliases });
     }
     if (req.method === "DELETE") {
       const ok = deleteSite(slug);
@@ -264,6 +266,38 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     } catch (e: any) {
       return json({ error: e.message }, 400);
     }
+  }
+
+  // --- Site aliases ---
+  const aliasMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/aliases$/);
+  if (aliasMatch && req.method === "GET") {
+    const slug = aliasMatch[1];
+    const site = getSite(slug);
+    if (!site) return json({ error: "Not found" }, 404);
+    return json({ aliases: getAliases(slug) });
+  }
+  if (aliasMatch && req.method === "POST") {
+    const slug = aliasMatch[1];
+    const site = getSite(slug);
+    if (!site) return json({ error: "Not found" }, 404);
+    const body = await req.json() as { alias?: string };
+    const alias = body.alias?.toLowerCase().trim();
+    if (!alias) return json({ error: "Alias is required" }, 400);
+    try {
+      addAlias(alias, slug);
+      auditLog("alias_added", `${alias} -> ${slug}`, ip);
+      return json({ ok: true, aliases: getAliases(slug) });
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
+  }
+
+  const aliasDeleteMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/aliases\/([a-z0-9-]+)$/);
+  if (aliasDeleteMatch && req.method === "DELETE") {
+    const [, slug, alias] = aliasDeleteMatch;
+    const ok = removeAlias(alias, slug);
+    if (ok) auditLog("alias_removed", `${alias} -> ${slug}`, ip);
+    return ok ? json({ ok: true, aliases: getAliases(slug) }) : json({ error: "Alias not found" }, 404);
   }
 
   // --- Version management ---

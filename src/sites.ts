@@ -48,6 +48,16 @@ db.exec(`
   );
 `);
 
+// Ensure alias table exists
+db.exec(`
+  CREATE TABLE IF NOT EXISTS site_aliases (
+    alias TEXT PRIMARY KEY,
+    site_slug TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (site_slug) REFERENCES sites(slug) ON DELETE CASCADE
+  );
+`);
+
 // Add columns if not present
 try { db.exec("ALTER TABLE sites ADD COLUMN current_version TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN root_dir TEXT"); } catch (_) {}
@@ -182,8 +192,8 @@ export async function deploySite(slug: string, name: string, zipBuffer: ArrayBuf
   await Bun.write(tmpZip, zipBuffer);
 
   const proc = Bun.spawn(["unzip", "-o", tmpZip, "-d", stagingDir], {
-    stdout: "pipe",
-    stderr: "pipe",
+    stdout: "ignore",
+    stderr: "ignore",
   });
   await proc.exited;
   rmSync(tmpZip);
@@ -327,6 +337,7 @@ export function deleteSite(slug: string): boolean {
   }
   db.run("DELETE FROM sites WHERE slug = ?", slug);
   db.run("DELETE FROM site_versions WHERE site_slug = ?", slug);
+  db.run("DELETE FROM site_aliases WHERE site_slug = ?", slug);
   db.run("DELETE FROM requests WHERE site_slug = ?", slug);
   invalidateSiteCache(slug);
   return true;
@@ -427,4 +438,36 @@ export function resolveSitePath(slug: string, filePath: string): string | null {
   }
 
   return null;
+}
+
+// --- Site aliases ---
+
+export function resolveAlias(slug: string): string {
+  const row = db.query("SELECT site_slug FROM site_aliases WHERE alias = ?").get(slug) as { site_slug: string } | null;
+  return row ? row.site_slug : slug;
+}
+
+export function getAliases(siteSlug: string): string[] {
+  const rows = db.query("SELECT alias FROM site_aliases WHERE site_slug = ? ORDER BY alias").all(siteSlug) as { alias: string }[];
+  return rows.map(r => r.alias);
+}
+
+export function addAlias(alias: string, siteSlug: string): void {
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(alias)) {
+    throw new Error("Alias must be lowercase alphanumeric with hyphens, not starting/ending with hyphen");
+  }
+  if (alias.startsWith("_")) {
+    throw new Error("Aliases starting with _ are reserved");
+  }
+  // Don't allow alias that conflicts with an existing site slug
+  const existing = getSite(alias);
+  if (existing) {
+    throw new Error(`Cannot create alias '${alias}' — a site with that slug already exists`);
+  }
+  db.run("INSERT INTO site_aliases (alias, site_slug) VALUES (?, ?)", alias, siteSlug);
+}
+
+export function removeAlias(alias: string, siteSlug: string): boolean {
+  const result = db.run("DELETE FROM site_aliases WHERE alias = ? AND site_slug = ?", alias, siteSlug);
+  return result.changes > 0;
 }

@@ -3,7 +3,7 @@ import { join, resolve } from "path";
 import { handleAdminApi } from "./admin-api";
 import { handleMcp } from "./mcp";
 import { logRequest, extractRequestMeta, shouldTrack, isCountryAllowed } from "./analytics";
-import { resolveSitePath } from "./sites";
+import { resolveSitePath, resolveAlias } from "./sites";
 
 const SECURITY_HEADERS: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
@@ -207,16 +207,28 @@ export function createServer(port: number) {
           return new Response(null, { status: 302, headers: { Location: "/_admin" } });
         }
 
-        const candidateSlug = parts[0];
+        const candidateSlug = resolveAlias(parts[0]);
         const filePath = parts.slice(1).join("/") || "index.html";
         const resolved = resolveSitePath(candidateSlug, filePath);
+
+        // Redirect /slug to /slug/ (and /slug/subdir to /slug/subdir/) so
+        // relative asset paths in HTML resolve correctly in the browser.
+        if (resolved && !path.endsWith("/") && resolved.endsWith("index.html")) {
+          status = 301;
+          logReq();
+          return new Response(null, {
+            status: 301,
+            headers: { Location: path + "/" + url.search },
+          });
+        }
 
         if (resolved) {
           siteSlug = candidateSlug;
           logReq();
           // For HTML files, rewrite <base href="/"> to <base href="/slug/">
+          // Use the original URL path segment so aliases work correctly
           if (resolved.endsWith(".html")) {
-            return serveHtml(resolved, siteSlug, req);
+            return serveHtml(resolved, parts[0], req);
           }
           return serveFile(resolved, req);
         }

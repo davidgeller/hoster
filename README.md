@@ -167,6 +167,16 @@ Hoster automatically detects Angular, React, and Vue builds:
 
 You can adjust these settings per site via the **Settings** button on each site card.
 
+### Site Aliases
+
+You can create aliases so a site is reachable at multiple URL paths. For example, if your site is deployed at `/ekg`, you can add an alias so it's also accessible at `/ecg`.
+
+1. Go to **Sites** in the admin panel
+2. Click **Settings** on the site card
+3. In the **Aliases** section, type the alias slug and click **Add Alias**
+
+Aliases share the same content, versions, and settings as the original site. They appear on the site card alongside the primary slug.
+
 ## MCP (Model Context Protocol) Support
 
 Hoster includes a built-in MCP server that lets AI tools like Claude Code, Cursor, and other MCP-compatible clients read and write files on your hosted sites.
@@ -332,6 +342,7 @@ Hoster is designed to be safe for public exposure. Since the source code is publ
 - All **symlinks are removed** before content is published
 - Post-extraction verification ensures no files escaped the target directory (zip slip protection)
 - Site slugs validated against strict regex (`[a-z0-9-]+`, no leading/trailing hyphens)
+- Site aliases validated with the same rules; aliases cannot shadow existing site slugs or reserved prefixes
 - `root_dir` setting validated at configuration time — rejects path traversal sequences
 
 ### MCP Access
