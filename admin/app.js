@@ -285,6 +285,27 @@ document.addEventListener("DOMContentLoaded", async () => {
       successEl.textContent = countries.length ? `Restricted to: ${countries.join(", ")}` : "All countries allowed";
     } catch (err) { errEl.textContent = err.message; }
   });
+
+  // --- Auto-block form ---
+  document.getElementById("autoblock-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const errEl = document.getElementById("autoblock-error");
+    const successEl = document.getElementById("autoblock-success");
+    errEl.textContent = "";
+    successEl.textContent = "";
+    try {
+      await api("/settings/autoblock", {
+        method: "POST",
+        body: JSON.stringify({
+          enabled: document.getElementById("autoblock-enabled").checked,
+          threshold: parseInt(document.getElementById("autoblock-threshold").value) || 20,
+          window_minutes: parseInt(document.getElementById("autoblock-window").value) || 10,
+          duration_hours: parseInt(document.getElementById("autoblock-duration").value) || 0,
+        }),
+      });
+      successEl.textContent = "Auto-block settings saved";
+    } catch (err) { errEl.textContent = err.message; }
+  });
 });
 
 function showScreen(id) {
@@ -314,9 +335,50 @@ async function loadSettings() {
     document.getElementById("allowed-countries").value = (data.countries || []).join(", ");
   } catch (_) {}
 
+  try {
+    const config = await api("/settings/autoblock");
+    document.getElementById("autoblock-enabled").checked = config.enabled;
+    document.getElementById("autoblock-threshold").value = config.threshold;
+    document.getElementById("autoblock-window").value = config.window_minutes;
+    document.getElementById("autoblock-duration").value = config.duration_hours;
+  } catch (_) {}
+
+  loadBlockedIps();
   loadTotpSettings();
   loadMcpTokens();
   loadMcpAudit();
+}
+
+async function loadBlockedIps() {
+  const el = document.getElementById("blocked-ips-list");
+  if (!el) return;
+  try {
+    const { ips } = await api("/settings/blocked-ips");
+    if (!ips.length) {
+      el.innerHTML = '<p class="text-sm text-muted">No blocked IPs</p>';
+      return;
+    }
+    el.innerHTML = `<h4 style="margin:0 0 8px;font-size:0.85rem;color:var(--text-muted)">Currently Blocked IPs</h4>
+      <ul class="ranked-list">${ips.map(ip => `
+        <li class="ranked-item">
+          <div style="flex:1;min-width:0">
+            <span class="label text-mono">${esc(ip.ip)}</span>
+            <span class="text-sm text-muted">${esc(ip.reason || "")}</span>
+            ${ip.expires_at ? `<span class="text-sm text-muted">expires ${ip.expires_at.replace("T", " ").substring(0, 16)}</span>` : '<span class="text-sm text-muted">permanent</span>'}
+          </div>
+          <button class="btn btn-sm" onclick="unblockIp(${ip.id})" title="Unblock">Unblock</button>
+        </li>`).join("")}
+      </ul>`;
+  } catch (_) {
+    el.innerHTML = '';
+  }
+}
+
+async function unblockIp(id) {
+  try {
+    await api(`/settings/blocked-ips/${id}`, { method: "DELETE" });
+    loadBlockedIps();
+  } catch (err) { console.error(err); }
 }
 
 async function loadTotpSettings() {
@@ -730,7 +792,7 @@ async function loadDashboard() {
     <div class="stat-card"><div class="stat-label">Requests</div><div class="stat-value">${fmt(overview.total_requests)}</div></div>
     <div class="stat-card"><div class="stat-label">Unique Visitors</div><div class="stat-value">${fmt(overview.unique_visitors)}</div></div>
     <div class="stat-card"><div class="stat-label">Active Sites</div><div class="stat-value">${fmt(overview.active_sites)}</div></div>
-    <div class="stat-card"><div class="stat-label">Avg Response</div><div class="stat-value">${overview.avg_response_ms ?? 0}ms</div></div>
+    <div class="stat-card"><div class="stat-label">Avg Response</div><div class="stat-value">${overview.avg_response_ms ?? 0}ms</div><div class="stat-detail">${overview.min_response_ms ?? 0}ms – ${overview.max_response_ms ?? 0}ms</div></div>
     ${blocked.total > 0 ? `<div class="stat-card stat-card-blocked"><div class="stat-label">Blocked</div><div class="stat-value">${fmt(blocked.total)}</div></div>` : ""}
   `;
 
@@ -1145,14 +1207,47 @@ function renderBarChart(containerId, data, valueKey, labelKey) {
     return;
   }
   const max = Math.max(...data.map((d) => d[valueKey]), 1);
-  el.innerHTML = `<div class="bar-chart">
-    ${data.map((d) => {
-      const pct = (d[valueKey] / max) * 100;
-      const label = d[labelKey]?.replace("T", " ").substring(5, 16) || "";
-      return `<div class="bar" style="height:${Math.max(pct, 2)}%" title="${label}: ${d[valueKey]}">
-        <div class="bar-tooltip">${label}<br>${d[valueKey]} hits</div>
-      </div>`;
-    }).join("")}
+
+  // Pick ~4-6 evenly spaced X-axis labels
+  const labelCount = Math.min(data.length, 6);
+  const labelIndices = new Set();
+  if (data.length <= 6) {
+    data.forEach((_, i) => labelIndices.add(i));
+  } else {
+    for (let i = 0; i < labelCount; i++) {
+      labelIndices.add(Math.round(i * (data.length - 1) / (labelCount - 1)));
+    }
+  }
+
+  // Format Y-axis values
+  const mid = Math.round(max / 2);
+  const fmtVal = (v) => v >= 1000 ? (v / 1000).toFixed(1) + "k" : v;
+
+  el.innerHTML = `<div class="chart-wrap">
+    <div class="chart-y-axis">
+      <span>${fmtVal(max)}</span>
+      <span>${fmtVal(mid)}</span>
+      <span>0</span>
+    </div>
+    <div class="chart-main">
+      <div class="bar-chart">
+        ${data.map((d, i) => {
+          const pct = (d[valueKey] / max) * 100;
+          const label = d[labelKey]?.replace("T", " ").substring(5, 16) || "";
+          return `<div class="bar" style="height:${Math.max(pct, 2)}%" title="${label}: ${d[valueKey]}">
+            <div class="bar-tooltip">${label}<br>${d[valueKey]} hits</div>
+          </div>`;
+        }).join("")}
+      </div>
+      <div class="chart-x-axis">
+        ${data.map((d, i) => {
+          const label = d[labelKey]?.replace("T", " ").substring(5, 16) || "";
+          // Show time only (HH:MM) for shorter labels when there are many bars
+          const shortLabel = label.length > 6 ? label.substring(6) : label;
+          return `<span class="chart-x-label" style="visibility:${labelIndices.has(i) ? "visible" : "hidden"}">${shortLabel}</span>`;
+        }).join("")}
+      </div>
+    </div>
   </div>`;
 }
 

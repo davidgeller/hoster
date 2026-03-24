@@ -157,7 +157,9 @@ export function getOverviewStats(hours: number = 24) {
     SELECT
       COUNT(*) as total_requests,
       COUNT(DISTINCT ip) as unique_visitors,
-      ROUND(AVG(response_time_ms), 1) as avg_response_ms
+      ROUND(AVG(response_time_ms), 1) as avg_response_ms,
+      ROUND(MIN(response_time_ms), 1) as min_response_ms,
+      ROUND(MAX(response_time_ms), 1) as max_response_ms
     FROM requests WHERE created_at > ?
   `).get(cutoff) as any;
 
@@ -192,11 +194,28 @@ export function getTopPaths(siteSlug: string | null, hours: number = 24, limit: 
   `).all(cutoff, limit);
 }
 
-export function getTrafficOverTime(hours: number = 24, bucketMinutes: number = 60) {
+export function getTrafficOverTime(hours: number = 24) {
   const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+
+  // Adaptive bucket sizing: finer granularity for shorter time ranges
+  let bucketExpr: string;
+  if (hours <= 1) {
+    // 5-minute buckets for last hour
+    bucketExpr = `strftime('%Y-%m-%dT%H:', created_at) || printf('%02d', (CAST(strftime('%M', created_at) AS INTEGER) / 5) * 5) || ':00'`;
+  } else if (hours <= 6) {
+    // 15-minute buckets for up to 6 hours
+    bucketExpr = `strftime('%Y-%m-%dT%H:', created_at) || printf('%02d', (CAST(strftime('%M', created_at) AS INTEGER) / 15) * 15) || ':00'`;
+  } else if (hours <= 48) {
+    // 1-hour buckets for up to 2 days
+    bucketExpr = `strftime('%Y-%m-%dT%H:00:00', created_at)`;
+  } else {
+    // Daily buckets for longer ranges
+    bucketExpr = `strftime('%Y-%m-%dT00:00:00', created_at)`;
+  }
+
   return db.query(`
     SELECT
-      strftime('%Y-%m-%dT%H:00:00', created_at) as bucket,
+      ${bucketExpr} as bucket,
       COUNT(*) as hits,
       COUNT(DISTINCT ip) as visitors
     FROM requests WHERE created_at > ?
@@ -325,4 +344,98 @@ export function getSiteStats(slug: string, hours: number = 24) {
   `).all(cutoff, slug);
 
   return { overview, paths, countries, traffic };
+}
+
+// --- Auto-block configuration ---
+
+interface AutoBlockConfig {
+  enabled: boolean;
+  threshold: number;       // number of blocked requests to trigger
+  window_minutes: number;  // time window to count within
+  duration_hours: number;  // how long to block (0 = permanent)
+}
+
+const AUTOBLOCK_DEFAULTS: AutoBlockConfig = {
+  enabled: false,
+  threshold: 20,
+  window_minutes: 10,
+  duration_hours: 24,
+};
+
+export function getAutoBlockConfig(): AutoBlockConfig {
+  const row = db.query("SELECT value FROM config WHERE key = 'autoblock_config'").get() as { value: string } | null;
+  if (!row?.value) return { ...AUTOBLOCK_DEFAULTS };
+  try {
+    return { ...AUTOBLOCK_DEFAULTS, ...JSON.parse(row.value) };
+  } catch {
+    return { ...AUTOBLOCK_DEFAULTS };
+  }
+}
+
+export function setAutoBlockConfig(config: Partial<AutoBlockConfig>): AutoBlockConfig {
+  const current = getAutoBlockConfig();
+  const updated = { ...current, ...config };
+  // Enforce sensible bounds
+  updated.threshold = Math.max(1, Math.min(updated.threshold, 10000));
+  updated.window_minutes = Math.max(1, Math.min(updated.window_minutes, 1440));
+  updated.duration_hours = Math.max(0, Math.min(updated.duration_hours, 8760));
+  const value = JSON.stringify(updated);
+  db.run(
+    "INSERT INTO config (key, value) VALUES ('autoblock_config', ?) ON CONFLICT(key) DO UPDATE SET value = ?",
+    value, value
+  );
+  return updated;
+}
+
+// --- Blocked IP management ---
+
+export function isIpBlocked(ip: string): boolean {
+  const now = new Date().toISOString();
+  const row = db.query(
+    "SELECT id FROM blocked_ips WHERE ip = ? AND (expires_at IS NULL OR expires_at > ?)"
+  ).get(ip, now) as any;
+  return !!row;
+}
+
+export function getBlockedIps(): any[] {
+  const now = new Date().toISOString();
+  // Clean expired entries
+  db.run("DELETE FROM blocked_ips WHERE expires_at IS NOT NULL AND expires_at <= ?", now);
+  return db.query(
+    "SELECT id, ip, reason, blocked_at, expires_at FROM blocked_ips ORDER BY blocked_at DESC"
+  ).all();
+}
+
+export function unblockIp(id: number): void {
+  db.run("DELETE FROM blocked_ips WHERE id = ?", id);
+}
+
+export function blockIp(ip: string, reason: string, durationHours: number): void {
+  const expiresAt = durationHours > 0
+    ? new Date(Date.now() + durationHours * 60 * 60 * 1000).toISOString()
+    : null;
+  db.run(
+    "INSERT INTO blocked_ips (ip, reason, expires_at) VALUES (?, ?, ?) ON CONFLICT(ip) DO UPDATE SET reason = ?, blocked_at = datetime('now'), expires_at = ?",
+    ip, reason, expiresAt, reason, expiresAt
+  );
+}
+
+export function checkAndAutoBlock(ip: string): boolean {
+  const config = getAutoBlockConfig();
+  if (!config.enabled || !ip || ip === "unknown") return false;
+
+  // Already blocked?
+  if (isIpBlocked(ip)) return true;
+
+  // Count recent 403s for this IP
+  const cutoff = new Date(Date.now() - config.window_minutes * 60 * 1000).toISOString();
+  const row = db.query(
+    "SELECT COUNT(*) as cnt FROM requests WHERE ip = ? AND status = 403 AND created_at > ?"
+  ).get(ip, cutoff) as { cnt: number };
+
+  if (row.cnt >= config.threshold) {
+    blockIp(ip, `Auto-blocked: ${row.cnt} blocked requests in ${config.window_minutes}min`, config.duration_hours);
+    return true;
+  }
+  return false;
 }

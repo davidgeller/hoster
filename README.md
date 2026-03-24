@@ -12,7 +12,8 @@ Upload a ZIP file through the web admin panel and your site is live at `https://
 - **Web admin panel** — deploy, update, and manage sites from anywhere
 - **Version management** — each upload creates a new version; roll back instantly
 - **SPA support** — auto-detects Angular, React, and Vue builds; rewrites `<base href>` for subpath hosting
-- **Analytics dashboard** — request logs, visitor stats, countries, top pages, status codes, blocked request intelligence
+- **Analytics dashboard** — request logs, visitor stats, countries, top pages, status codes, blocked request intelligence, min/avg/max response times
+- **IP auto-blocking** — automatically block IPs that accumulate too many denied requests, with configurable thresholds and duration
 - **Secure auth** — Argon2id password hashing, TOTP two-factor authentication, session tokens, CSRF protection, rate-limited login
 - **Light/Dark/Auto themes** — admin panel respects system preference
 - **Single binary** — compiles to a standalone executable with no runtime dependencies
@@ -325,6 +326,7 @@ Hoster is designed to be safe for public exposure. Since the source code is publ
 - **No open ports** — all traffic enters through Cloudflare's encrypted tunnel
 - Cloudflare provides DDoS protection, WAF, bot management, and IP reputation filtering at the edge
 - Country-based access restriction (configurable, uses Cloudflare's `cf-ipcountry` header)
+- **IP auto-blocking** — IPs exceeding a configurable number of blocked requests within a time window are automatically denied access. Threshold, window, and block duration are all configurable in Settings. Uses real client IPs from Cloudflare's `cf-connecting-ip` header, so it works correctly behind a tunnel.
 - Proxy header trust validation — `cf-connecting-ip` only trusted when Cloudflare signal headers are present
 - Security headers: `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Strict-Transport-Security`, `Content-Security-Policy`, `Permissions-Policy`
 
@@ -407,6 +409,8 @@ When country restrictions are active, the dashboard surfaces blocked request dat
 - **Top Blocked IPs** — repeat offenders ranked by request volume
 - **Log viewer chips** — blocked requests in the log table are tagged with a red "Blocked" chip for quick identification
 - **Dedicated filter** — filter the log viewer to show only 403 Blocked requests
+- **Response time range** — min, average, and max response times displayed in dashboard stats
+- **Adaptive chart resolution** — traffic chart uses 5-minute buckets for short time ranges, scaling up to daily buckets for longer views
 
 ## Multiple Services on One Device
 

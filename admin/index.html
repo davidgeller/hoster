@@ -307,6 +307,35 @@
               <div class="form-success" id="country-success"></div>
             </form>
           </div>
+          <div class="card mt-4" style="max-width:480px">
+            <h3>IP Auto-Blocking</h3>
+            <p class="text-sm text-muted mb-2">Automatically block IP addresses that accumulate too many denied requests. Uses the real client IP from Cloudflare headers.</p>
+            <form id="autoblock-form">
+              <label class="toggle-label">
+                <input type="checkbox" id="autoblock-enabled">
+                Enable auto-blocking
+              </label>
+              <label>
+                Block after
+                <input type="number" id="autoblock-threshold" min="1" max="10000" value="20">
+                <span class="text-sm text-muted">blocked requests</span>
+              </label>
+              <label>
+                Within
+                <input type="number" id="autoblock-window" min="1" max="1440" value="10">
+                <span class="text-sm text-muted">minutes</span>
+              </label>
+              <label>
+                Block duration
+                <input type="number" id="autoblock-duration" min="0" max="8760" value="24">
+                <span class="text-sm text-muted">hours (0 = permanent)</span>
+              </label>
+              <button type="submit" class="btn btn-primary">Save</button>
+              <div class="form-error" id="autoblock-error"></div>
+              <div class="form-success" id="autoblock-success"></div>
+            </form>
+            <div id="blocked-ips-list" style="margin-top:16px"></div>
+          </div>
         </div>
 
         <!-- About View -->

@@ -16,7 +16,8 @@ import {
   getOverviewStats, getTopSites, getTopPaths, getTrafficOverTime,
   getTopCountries, getTopBrowsers, getRecentRequests,
   getStatusCodeBreakdown, getSiteStats, getBlockedRequests,
-  getAllowedCountries, setAllowedCountries
+  getAllowedCountries, setAllowedCountries,
+  getAutoBlockConfig, setAutoBlockConfig, getBlockedIps, unblockIp
 } from "./analytics";
 import { createMcpToken, listMcpTokens, deleteMcpToken, getMcpAuditLog } from "./mcp";
 
@@ -388,6 +389,26 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     const body = await req.json() as { countries?: string[] };
     setAllowedCountries(body.countries || []);
     return json({ ok: true, countries: getAllowedCountries() });
+  }
+
+  // --- Auto-block settings ---
+  if (path === "/_admin/api/settings/autoblock" && req.method === "GET") {
+    return json(getAutoBlockConfig());
+  }
+  if (path === "/_admin/api/settings/autoblock" && req.method === "POST") {
+    const body = await req.json();
+    const updated = setAutoBlockConfig(body);
+    return json({ ok: true, config: updated });
+  }
+
+  // --- Blocked IPs management ---
+  if (path === "/_admin/api/settings/blocked-ips" && req.method === "GET") {
+    return json({ ips: getBlockedIps() });
+  }
+  const unblockMatch = path.match(/^\/_admin\/api\/settings\/blocked-ips\/(\d+)$/);
+  if (unblockMatch && req.method === "DELETE") {
+    unblockIp(parseInt(unblockMatch[1]));
+    return json({ ok: true });
   }
 
   // --- MCP token management ---

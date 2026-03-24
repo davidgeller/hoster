@@ -91,6 +91,17 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+
+  CREATE TABLE IF NOT EXISTS blocked_ips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ip TEXT UNIQUE NOT NULL,
+    reason TEXT,
+    blocked_at TEXT DEFAULT (datetime('now')),
+    expires_at TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_blocked_ips_ip ON blocked_ips(ip);
+  CREATE INDEX IF NOT EXISTS idx_blocked_ips_expires ON blocked_ips(expires_at);
 `);
 
 // Add columns if not present (for existing databases)

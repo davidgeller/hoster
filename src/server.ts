@@ -2,7 +2,7 @@ import { existsSync, statSync } from "fs";
 import { join, resolve } from "path";
 import { handleAdminApi } from "./admin-api";
 import { handleMcp } from "./mcp";
-import { logRequest, extractRequestMeta, shouldTrack, isCountryAllowed } from "./analytics";
+import { logRequest, extractRequestMeta, shouldTrack, isCountryAllowed, isIpBlocked, checkAndAutoBlock } from "./analytics";
 import { resolveSitePath, resolveAlias } from "./sites";
 
 const SECURITY_HEADERS: Record<string, string> = {
@@ -142,11 +142,21 @@ export function createServer(port: number) {
           });
         }
 
+        // --- IP auto-block check (skip for admin) ---
+        if (!path.startsWith("/_admin") && path !== "/_mcp") {
+          if (isIpBlocked(meta.ip)) {
+            status = 403;
+            logReq();
+            return new Response("Access denied", { status: 403 });
+          }
+        }
+
         // --- Country restriction (skip for admin and MCP) ---
         if (!path.startsWith("/_admin") && path !== "/_mcp") {
           if (!isCountryAllowed(meta.country)) {
             status = 403;
             logReq();
+            checkAndAutoBlock(meta.ip);
             return new Response("Access denied", { status: 403 });
           }
         }
