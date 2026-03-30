@@ -57,11 +57,14 @@ function getMime(path: string): string {
   return MIME_TYPES[ext] || "application/octet-stream";
 }
 
-// Generate a weak ETag from file mtime + size (fast, no file read needed)
-function generateEtag(filePath: string): string | null {
+// Generate a weak ETag from file mtime + size, optionally scoped to a deployment version
+// Including the version ensures ETags always change on redeployment, even if
+// the file's mtime is preserved from the zip and its size hasn't changed.
+function generateEtag(filePath: string, version?: string | null): string | null {
   try {
     const stat = statSync(filePath);
-    return `W/"${stat.mtimeMs.toString(36)}-${stat.size.toString(36)}"`;
+    const base = `${stat.mtimeMs.toString(36)}-${stat.size.toString(36)}`;
+    return version ? `W/"${version}-${base}"` : `W/"${base}"`;
   } catch {
     return null;
   }
@@ -77,9 +80,9 @@ function checkNotModified(req: Request, etag: string | null): Response | null {
   return null;
 }
 
-async function serveHtml(filePath: string, slug: string, req: Request): Promise<Response> {
+async function serveHtml(filePath: string, slug: string, req: Request, version?: string | null): Promise<Response> {
   try {
-    const etag = generateEtag(filePath);
+    const etag = generateEtag(filePath, version);
     const notModified = checkNotModified(req, etag);
     if (notModified) return notModified;
 
@@ -99,20 +102,24 @@ async function serveHtml(filePath: string, slug: string, req: Request): Promise<
   }
 }
 
-function serveFile(filePath: string, req: Request, noCache = false): Response {
+function serveFile(filePath: string, req: Request, cacheMode: "revalidate" | "nocache" | "immutable" = "revalidate", version?: string | null): Response {
   try {
-    const etag = generateEtag(filePath);
+    const etag = generateEtag(filePath, version);
 
-    if (!noCache) {
+    if (cacheMode !== "nocache") {
       const notModified = checkNotModified(req, etag);
       if (notModified) return notModified;
     }
 
     // Use Bun.file() — Bun streams this via sendfile, zero-copy
     const file = Bun.file(filePath);
+    const cacheControl =
+      cacheMode === "nocache" ? "no-cache, no-store, must-revalidate" :
+      cacheMode === "immutable" ? "public, max-age=31536000, immutable" :
+      "no-cache"; // "revalidate" — browser must check ETag every time
     const headers: Record<string, string> = {
       "Content-Type": getMime(filePath),
-      "Cache-Control": noCache ? "no-cache, no-store, must-revalidate" : "public, max-age=3600",
+      "Cache-Control": cacheControl,
     };
     if (etag) headers["ETag"] = etag;
     return new Response(file, { headers });
@@ -200,11 +207,11 @@ export function createServer(port: number) {
           const resolvedAdminDir = resolve(ADMIN_DIR);
           if (adminPath !== "/index.html" && resolvedAdmin.startsWith(resolvedAdminDir + "/") && existsSync(adminFile) && statSync(adminFile).isFile()) {
             logReq();
-            return serveFile(adminFile, req, true);
+            return serveFile(adminFile, req, "nocache");
           }
           // SPA fallback
           logReq();
-          return serveFile(join(ADMIN_DIR, "index.html"), req, true);
+          return serveFile(join(ADMIN_DIR, "index.html"), req, "nocache");
         }
 
         // --- Hosted sites ---
@@ -218,12 +225,12 @@ export function createServer(port: number) {
         }
 
         const candidateSlug = resolveAlias(parts[0]);
-        const filePath = parts.slice(1).join("/") || "index.html";
-        const resolved = resolveSitePath(candidateSlug, filePath);
+        const reqPath = parts.slice(1).join("/") || "index.html";
+        const resolved = resolveSitePath(candidateSlug, reqPath);
 
         // Redirect /slug to /slug/ (and /slug/subdir to /slug/subdir/) so
         // relative asset paths in HTML resolve correctly in the browser.
-        if (resolved && !path.endsWith("/") && resolved.endsWith("index.html")) {
+        if (resolved && !path.endsWith("/") && resolved.filePath.endsWith("index.html")) {
           status = 301;
           logReq();
           return new Response(null, {
@@ -237,10 +244,14 @@ export function createServer(port: number) {
           logReq();
           // For HTML files, rewrite <base href="/"> to <base href="/slug/">
           // Use the original URL path segment so aliases work correctly
-          if (resolved.endsWith(".html")) {
-            return serveHtml(resolved, parts[0], req);
+          if (resolved.filePath.endsWith(".html")) {
+            return serveHtml(resolved.filePath, parts[0], req, resolved.version);
           }
-          return serveFile(resolved, req);
+          // Content-hashed filenames (e.g. main.a1b2c3.js) get immutable caching;
+          // everything else must revalidate so redeployments take effect immediately.
+          const basename = resolved.filePath.substring(resolved.filePath.lastIndexOf("/") + 1);
+          const isHashed = /\.[a-f0-9]{8,}\.\w+$/.test(basename) || /[-.][\w]*\.[a-f0-9]{8,}\./.test(basename);
+          return serveFile(resolved.filePath, req, isHashed ? "immutable" : "revalidate", resolved.version);
         }
 
         // 404

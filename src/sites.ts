@@ -150,6 +150,43 @@ function verifyNoEscape(dir: string): void {
   walk(dir);
 }
 
+// Recursively search for the shallowest directory containing index.html
+// Returns the relative path from baseDir, or null if not found
+// Prefers well-known directory names at each level (browser, dist, build, etc.)
+function findIndexHtmlRoot(baseDir: string, dir: string, maxDepth = 4): string | null {
+  if (maxDepth <= 0) return null;
+  const entries = readdirSync(dir, { withFileTypes: true }).filter(e => e.isDirectory() && !e.name.startsWith("_"));
+
+  // Prioritize well-known build output directories
+  const preferred = ["browser", "dist", "build", "public", "out", "www"];
+  const sorted = entries.sort((a, b) => {
+    const ai = preferred.indexOf(a.name);
+    const bi = preferred.indexOf(b.name);
+    if (ai !== -1 && bi !== -1) return ai - bi;
+    if (ai !== -1) return -1;
+    if (bi !== -1) return 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  // First pass: check immediate children for index.html
+  for (const entry of sorted) {
+    const candidate = join(dir, entry.name);
+    if (existsSync(join(candidate, "index.html"))) {
+      const relative = candidate.slice(baseDir.length + 1); // strip baseDir/ prefix
+      return relative;
+    }
+  }
+
+  // Second pass: recurse into subdirectories
+  for (const entry of sorted) {
+    const candidate = join(dir, entry.name);
+    const found = findIndexHtmlRoot(baseDir, candidate, maxDepth - 1);
+    if (found) return found;
+  }
+
+  return null;
+}
+
 function generateVersion(): string {
   const now = new Date();
   return now.toISOString().replace(/[-:T]/g, "").replace(/\..+/, ""); // 20260311143022
@@ -221,29 +258,13 @@ export async function deploySite(slug: string, name: string, zipBuffer: ArrayBuf
   // Validated — move staging to final version directory (atomic rename)
   Bun.spawnSync(["mv", stagingDir, versionDir]);
 
-  // Auto-detect root directory: look for subdirectory containing index.html
-  // Common patterns: browser/ (Angular), dist/ , build/ , public/ , out/
+  // Auto-detect root directory by finding index.html recursively
+  // Handles varying zip structures like browser/, dist/browser/, dashboard_pwa/browser/, etc.
   let detectedRoot: string | null = null;
   let detectedSpa = 0;
   const topIndex = join(versionDir, "index.html");
   if (!existsSync(topIndex)) {
-    // No top-level index.html — look for one in subdirectories
-    const candidates = ["browser", "dist", "build", "public", "out", "www"];
-    for (const dir of candidates) {
-      if (existsSync(join(versionDir, dir, "index.html"))) {
-        detectedRoot = dir;
-        break;
-      }
-    }
-    // If not a known name, scan for any subdir with index.html
-    if (!detectedRoot) {
-      for (const entry of readdirSync(versionDir, { withFileTypes: true })) {
-        if (entry.isDirectory() && existsSync(join(versionDir, entry.name, "index.html"))) {
-          detectedRoot = entry.name;
-          break;
-        }
-      }
-    }
+    detectedRoot = findIndexHtmlRoot(versionDir, versionDir);
   }
 
   // Auto-detect SPA: look for JS bundles (Angular, React, Vue)
@@ -254,9 +275,10 @@ export async function deploySite(slug: string, name: string, zipBuffer: ArrayBuf
     if (hasJsBundle) detectedSpa = 1;
   }
 
-  // Preserve existing root_dir/spa if site already exists (user may have overridden)
+  // For existing sites: always re-detect root_dir (zip structure may change between versions)
+  // but preserve SPA setting since the user may have set it manually
   const existing = getSite(slug);
-  const rootDir = existing?.root_dir ?? detectedRoot;
+  const rootDir = detectedRoot;
   const spa = existing?.spa ?? detectedSpa;
 
   // Upsert site record
@@ -388,7 +410,12 @@ function getCachedRealPath(dir: string): string {
   return realPath;
 }
 
-export function resolveSitePath(slug: string, filePath: string): string | null {
+export interface ResolvedSite {
+  filePath: string;
+  version: string | null;
+}
+
+export function resolveSitePath(slug: string, filePath: string): ResolvedSite | null {
   const site = getSite(slug);
   if (!site || !site.active) return null;
 
@@ -408,11 +435,13 @@ export function resolveSitePath(slug: string, filePath: string): string | null {
   // Cache the realpath of the site dir — it's the same for all files in this site
   const realSiteDirResolved = getCachedRealPath(realSiteDir);
 
+  const ver = site.current_version || null;
+
   // Try exact file
   if (existsSync(resolved) && statSync(resolved).isFile()) {
     const realPath = realpathSync(resolved);
     if (!realPath.startsWith(realSiteDirResolved)) return null;
-    return resolved;
+    return { filePath: resolved, version: ver };
   }
 
   // Try with index.html for directories
@@ -420,7 +449,7 @@ export function resolveSitePath(slug: string, filePath: string): string | null {
     const index = join(resolved, "index.html");
     if (existsSync(index)) {
       const realPath = realpathSync(index);
-      if (realPath.startsWith(realSiteDirResolved)) return index;
+      if (realPath.startsWith(realSiteDirResolved)) return { filePath: index, version: ver };
     }
   }
 
@@ -428,16 +457,114 @@ export function resolveSitePath(slug: string, filePath: string): string | null {
   const htmlPath = resolved + ".html";
   if (existsSync(htmlPath)) {
     const realPath = realpathSync(htmlPath);
-    if (realPath.startsWith(realSiteDirResolved)) return htmlPath;
+    if (realPath.startsWith(realSiteDirResolved)) return { filePath: htmlPath, version: ver };
   }
 
   // SPA fallback: serve index.html for any unmatched route
   if (site.spa) {
     const spaIndex = join(contentDir, "index.html");
-    if (existsSync(spaIndex)) return spaIndex;
+    if (existsSync(spaIndex)) return { filePath: spaIndex, version: ver };
   }
 
   return null;
+}
+
+// --- File bundle listing ---
+
+export interface SiteFile {
+  path: string;
+  size: number;
+  modified: string;
+}
+
+export function listSiteFiles(slug: string): SiteFile[] {
+  const site = getSite(slug);
+  if (!site || !site.current_version) return [];
+
+  const versionDir = join(SITES_DIR, slug, site.current_version);
+  if (!existsSync(versionDir)) return [];
+
+  const files: SiteFile[] = [];
+  function walk(dir: string, prefix: string) {
+    if (!existsSync(dir)) return;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        walk(full, rel);
+      } else {
+        const st = statSync(full);
+        files.push({
+          path: rel,
+          size: st.size,
+          modified: st.mtime.toISOString(),
+        });
+      }
+    }
+  }
+  walk(versionDir, "");
+  files.sort((a, b) => a.path.localeCompare(b.path));
+  return files;
+}
+
+// --- Reload site from disk (clear all caches, recalculate stats) ---
+
+export function reloadSite(slug: string): boolean {
+  const site = getSite(slug);
+  if (!site || !site.current_version) return false;
+
+  const versionDir = join(SITES_DIR, slug, site.current_version);
+  if (!existsSync(versionDir)) return false;
+
+  // Clear all caches
+  invalidateSiteCache(slug);
+  // Clear realpath cache entries for this site
+  const sitePrefix = join(SITES_DIR, slug);
+  for (const key of realPathCache.keys()) {
+    if (key.startsWith(sitePrefix)) {
+      realPathCache.delete(key);
+    }
+  }
+
+  // Recalculate stats from disk
+  const stats = calcDirStats(versionDir);
+
+  // Update DB with fresh stats
+  db.run(
+    "UPDATE sites SET size_bytes = ?, file_count = ?, updated_at = datetime('now') WHERE slug = ?",
+    stats.size, stats.count, slug
+  );
+
+  // Also update the version record
+  db.run(
+    "UPDATE site_versions SET size_bytes = ?, file_count = ? WHERE site_slug = ? AND version = ?",
+    stats.size, stats.count, slug, site.current_version
+  );
+
+  // Re-verify the _current symlink points to the right place
+  const currentLink = join(SITES_DIR, slug, "_current");
+  if (existsSync(currentLink)) {
+    try {
+      const target = readlinkSync(currentLink);
+      const expectedTarget = versionDir;
+      // If symlink is broken or points elsewhere, fix it
+      if (!existsSync(currentLink) || realpathSync(currentLink) !== realpathSync(expectedTarget)) {
+        unlinkSync(currentLink);
+        symlinkSync(versionDir, currentLink);
+      }
+    } catch {
+      // Symlink is broken — recreate it
+      try { unlinkSync(currentLink); } catch {}
+      symlinkSync(versionDir, currentLink);
+    }
+  } else {
+    symlinkSync(versionDir, currentLink);
+  }
+
+  // Clear the site cache again so next request gets fresh DB data
+  invalidateSiteCache(slug);
+
+  return true;
 }
 
 // --- Site aliases ---

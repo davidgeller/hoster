@@ -806,6 +806,20 @@ tr:hover td { background: var(--bg-hover); }
   100% { width: 0%; margin-left: 100%; }
 }
 
+/* --- Backup Progress --- */
+.backup-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.backup-progress .progress-fill {
+  transition: width 0.3s ease;
+}
+
 /* --- Empty States --- */
 .empty-state {
   text-align: center;

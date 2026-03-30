@@ -627,6 +627,215 @@ async function loadMcpAudit() {
   } catch (_) {}
 }
 
+// --- Configuration Backup ---
+(function initBackup() {
+  let pendingBackupFile = null;
+
+  document.addEventListener("DOMContentLoaded", () => {
+    const fileInput = document.getElementById("backup-file");
+    const fileDrop = document.getElementById("backup-file-drop");
+    const loadBtn = document.getElementById("backup-load-btn");
+    const saveBtn = document.getElementById("backup-save-btn");
+
+    if (fileInput) {
+      fileInput.addEventListener("change", () => {
+        if (fileInput.files.length > 0) {
+          pendingBackupFile = fileInput.files[0];
+          fileDrop.querySelector("p").innerHTML = `Selected: <strong>${esc(pendingBackupFile.name)}</strong> (${formatBytes(pendingBackupFile.size)})`;
+          loadBtn.disabled = false;
+        }
+      });
+    }
+
+    if (saveBtn) saveBtn.addEventListener("click", handleBackupSave);
+    if (loadBtn) loadBtn.addEventListener("click", handleBackupLoad);
+
+    const cancelBtn = document.getElementById("backup-confirm-cancel");
+    if (cancelBtn) cancelBtn.addEventListener("click", () => {
+      document.getElementById("backup-confirm-modal").hidden = true;
+    });
+
+    // Close modal on backdrop click
+    const modal = document.getElementById("backup-confirm-modal");
+    if (modal) {
+      modal.querySelector(".modal-backdrop").addEventListener("click", () => {
+        modal.hidden = true;
+      });
+    }
+  });
+
+  async function handleBackupSave() {
+    const password = document.getElementById("backup-password").value || "";
+    const allVersions = document.getElementById("backup-all-versions").checked;
+    const progressEl = document.getElementById("backup-save-progress");
+    const fillEl = document.getElementById("backup-save-fill");
+    const statusEl = document.getElementById("backup-save-status");
+    const saveBtn = document.getElementById("backup-save-btn");
+    const errEl = document.getElementById("backup-error");
+    const successEl = document.getElementById("backup-success");
+
+    errEl.textContent = "";
+    successEl.textContent = "";
+    progressEl.hidden = false;
+    saveBtn.disabled = true;
+    statusEl.textContent = "Preparing backup...";
+    fillEl.style.width = "";
+    fillEl.style.animation = "progress-indeterminate 1.5s ease-in-out infinite";
+
+    try {
+      const headers = { "Content-Type": "application/json" };
+      if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
+
+      const res = await fetch(API + "/config/export", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ password: password || undefined, all_versions: allVersions }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Export failed");
+      }
+
+      statusEl.textContent = "Downloading...";
+      fillEl.style.animation = "none";
+      fillEl.style.width = "80%";
+
+      const blob = await res.blob();
+      const disposition = res.headers.get("Content-Disposition") || "";
+      const filenameMatch = disposition.match(/filename="(.+?)"/);
+      const filename = filenameMatch ? filenameMatch[1] : `hoster-backup-${new Date().toISOString().slice(0, 10)}.hoster`;
+
+      // Trigger download
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      fillEl.style.width = "100%";
+      statusEl.textContent = "Done!";
+      successEl.textContent = `Backup saved (${formatBytes(blob.size)})`;
+
+      setTimeout(() => { progressEl.hidden = true; }, 2000);
+    } catch (err) {
+      errEl.textContent = err.message;
+      progressEl.hidden = true;
+    } finally {
+      saveBtn.disabled = false;
+    }
+  }
+
+  async function handleBackupLoad() {
+    if (!pendingBackupFile) return;
+
+    const password = document.getElementById("backup-load-password").value || "";
+    const errEl = document.getElementById("backup-error");
+    const progressEl = document.getElementById("backup-load-progress");
+    const fillEl = document.getElementById("backup-load-fill");
+    const statusEl = document.getElementById("backup-load-status");
+
+    errEl.textContent = "";
+    progressEl.hidden = false;
+    statusEl.textContent = "Reading backup...";
+    fillEl.style.width = "";
+    fillEl.style.animation = "progress-indeterminate 1.5s ease-in-out infinite";
+
+    try {
+      // Preview the backup first
+      const previewForm = new FormData();
+      previewForm.append("file", pendingBackupFile);
+      if (password) previewForm.append("password", password);
+
+      const previewHeaders = {};
+      if (csrfToken) previewHeaders["X-CSRF-Token"] = csrfToken;
+
+      const previewRes = await fetch(API + "/config/preview", {
+        method: "POST",
+        body: previewForm,
+        headers: previewHeaders,
+      });
+      const previewData = await previewRes.json();
+      if (!previewRes.ok) throw new Error(previewData.error || "Preview failed");
+
+      progressEl.hidden = true;
+
+      // Show confirmation modal with preview info
+      const manifest = previewData.manifest;
+      const previewInfo = document.getElementById("backup-preview-info");
+      previewInfo.innerHTML = `
+        <div style="background:var(--bg-hover);border-radius:var(--radius-sm);padding:12px;font-size:0.85rem">
+          <div style="margin-bottom:6px"><strong>Backup date:</strong> ${new Date(manifest.created_at).toLocaleString()}</div>
+          <div style="margin-bottom:6px"><strong>Hoster version:</strong> ${esc(manifest.hoster_version)}</div>
+          <div style="margin-bottom:6px"><strong>Sites:</strong> ${manifest.site_count}</div>
+          <div style="margin-bottom:6px"><strong>Versions:</strong> ${manifest.all_versions ? "All versions" : "Current only"}</div>
+          <div><strong>Encrypted:</strong> ${manifest.encrypted ? "Yes" : "No"}</div>
+        </div>
+      `;
+
+      const modal = document.getElementById("backup-confirm-modal");
+      modal.hidden = false;
+
+      // Wait for confirm or cancel
+      const confirmBtn = document.getElementById("backup-confirm-ok");
+      const cancelBtn = document.getElementById("backup-confirm-cancel");
+
+      await new Promise((resolve, reject) => {
+        const cleanup = () => {
+          confirmBtn.removeEventListener("click", onConfirm);
+          cancelBtn.removeEventListener("click", onCancel);
+          modal.querySelector(".modal-backdrop").removeEventListener("click", onCancel);
+        };
+        const onConfirm = () => { cleanup(); modal.hidden = true; resolve(); };
+        const onCancel = () => { cleanup(); modal.hidden = true; reject(new Error("Cancelled")); };
+        confirmBtn.addEventListener("click", onConfirm);
+        cancelBtn.addEventListener("click", onCancel);
+        modal.querySelector(".modal-backdrop").addEventListener("click", onCancel);
+      });
+
+      // User confirmed — proceed with import
+      progressEl.hidden = false;
+      statusEl.textContent = "Restoring configuration...";
+      fillEl.style.animation = "progress-indeterminate 1.5s ease-in-out infinite";
+
+      const importForm = new FormData();
+      importForm.append("file", pendingBackupFile);
+      if (password) importForm.append("password", password);
+      importForm.append("confirm", "yes");
+
+      const importHeaders = {};
+      if (csrfToken) importHeaders["X-CSRF-Token"] = csrfToken;
+
+      const importRes = await fetch(API + "/config/import", {
+        method: "POST",
+        body: importForm,
+        headers: importHeaders,
+      });
+      const importData = await importRes.json();
+      if (!importRes.ok) throw new Error(importData.error || "Import failed");
+
+      fillEl.style.animation = "none";
+      fillEl.style.width = "100%";
+      statusEl.textContent = "Done!";
+
+      document.getElementById("backup-success").textContent =
+        `Configuration restored successfully (${importData.manifest.site_count} sites). Reloading...`;
+
+      // Session was cleared during import — redirect to login after brief delay
+      setTimeout(() => { window.location.reload(); }, 2000);
+
+    } catch (err) {
+      progressEl.hidden = true;
+      if (err.message !== "Cancelled") {
+        errEl.textContent = err.message;
+      }
+    }
+  }
+})();
+
 function mcpServerName(label) {
   // Convert label to a slug-like name for use as the MCP server identifier
   return (label || "hoster").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "hoster";
@@ -904,9 +1113,11 @@ async function loadSites() {
       </div>
       <div class="site-actions">
         <a href="/${esc(s.slug)}/" target="_blank" class="btn btn-sm">Visit</a>
+        <button class="btn btn-sm" onclick="showSiteFiles('${esc(s.slug)}', '${esc(s.name)}')">Files</button>
         <button class="btn btn-sm" onclick="showSiteDetail('${esc(s.slug)}')">Versions</button>
         <button class="btn btn-sm" onclick="redeploySite('${esc(s.slug)}', '${esc(s.name)}')">Update</button>
         <button class="btn btn-sm" data-settings="${esc(s.slug)}">Settings</button>
+        <button class="btn btn-sm" onclick="reloadSiteCache('${esc(s.slug)}', this)">Reload</button>
         <button class="btn btn-sm ${s.active ? "btn-danger" : "btn-primary"}" onclick="toggleSiteActive('${esc(s.slug)}', ${!s.active})">
           ${s.active ? "Disable" : "Enable"}
         </button>
@@ -1125,6 +1336,152 @@ window.confirmDeleteSite = async function (slug) {
   if (!confirm(`Delete site "${slug}" and ALL its versions? This cannot be undone.`)) return;
   await api(`/sites/${slug}`, { method: "DELETE" });
   loadSites();
+};
+
+// --- Site File Browser ---
+window.showSiteFiles = async function (slug, name) {
+  const modal = document.createElement("div");
+  modal.className = "modal site-files-modal";
+  modal.innerHTML = `
+    <div class="modal-backdrop"></div>
+    <div class="modal-content" style="max-width:800px;max-height:90vh;display:flex;flex-direction:column">
+      <h2>${esc(name)} — Files</h2>
+      <p class="text-sm text-muted">Loading...</p>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  modal.querySelector(".modal-backdrop").addEventListener("click", () => modal.remove());
+
+  try {
+    const data = await api(`/sites/${slug}/files`);
+    const files = data.files || [];
+    const content = modal.querySelector(".modal-content");
+
+    if (!files.length) {
+      content.innerHTML = `
+        <h2>${esc(name)} — Files</h2>
+        <p class="text-muted">No files found in this bundle.</p>
+        <div class="modal-actions"><button class="btn btn-ghost close-modal">Close</button></div>
+      `;
+      content.querySelector(".close-modal").addEventListener("click", () => modal.remove());
+      return;
+    }
+
+    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+    const rootNote = data.root_dir ? ` · root: <code>${esc(data.root_dir)}</code>` : "";
+
+    content.innerHTML = `
+      <div style="flex:0 0 auto">
+        <h2>${esc(name)} — Files</h2>
+        <p class="text-sm text-muted" style="margin-bottom:12px">
+          Version <code>${data.version || "—"}</code>${rootNote} · ${files.length} files · ${formatBytes(totalSize)}
+        </p>
+        <div style="margin-bottom:12px">
+          <input type="text" id="file-search" placeholder="Filter files..." style="width:100%;padding:6px 10px;font-size:0.85rem;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);box-sizing:border-box">
+        </div>
+      </div>
+      <div style="flex:1 1 auto;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
+        <table style="width:100%;font-size:0.8rem;border-collapse:collapse" id="file-table">
+          <thead style="position:sticky;top:0;background:var(--surface);z-index:1">
+            <tr>
+              <th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);cursor:pointer" data-sort="path">Path</th>
+              <th style="text-align:right;padding:8px 12px;border-bottom:1px solid var(--border);white-space:nowrap;cursor:pointer" data-sort="size">Size</th>
+              <th style="text-align:right;padding:8px 12px;border-bottom:1px solid var(--border);white-space:nowrap;cursor:pointer" data-sort="modified">Modified</th>
+            </tr>
+          </thead>
+          <tbody id="file-table-body"></tbody>
+        </table>
+      </div>
+      <div class="modal-actions" style="flex:0 0 auto;margin-top:12px">
+        <button class="btn btn-ghost close-modal">Close</button>
+      </div>
+    `;
+
+    let sortKey = "path";
+    let sortAsc = true;
+
+    function renderFiles(filter) {
+      const filtered = filter
+        ? files.filter(f => f.path.toLowerCase().includes(filter.toLowerCase()))
+        : files;
+
+      const sorted = [...filtered].sort((a, b) => {
+        let cmp = 0;
+        if (sortKey === "path") cmp = a.path.localeCompare(b.path);
+        else if (sortKey === "size") cmp = a.size - b.size;
+        else if (sortKey === "modified") cmp = a.modified.localeCompare(b.modified);
+        return sortAsc ? cmp : -cmp;
+      });
+
+      const tbody = document.getElementById("file-table-body");
+      if (!sorted.length) {
+        tbody.innerHTML = '<tr><td colspan="3" style="padding:16px;text-align:center;color:var(--text-muted)">No matching files</td></tr>';
+        return;
+      }
+      tbody.innerHTML = sorted.map(f => {
+        const dir = f.path.lastIndexOf("/") >= 0 ? f.path.substring(0, f.path.lastIndexOf("/") + 1) : "";
+        const fname = f.path.lastIndexOf("/") >= 0 ? f.path.substring(f.path.lastIndexOf("/") + 1) : f.path;
+        const modDate = new Date(f.modified);
+        const modStr = modDate.toLocaleDateString() + " " + modDate.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
+        return `<tr>
+          <td style="padding:4px 12px;border-bottom:1px solid var(--border);word-break:break-all;font-family:monospace">
+            ${dir ? '<span class="text-muted">' + esc(dir) + '</span>' : ''}${esc(fname)}
+          </td>
+          <td style="padding:4px 12px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap">${formatBytes(f.size)}</td>
+          <td style="padding:4px 12px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap">${modStr}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    renderFiles("");
+
+    // Search filter
+    content.querySelector("#file-search").addEventListener("input", (e) => {
+      renderFiles(e.target.value);
+    });
+
+    // Column sorting
+    content.querySelectorAll("[data-sort]").forEach(th => {
+      th.addEventListener("click", () => {
+        const key = th.dataset.sort;
+        if (sortKey === key) sortAsc = !sortAsc;
+        else { sortKey = key; sortAsc = true; }
+        // Update sort indicators
+        content.querySelectorAll("[data-sort]").forEach(h => h.textContent = h.textContent.replace(/ [▲▼]$/, ""));
+        th.textContent += sortAsc ? " ▲" : " ▼";
+        renderFiles(content.querySelector("#file-search").value);
+      });
+    });
+
+    content.querySelector(".close-modal").addEventListener("click", () => modal.remove());
+  } catch (err) {
+    modal.querySelector(".modal-content").innerHTML = `
+      <h2>${esc(name)} — Files</h2>
+      <p style="color:var(--danger)">${esc(err.message)}</p>
+      <div class="modal-actions"><button class="btn btn-ghost close-modal">Close</button></div>
+    `;
+    modal.querySelector(".close-modal").addEventListener("click", () => modal.remove());
+  }
+};
+
+// --- Reload Site Cache ---
+window.reloadSiteCache = async function (slug, btn) {
+  const origText = btn.textContent;
+  btn.textContent = "Reloading...";
+  btn.disabled = true;
+  try {
+    await api(`/sites/${slug}/reload`, { method: "POST" });
+    btn.textContent = "Reloaded!";
+    setTimeout(() => {
+      btn.textContent = origText;
+      btn.disabled = false;
+      loadSites();
+    }, 1000);
+  } catch (err) {
+    btn.textContent = origText;
+    btn.disabled = false;
+    alert("Reload failed: " + err.message);
+  }
 };
 
 // --- Analytics ---

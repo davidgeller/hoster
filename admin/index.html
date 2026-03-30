@@ -308,6 +308,67 @@
             </form>
           </div>
           <div class="card mt-4" style="max-width:480px">
+            <h3>Configuration Backup</h3>
+            <p class="text-sm text-muted mb-2">Save your entire hoster configuration (settings, sites, versions) to a file for migration or backup. Optionally protect with a password.</p>
+            <div style="margin-bottom:16px">
+              <label>
+                Password (optional)
+                <input type="password" id="backup-password" placeholder="Leave empty for no encryption">
+              </label>
+              <label class="toggle-label" style="margin-bottom:12px">
+                <input type="checkbox" id="backup-all-versions">
+                Include all site versions
+              </label>
+              <button class="btn btn-primary" id="backup-save-btn" style="margin-top:4px">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7,10 12,15 17,10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Save Configuration
+              </button>
+              <div class="backup-progress" id="backup-save-progress" hidden>
+                <div class="progress-bar"><div class="progress-fill" id="backup-save-fill"></div></div>
+                <span id="backup-save-status">Preparing backup...</span>
+              </div>
+            </div>
+            <div style="border-top:1px solid var(--border);padding-top:16px">
+              <label>
+                Load from file
+                <div class="file-drop" id="backup-file-drop">
+                  <input type="file" id="backup-file" accept=".hoster">
+                  <p>Drop a <strong>.hoster</strong> file here or click to browse</p>
+                </div>
+              </label>
+              <label>
+                Password (if encrypted)
+                <input type="password" id="backup-load-password" placeholder="Enter password if backup was encrypted">
+              </label>
+              <button class="btn btn-primary" id="backup-load-btn" disabled style="margin-top:4px">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17,8 12,3 7,8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                Load Configuration
+              </button>
+              <div class="backup-progress" id="backup-load-progress" hidden>
+                <div class="progress-bar"><div class="progress-fill" id="backup-load-fill"></div></div>
+                <span id="backup-load-status">Loading backup...</span>
+              </div>
+              <div class="form-error" id="backup-error"></div>
+              <div class="form-success" id="backup-success"></div>
+            </div>
+          </div>
+
+          <!-- Backup Confirmation Modal -->
+          <div id="backup-confirm-modal" class="modal" hidden>
+            <div class="modal-backdrop"></div>
+            <div class="modal-content">
+              <h2>Confirm Configuration Load</h2>
+              <p style="margin-bottom:12px;color:var(--danger);font-weight:500">This will replace all current settings, sites, and data.</p>
+              <div id="backup-preview-info" style="margin-bottom:16px"></div>
+              <p class="text-sm text-muted" style="margin-bottom:16px">This action cannot be undone. You may want to save your current configuration first.</p>
+              <div class="modal-actions">
+                <button class="btn btn-ghost" id="backup-confirm-cancel">Cancel</button>
+                <button class="btn btn-danger" id="backup-confirm-ok">Replace Everything</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="card mt-4" style="max-width:480px">
             <h3>IP Auto-Blocking</h3>
             <p class="text-sm text-muted mb-2">Automatically block IP addresses that accumulate too many denied requests. Uses the real client IP from Cloudflare headers.</p>
             <form id="autoblock-form">

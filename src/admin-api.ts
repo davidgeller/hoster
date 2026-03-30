@@ -11,7 +11,7 @@ import {
   isTotpRateLimited, recordTotpAttempt,
   auditLog, getAuditLog
 } from "./auth";
-import { listSites, getSite, deploySite, deleteSite, toggleSite, listVersions, switchVersion, deleteVersion, updateSiteSettings, getAliases, addAlias, removeAlias } from "./sites";
+import { listSites, getSite, deploySite, deleteSite, toggleSite, listVersions, switchVersion, deleteVersion, updateSiteSettings, getAliases, addAlias, removeAlias, listSiteFiles, reloadSite } from "./sites";
 import {
   getOverviewStats, getTopSites, getTopPaths, getTrafficOverTime,
   getTopCountries, getTopBrowsers, getRecentRequests,
@@ -20,6 +20,7 @@ import {
   getAutoBlockConfig, setAutoBlockConfig, getBlockedIps, unblockIp
 } from "./analytics";
 import { createMcpToken, listMcpTokens, deleteMcpToken, getMcpAuditLog } from "./mcp";
+import { createBackup, previewBackup, restoreBackup } from "./backup";
 
 function json(data: any, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data), {
@@ -269,6 +270,25 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     }
   }
 
+  // --- Site file listing ---
+  const filesMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/files$/);
+  if (filesMatch && req.method === "GET") {
+    const slug = filesMatch[1];
+    const site = getSite(slug);
+    if (!site) return json({ error: "Not found" }, 404);
+    const files = listSiteFiles(slug);
+    return json({ files, version: site.current_version, root_dir: site.root_dir });
+  }
+
+  // --- Site reload (clear caches, recalculate from disk) ---
+  const reloadMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/reload$/);
+  if (reloadMatch && req.method === "POST") {
+    const slug = reloadMatch[1];
+    const ok = reloadSite(slug);
+    if (ok) auditLog("site_reloaded", slug, ip);
+    return ok ? json({ ok: true }) : json({ error: "Not found or no active version" }, 404);
+  }
+
   // --- Site aliases ---
   const aliasMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/aliases$/);
   if (aliasMatch && req.method === "GET") {
@@ -446,6 +466,56 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     cleanExpiredSessions();
     cleanExpiredPending2fa();
     return json({ ok: true });
+  }
+
+  // --- Configuration backup/restore ---
+  if (path === "/_admin/api/config/export" && req.method === "POST") {
+    try {
+      const body = await req.json() as { password?: string; all_versions?: boolean };
+      const buffer = await createBackup(body.password || undefined, !!body.all_versions);
+      auditLog("config_exported", body.password ? "encrypted" : "unencrypted", ip);
+      return new Response(buffer, {
+        status: 200,
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Disposition": `attachment; filename="hoster-backup-${new Date().toISOString().slice(0, 10)}.hoster"`,
+          "Content-Length": String(buffer.length),
+        },
+      });
+    } catch (e: any) {
+      return json({ error: e.message }, 500);
+    }
+  }
+
+  if (path === "/_admin/api/config/preview" && req.method === "POST") {
+    try {
+      const formData = await req.formData();
+      const file = formData.get("file") as File;
+      const password = (formData.get("password") as string) || undefined;
+      if (!file) return json({ error: "Backup file is required" }, 400);
+      const buffer = Buffer.from(await file.arrayBuffer());
+      const manifest = await previewBackup(buffer, password);
+      return json({ manifest });
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
+  }
+
+  if (path === "/_admin/api/config/import" && req.method === "POST") {
+    try {
+      const formData = await req.formData();
+      const file = formData.get("file") as File;
+      const password = (formData.get("password") as string) || undefined;
+      const confirm = formData.get("confirm") as string;
+      if (!file) return json({ error: "Backup file is required" }, 400);
+      if (confirm !== "yes") return json({ error: "Confirmation required" }, 400);
+      const buffer = Buffer.from(await file.arrayBuffer());
+      const manifest = await restoreBackup(buffer, password);
+      auditLog("config_imported", `${manifest.site_count} sites restored`, ip);
+      return json({ ok: true, manifest });
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
   }
 
   return null;

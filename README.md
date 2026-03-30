@@ -11,7 +11,8 @@ Upload a ZIP file through the web admin panel and your site is live at `https://
 - **Zero-config HTTPS** — Cloudflare handles SSL termination automatically
 - **Web admin panel** — deploy, update, and manage sites from anywhere
 - **Version management** — each upload creates a new version; roll back instantly
-- **SPA support** — auto-detects Angular, React, and Vue builds; rewrites `<base href>` for subpath hosting
+- **SPA support** — auto-detects Angular, React, and Vue builds (with deep root directory detection); rewrites `<base href>` for subpath hosting
+- **Configuration backup** — save and restore your entire hoster setup (settings, sites, versions) to a `.hoster` file with optional AES-256-GCM encryption for device migration
 - **Analytics dashboard** — request logs, visitor stats, countries, top pages, status codes, blocked request intelligence, min/avg/max response times
 - **IP auto-blocking** — automatically block IPs that accumulate too many denied requests, with configurable thresholds and duration
 - **Secure auth** — Argon2id password hashing, TOTP two-factor authentication, session tokens, CSRF protection, rate-limited login
@@ -162,7 +163,7 @@ Click **Update** on a site card, upload a new ZIP. This creates a new version wh
 
 Hoster automatically detects Angular, React, and Vue builds:
 
-- **Root directory detection** — if your ZIP contains a `browser/`, `dist/`, `build/`, or similar subdirectory with `index.html`, Hoster serves from there
+- **Root directory detection** — Hoster recursively searches for the shallowest directory containing `index.html`, handling nested structures like `dashboard_pwa/browser/` automatically. Well-known directories (`browser/`, `dist/`, `build/`, `public/`, `out/`, `www/`) are preferred. The root directory is re-detected on each deploy, so changing your build output structure between versions just works.
 - **Base href rewriting** — `<base href="/">` is automatically rewritten to `<base href="/your-slug/">` so asset paths work correctly under a subpath
 - **SPA routing** — enable SPA mode in site Settings to serve `index.html` for all unmatched routes (required for client-side routing)
 
@@ -238,6 +239,40 @@ Tokens can be scoped to a single site, set to expire, and revoked at any time. A
 
 ![MCP Activity Log](assets/mcp.jpg)
 
+## Configuration Backup & Restore
+
+Hoster can save its entire configuration — settings, sites, and file data — to a single `.hoster` file for backup or device migration.
+
+### Saving a Backup
+
+1. Go to **Settings** → **Configuration Backup**
+2. Optionally enter a password to encrypt the backup
+3. Choose whether to include all site versions or just the current version of each site (default)
+4. Click **Save Configuration** — the file downloads to your browser
+
+### Loading a Backup
+
+1. In the same section, drop or select a `.hoster` file
+2. Enter the password if the backup was encrypted
+3. Click **Load Configuration** — a confirmation dialog shows what's in the backup
+4. Click **Replace Everything** to proceed
+
+Loading a backup replaces all settings, sites, and data. Sessions are cleared, so you'll be redirected to log in with the restored password.
+
+### What's Included
+
+| Data | Included |
+|------|----------|
+| Admin password, TOTP secret, recovery codes | Yes |
+| Country restrictions, auto-block config | Yes |
+| All sites (files, versions, aliases) | Yes (current version only by default) |
+| MCP tokens (hashed), blocked IPs | Yes |
+| Sessions, login attempts, analytics logs | No |
+
+### File Format
+
+The `.hoster` file is a standard ZIP archive containing a `manifest.json`, `database.json`, and the `sites/` directory. When a password is provided, the entire ZIP is encrypted with AES-256-GCM using a PBKDF2-derived key (100,000 iterations, SHA-256).
+
 ## Upgrading Hoster
 
 On your build machine:
@@ -280,6 +315,7 @@ hoster/
 │   ├── admin-api.ts    # Admin REST API
 │   ├── analytics.ts    # Request logging & dashboard queries
 │   ├── sites.ts        # Site management & versioning
+│   ├── backup.ts       # Configuration backup & restore
 │   ├── mcp.ts          # MCP server & token management
 │   ├── db.ts           # SQLite database setup
 │   └── setup.ts        # CLI password setup
@@ -355,6 +391,16 @@ Hoster is designed to be safe for public exposure. Since the source code is publ
 - File path traversal protection (same as static file serving) prevents escape from site directories
 - Per-site **read-only mode** blocks write and delete operations
 - All MCP tool calls are logged with token label, tool name, site, path, and success/failure
+
+### Configuration Backup
+
+- Backup export and import require an authenticated admin session with valid CSRF token
+- Uploaded backup files are size-limited (500 MB max)
+- Restored archives are stripped of symlinks and verified against zip slip (path escape) attacks before any files are written
+- Optional **AES-256-GCM encryption** with PBKDF2 key derivation (100,000 iterations, 32-byte random salt) protects backups at rest
+- **Unencrypted backups contain sensitive data** — the TOTP secret and recovery code hashes are included. Anyone with an unencrypted `.hoster` file and access to the password hash could potentially compromise the account. Use a password for backups stored off-device.
+- Import requires explicit confirmation (`confirm=yes`) to prevent accidental overwrites
+- All backup and restore operations are audit-logged with IP address
 
 ### Data Protection
 
