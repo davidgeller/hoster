@@ -11,7 +11,7 @@ import {
   isTotpRateLimited, recordTotpAttempt,
   auditLog, getAuditLog
 } from "./auth";
-import { listSites, getSite, deploySite, deleteSite, toggleSite, listVersions, switchVersion, deleteVersion, updateSiteSettings, getAliases, addAlias, removeAlias, listSiteFiles, reloadSite } from "./sites";
+import { listSites, getSite, deploySite, createBlankSite, deleteSite, toggleSite, listVersions, switchVersion, deleteVersion, commitVersion, updateSiteSettings, getAliases, addAlias, removeAlias, listSiteFiles, reloadSite } from "./sites";
 import {
   getOverviewStats, getTopSites, getTopPaths, getTrafficOverTime,
   getTopCountries, getTopBrowsers, getRecentRequests,
@@ -232,6 +232,21 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     }
   }
 
+  // --- Create blank site (no ZIP — AI tools populate via MCP) ---
+  if (path === "/_admin/api/sites/blank" && req.method === "POST") {
+    const body = await req.json() as { slug?: string; name?: string };
+    const slug = body.slug?.toLowerCase().trim();
+    const name = body.name?.trim() || slug;
+    if (!slug) return json({ error: "Slug is required" }, 400);
+    try {
+      const result = createBlankSite(slug, name!);
+      auditLog("site_created_blank", slug, ip);
+      return json(result);
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
+  }
+
   const siteMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)$/);
   if (siteMatch) {
     const slug = siteMatch[1];
@@ -261,10 +276,25 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   const settingsMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/settings$/);
   if (settingsMatch && req.method === "POST") {
     const slug = settingsMatch[1];
-    const body = await req.json() as { root_dir?: string | null; spa?: boolean; mcp_enabled?: boolean; mcp_read_only?: boolean };
+    const body = await req.json() as { root_dir?: string | null; spa?: boolean; mcp_enabled?: boolean; mcp_read_only?: boolean; mcp_auto_commit?: boolean };
     try {
-      const ok = updateSiteSettings(slug, body.root_dir ?? null, body.spa ?? false, body.mcp_enabled, body.mcp_read_only);
+      const ok = updateSiteSettings(slug, body.root_dir ?? null, body.spa ?? false, body.mcp_enabled, body.mcp_read_only, body.mcp_auto_commit);
       return ok ? json({ ok: true }) : json({ error: "Not found" }, 404);
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
+  }
+
+  // --- Commit current working version (freeze + fork new mutable copy) ---
+  const commitMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/commit$/);
+  if (commitMatch && req.method === "POST") {
+    const slug = commitMatch[1];
+    const body = await req.json().catch(() => ({})) as { label?: string };
+    try {
+      const result = commitVersion(slug, body.label || null);
+      if (!result) return json({ error: "Site not found or has no current version" }, 404);
+      auditLog("version_committed", `${slug} -> ${result.version}${body.label ? ` (${body.label})` : ""}`, ip);
+      return json({ ok: true, version: result });
     } catch (e: any) {
       return json({ error: e.message }, 400);
     }

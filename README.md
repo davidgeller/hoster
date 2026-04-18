@@ -18,7 +18,8 @@ Upload a ZIP file through the web admin panel and your site is live at `https://
 - **Secure auth** — Argon2id password hashing, TOTP two-factor authentication, session tokens, CSRF protection, rate-limited login
 - **Light/Dark/Auto themes** — admin panel respects system preference
 - **Single binary** — compiles to a standalone executable with no runtime dependencies
-- **MCP server** — expose site files to AI tools (Claude Code, Cursor, etc.) via the Model Context Protocol
+- **MCP server** — expose site files to AI tools (Claude Code, Cursor, etc.) via the Model Context Protocol, with chunked media uploads (JPEG, PNG, GIF, MP3, MP4) and magic-byte validation
+- **AI-first authoring** — create blank sites that AI tools populate via MCP; auto-snapshot the working version before the first AI edit so every session has a rollback point
 - **Tiny footprint** — runs comfortably on a Raspberry Pi with minimal resources
 
 ## How It Works
@@ -169,6 +170,27 @@ Hoster automatically detects Angular, React, and Vue builds:
 
 You can adjust these settings per site via the **Settings** button on each site card.
 
+### Creating a Blank Site
+
+For AI-driven authoring workflows, you can create an empty site without uploading a ZIP:
+
+1. Go to **Sites** in the admin panel
+2. Click **New Blank Site**
+3. Enter a slug and optional display name — the site is created with a placeholder `index.html`
+4. Open **Settings** on the new site and enable **MCP Access** so AI tools can populate it
+
+Blank sites work exactly like deployed sites: they version, snapshot, and can be rolled back. The first MCP write replaces the placeholder.
+
+### Version Snapshots
+
+Every deploy creates a version, but you can also snapshot the current working state at any time — useful for marking checkpoints during AI editing sessions:
+
+1. Open **Versions** on a site card
+2. Optionally enter a label (e.g. "first draft", "after hero redesign")
+3. Click **Snapshot Current**
+
+The current version is frozen under that label and a new mutable copy is forked for further edits. You can roll back to any snapshot from the same Versions dialog.
+
 ### Site Aliases
 
 You can create aliases so a site is reachable at multiple URL paths. For example, if your site is deployed at `/ekg`, you can add an alias so it's also accessible at `/ecg`.
@@ -232,8 +254,26 @@ The server name is derived from the token label, so each token gets a distinct, 
 | `list_sites` | List all MCP-enabled sites |
 | `list_files` | List all files in a site's current deployment |
 | `read_file` | Read a file (text or base64 for binary) |
-| `write_file` | Write/overwrite a file (blocked in read-only mode) |
+| `write_file` | Write/overwrite a text file (blocked in read-only mode) |
+| `write_media_file` | Write/overwrite an image or audio/video file (JPEG, PNG, GIF, MP3, MP4) via base64, with magic-byte validation and chunked-upload support up to 100 MB |
 | `delete_file` | Delete a file (blocked in read-only mode) |
+| `list_versions` | List all snapshot versions of a site with labels, sizes, and MCP-modified flags |
+| `commit_version` | Freeze the current working state as a labeled snapshot and fork a new mutable copy |
+
+### Media File Uploads
+
+`write_media_file` accepts base64-encoded image and audio/video content and enforces two layers of validation:
+
+- **Extension allowlist** — only `.jpg`, `.jpeg`, `.png`, `.gif`, `.mp3`, `.mp4` are accepted
+- **Magic-byte signature** — the first chunk must contain a valid header for the claimed format (e.g. a `.png` path requires a real PNG header on disk)
+
+For files larger than ~7 MB raw, the tool supports **chunked uploads**: the first call with `append: false` creates and validates the file, and subsequent calls with `append: true` extend it. Per-call payload is limited to 10 MB of base64; total file size is limited to 100 MB.
+
+### Auto-snapshot Before AI Edits
+
+Enable **Auto-snapshot before AI edits** in a site's Settings to automatically freeze the current version the first time MCP writes to it. The pre-AI state is preserved as a labeled snapshot you can roll back to, and the mutable copy gets a `mcp_modified` badge in the Versions dialog so you can see at a glance which versions were touched by an AI session.
+
+Combine with manual `commit_version` calls mid-session for finer-grained checkpoints.
 
 Tokens can be scoped to a single site, set to expire, and revoked at any time. All MCP activity is logged in the **MCP Activity Log** in Settings.
 
@@ -391,6 +431,21 @@ Hoster is designed to be safe for public exposure. Since the source code is publ
 - File path traversal protection (same as static file serving) prevents escape from site directories
 - Per-site **read-only mode** blocks write and delete operations
 - All MCP tool calls are logged with token label, tool name, site, path, and success/failure
+- Text writes (`write_file`) are capped at 10 MB per call
+- Media writes (`write_media_file`) enforce an extension allowlist (JPEG, PNG, GIF, MP3, MP4) plus magic-byte verification on the first chunk, blocking disguised executables (`.exe` renamed to `.jpg`) before any bytes are written to disk
+- Media uploads are capped at 10 MB per call (base64) and 100 MB total per file
+- **Auto-snapshot** freezes the pre-AI working version on the first MCP write, preserving a rollback point if an AI session corrupts or defaces content
+- The `X-Content-Type-Options: nosniff` header is set on all site responses, blocking MIME-sniffing attacks against uploaded polyglot media
+
+#### Residual Risks of MCP Writes
+
+MCP tokens are by design trusted credentials — anyone holding one can modify the sites they're scoped to. A few risk categories are worth understanding:
+
+- **Disk-fill DoS** — there is no per-site storage quota. A compromised token can loop 100 MB media uploads to fill the Pi's disk. Monitor the host's free space and revoke suspicious tokens from the **MCP Activity Log**.
+- **Domain reputation** — `write_media_file` restricts content types so the domain can't be used to host arbitrary executables, but a token holder can still upload objectionable media that would be served from your domain until removed.
+- **Non-atomic chunked writes** — during a multi-chunk `write_media_file` upload, the target path contains a partial file that is served as-is. Visitors mid-upload see a corrupt asset. Use versioned paths or auto-snapshot if this matters for your workflow.
+- **Append-phase polyglots** — a valid media header on chunk 1 followed by arbitrary bytes on subsequent chunks produces a polyglot file on disk. The `nosniff` header blocks browsers from executing this as script, and the file extension remains an allowlisted media type, but the bytes themselves are not re-validated after the first chunk.
+- **Auto-snapshot scope** — auto-snapshot only fires on the **first** MCP write to a given working version. Further writes within the same session mutate the working copy; use `commit_version` to create additional checkpoints mid-session.
 
 ### Configuration Backup
 

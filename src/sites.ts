@@ -1,5 +1,5 @@
 import db from "./db";
-import { mkdirSync, rmSync, existsSync, readdirSync, statSync, symlinkSync, readlinkSync, unlinkSync, realpathSync, lstatSync } from "fs";
+import { mkdirSync, rmSync, existsSync, readdirSync, statSync, symlinkSync, readlinkSync, unlinkSync, realpathSync, lstatSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 
 import { dirname } from "path";
@@ -21,6 +21,7 @@ export interface Site {
   spa: number;              // 1 = SPA mode (fallback to index.html)
   mcp_enabled: number;      // 1 = MCP file access enabled
   mcp_read_only: number;    // 1 = MCP can only read, not write/delete
+  mcp_auto_commit: number;  // 1 = snapshot current version before first MCP write
 }
 
 export interface SiteVersion {
@@ -31,6 +32,7 @@ export interface SiteVersion {
   size_bytes: number;
   file_count: number;
   created_at: string;
+  mcp_modified: number;     // 1 = at least one MCP write/delete has touched this version
 }
 
 // Ensure version tables exist
@@ -64,6 +66,8 @@ try { db.exec("ALTER TABLE sites ADD COLUMN root_dir TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN spa INTEGER DEFAULT 0"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN mcp_enabled INTEGER DEFAULT 0"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN mcp_read_only INTEGER DEFAULT 0"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN mcp_auto_commit INTEGER DEFAULT 0"); } catch (_) {}
+try { db.exec("ALTER TABLE site_versions ADD COLUMN mcp_modified INTEGER DEFAULT 0"); } catch (_) {}
 
 // --- Site config cache (avoids DB + filesystem hits on every request) ---
 const siteCache = new Map<string, { site: Site; ts: number }>();
@@ -205,14 +209,72 @@ function updateCurrentSymlink(slug: string, version: string) {
 
 const MAX_UPLOAD_SIZE = 500 * 1024 * 1024; // 500 MB
 
-export async function deploySite(slug: string, name: string, zipBuffer: ArrayBuffer, label?: string): Promise<{ site: Site; version: SiteVersion }> {
-  // Validate slug
+function validateSlug(slug: string): void {
   if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(slug)) {
     throw new Error("Slug must be lowercase alphanumeric with hyphens, not starting/ending with hyphen");
   }
   if (slug.startsWith("_")) {
     throw new Error("Slugs starting with _ are reserved");
   }
+}
+
+const BLANK_INDEX_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>New Site</title>
+  <style>
+    body { font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #f5f5f5; color: #333; }
+    .card { background: #fff; padding: 32px 40px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); max-width: 520px; text-align: center; }
+    h1 { font-weight: 400; margin: 0 0 8px; }
+    p { color: #666; line-height: 1.5; margin: 8px 0; }
+    code { background: #eee; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Ready for content</h1>
+    <p>This site is blank. Connect an AI tool via MCP to generate its structure, or upload a ZIP to deploy a new version.</p>
+  </div>
+</body>
+</html>
+`;
+
+export function createBlankSite(slug: string, name: string): { site: Site; version: SiteVersion } {
+  validateSlug(slug);
+
+  if (getSite(slug)) {
+    throw new Error(`Site '${slug}' already exists`);
+  }
+
+  const version = generateVersion();
+  const siteDir = join(SITES_DIR, slug);
+  const versionDir = join(siteDir, version);
+
+  mkdirSync(versionDir, { recursive: true });
+  writeFileSync(join(versionDir, "index.html"), BLANK_INDEX_HTML, "utf-8");
+
+  const stats = { size: Buffer.byteLength(BLANK_INDEX_HTML, "utf-8"), count: 1 };
+
+  db.run(`
+    INSERT INTO sites (slug, name, size_bytes, file_count, current_version, root_dir, spa, mcp_enabled, mcp_read_only, updated_at)
+    VALUES (?, ?, ?, ?, ?, NULL, 0, 0, 0, datetime('now'))
+  `, slug, name, stats.size, stats.count, version);
+
+  db.run(`
+    INSERT INTO site_versions (site_slug, version, label, size_bytes, file_count)
+    VALUES (?, ?, ?, ?, ?)
+  `, slug, version, "Blank site", stats.size, stats.count);
+
+  updateCurrentSymlink(slug, version);
+  invalidateSiteCache(slug);
+
+  return { site: getSite(slug)!, version: getVersion(slug, version)! };
+}
+
+export async function deploySite(slug: string, name: string, zipBuffer: ArrayBuffer, label?: string): Promise<{ site: Site; version: SiteVersion }> {
+  validateSlug(slug);
   if (zipBuffer.byteLength > MAX_UPLOAD_SIZE) {
     throw new Error("Upload exceeds maximum size of 500 MB");
   }
@@ -308,7 +370,7 @@ export async function deploySite(slug: string, name: string, zipBuffer: ArrayBuf
   return { site: getSite(slug)!, version: getVersion(slug, version)! };
 }
 
-function getVersion(slug: string, version: string): SiteVersion | null {
+export function getVersion(slug: string, version: string): SiteVersion | null {
   return db.query(
     "SELECT * FROM site_versions WHERE site_slug = ? AND version = ?"
   ).get(slug, version) as SiteVersion | null;
@@ -330,6 +392,69 @@ export function switchVersion(slug: string, version: string): boolean {
   );
   invalidateSiteCache(slug);
   return true;
+}
+
+// Freeze the current working version (optionally labeling it) and fork a new
+// mutable copy. _current is pointed at the new copy so subsequent edits do not
+// touch the frozen snapshot.
+export function commitVersion(slug: string, label?: string | null): SiteVersion | null {
+  const site = getSite(slug);
+  if (!site || !site.current_version) return null;
+
+  const currentVersionId = site.current_version;
+  const currentDir = join(SITES_DIR, slug, currentVersionId);
+  if (!existsSync(currentDir)) return null;
+
+  // Update the label on the version being frozen (only if the caller supplied one).
+  if (label && label.trim()) {
+    db.run(
+      "UPDATE site_versions SET label = ? WHERE site_slug = ? AND version = ?",
+      label.trim(), slug, currentVersionId
+    );
+  }
+
+  // Refresh stats on the frozen version (may have drifted from in-place MCP writes).
+  const frozenStats = calcDirStats(currentDir);
+  db.run(
+    "UPDATE site_versions SET size_bytes = ?, file_count = ? WHERE site_slug = ? AND version = ?",
+    frozenStats.size, frozenStats.count, slug, currentVersionId
+  );
+
+  // Fork a new version as a copy of the frozen one. Portable across macOS/Linux;
+  // sites are small so full copy is acceptable. Optimize to CoW/hardlinks later.
+  const newVersion = generateVersion();
+  const newDir = join(SITES_DIR, slug, newVersion);
+  const cp = Bun.spawnSync(["cp", "-R", currentDir, newDir], {
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  if (cp.exitCode !== 0) {
+    const err = cp.stderr ? new TextDecoder().decode(cp.stderr) : "unknown error";
+    throw new Error(`Failed to snapshot version: ${err.trim()}`);
+  }
+
+  db.run(
+    `INSERT INTO site_versions (site_slug, version, label, size_bytes, file_count, mcp_modified)
+     VALUES (?, ?, NULL, ?, ?, 0)`,
+    slug, newVersion, frozenStats.size, frozenStats.count
+  );
+
+  updateCurrentSymlink(slug, newVersion);
+  db.run(
+    "UPDATE sites SET current_version = ?, updated_at = datetime('now') WHERE slug = ?",
+    newVersion, slug
+  );
+  invalidateSiteCache(slug);
+
+  return getVersion(slug, newVersion);
+}
+
+// Set mcp_modified=1 on a specific version. Called after successful MCP writes/deletes.
+export function markVersionModified(slug: string, version: string): void {
+  db.run(
+    "UPDATE site_versions SET mcp_modified = 1 WHERE site_slug = ? AND version = ?",
+    slug, version
+  );
 }
 
 export function deleteVersion(slug: string, version: string): boolean {
@@ -373,7 +498,7 @@ export function toggleSite(slug: string, active: boolean): boolean {
 
 export function updateSiteSettings(
   slug: string, rootDir: string | null, spa: boolean,
-  mcpEnabled?: boolean, mcpReadOnly?: boolean
+  mcpEnabled?: boolean, mcpReadOnly?: boolean, mcpAutoCommit?: boolean
 ): boolean {
   if (rootDir) {
     if (rootDir.includes("..") || rootDir.startsWith("/") || rootDir.includes("\0")) {
@@ -387,11 +512,13 @@ export function updateSiteSettings(
     `UPDATE sites SET root_dir = ?, spa = ?,
       mcp_enabled = COALESCE(?, mcp_enabled),
       mcp_read_only = COALESCE(?, mcp_read_only),
+      mcp_auto_commit = COALESCE(?, mcp_auto_commit),
       updated_at = datetime('now')
     WHERE slug = ?`,
     rootDir, spa ? 1 : 0,
     mcpEnabled !== undefined ? (mcpEnabled ? 1 : 0) : null,
     mcpReadOnly !== undefined ? (mcpReadOnly ? 1 : 0) : null,
+    mcpAutoCommit !== undefined ? (mcpAutoCommit ? 1 : 0) : null,
     slug
   );
   invalidateSiteCache(slug);

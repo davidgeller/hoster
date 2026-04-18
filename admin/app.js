@@ -177,7 +177,38 @@ document.addEventListener("DOMContentLoaded", async () => {
     document.getElementById("upload-modal").hidden = false;
   });
   document.getElementById("upload-cancel").addEventListener("click", closeUploadModal);
-  document.querySelector(".modal-backdrop")?.addEventListener("click", closeUploadModal);
+  document.querySelector("#upload-modal .modal-backdrop")?.addEventListener("click", closeUploadModal);
+
+  // --- Blank Site Modal ---
+  const blankModal = document.getElementById("blank-site-modal");
+  document.getElementById("blank-site-btn").addEventListener("click", () => {
+    blankModal.hidden = false;
+  });
+  document.getElementById("blank-cancel").addEventListener("click", closeBlankModal);
+  blankModal.querySelector(".modal-backdrop").addEventListener("click", closeBlankModal);
+
+  document.getElementById("blank-site-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const slug = document.getElementById("blank-slug").value.toLowerCase().trim();
+    const name = document.getElementById("blank-name").value.trim() || slug;
+    const errEl = document.getElementById("blank-error");
+    const submitBtn = document.getElementById("blank-submit");
+    errEl.textContent = "";
+    if (!slug) { errEl.textContent = "Slug is required"; return; }
+    submitBtn.disabled = true;
+    try {
+      await api("/sites/blank", {
+        method: "POST",
+        body: JSON.stringify({ slug, name }),
+      });
+      closeBlankModal();
+      navigateTo("sites");
+    } catch (err) {
+      errEl.textContent = err.message;
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
 
   // File drop visual
   const dropZone = document.getElementById("file-drop");
@@ -983,6 +1014,12 @@ function closeUploadModal() {
   document.getElementById("upload-progress").hidden = true;
 }
 
+function closeBlankModal() {
+  document.getElementById("blank-site-modal").hidden = true;
+  document.getElementById("blank-site-form").reset();
+  document.getElementById("blank-error").textContent = "";
+}
+
 // --- Dashboard ---
 async function loadDashboard() {
   const hours = document.getElementById("dash-range").value;
@@ -1099,7 +1136,7 @@ async function loadSites() {
             ${s.current_version ? `v${s.current_version}` : "no version"}
             ${s.root_dir ? ` · root: <code>${esc(s.root_dir)}</code>` : ""}
             ${s.spa ? " · SPA" : ""}
-            ${s.mcp_enabled ? (s.mcp_read_only ? " · MCP (read-only)" : " · MCP") : ""}
+            ${s.mcp_enabled ? (s.mcp_read_only ? " · MCP (read-only)" : s.mcp_auto_commit ? " · MCP (auto-snapshot)" : " · MCP") : ""}
           </div>
         </div>
         <span class="site-badge ${s.active ? "badge-active" : "badge-inactive"}">
@@ -1112,7 +1149,7 @@ async function loadSites() {
         <span>${timeAgo(s.updated_at)}</span>
       </div>
       <div class="site-actions">
-        <a href="/${esc(s.slug)}/" target="_blank" class="btn btn-sm">Visit</a>
+        <a href="/${esc(s.slug)}/${s.current_version ? "?_v=" + esc(s.current_version) : ""}" target="_blank" rel="noopener" class="btn btn-sm">Visit</a>
         <button class="btn btn-sm" onclick="showSiteFiles('${esc(s.slug)}', '${esc(s.name)}')">Files</button>
         <button class="btn btn-sm" onclick="showSiteDetail('${esc(s.slug)}')">Versions</button>
         <button class="btn btn-sm" onclick="redeploySite('${esc(s.slug)}', '${esc(s.name)}')">Update</button>
@@ -1131,7 +1168,7 @@ async function loadSites() {
     btn.addEventListener("click", () => {
       const slug = btn.dataset.settings;
       const site = sites.find((s) => s.slug === slug);
-      if (site) showSiteSettings(slug, site.root_dir, site.spa, site.mcp_enabled, site.mcp_read_only);
+      if (site) showSiteSettings(slug, site.root_dir, site.spa, site.mcp_enabled, site.mcp_read_only, site.mcp_auto_commit);
     });
   });
 }
@@ -1146,11 +1183,18 @@ window.showSiteDetail = async function (slug) {
     <div class="modal-content">
       <h2>${esc(site.name)} — Versions</h2>
       <p class="text-sm text-muted mb-2">Current: <code>${site.current_version || "none"}</code></p>
+      ${site.current_version ? `
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+          <input type="text" id="commit-label" placeholder="Optional label (e.g. 'first draft')" style="flex:1">
+          <button class="btn btn-sm btn-primary" id="commit-btn">Snapshot Current</button>
+        </div>
+        <div class="form-error" id="commit-error" style="margin-bottom:8px"></div>
+      ` : ""}
       <div class="version-list">
         ${versions.map((v) => `
           <div class="version-item ${v.version === site.current_version ? "active" : ""}">
             <div class="version-meta">
-              <span class="version-id">${v.version}${v.label ? ` — ${esc(v.label)}` : ""}</span>
+              <span class="version-id">${v.version}${v.label ? ` — ${esc(v.label)}` : ""}${v.mcp_modified ? ' <span class="text-sm text-muted">(MCP edits)</span>' : ""}</span>
               <span class="version-date">${formatBytes(v.size_bytes)} · ${v.file_count} files · ${timeAgo(v.created_at)}</span>
             </div>
             <div class="version-actions">
@@ -1171,6 +1215,27 @@ window.showSiteDetail = async function (slug) {
   document.body.appendChild(modal);
   modal.querySelector(".modal-backdrop").addEventListener("click", () => modal.remove());
   modal.querySelector(".close-modal").addEventListener("click", () => modal.remove());
+
+  const commitBtn = modal.querySelector("#commit-btn");
+  if (commitBtn) {
+    commitBtn.addEventListener("click", async () => {
+      const errEl = modal.querySelector("#commit-error");
+      const label = modal.querySelector("#commit-label").value.trim();
+      errEl.textContent = "";
+      commitBtn.disabled = true;
+      try {
+        await api(`/sites/${slug}/commit`, {
+          method: "POST",
+          body: JSON.stringify(label ? { label } : {}),
+        });
+        modal.remove();
+        showSiteDetail(slug);
+      } catch (err) {
+        errEl.textContent = err.message;
+        commitBtn.disabled = false;
+      }
+    });
+  }
 };
 
 window.activateVersion = async function (slug, version) {
@@ -1188,7 +1253,7 @@ window.deleteVersionBtn = async function (slug, version) {
   } catch (err) { alert(err.message); }
 };
 
-window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpReadOnly) {
+window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpReadOnly, mcpAutoCommit) {
   // Fetch current aliases
   let aliases = [];
   try {
@@ -1219,6 +1284,10 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
         <label style="display:flex;align-items:center;gap:10px;flex-direction:row;margin-left:28px">
           <input type="checkbox" id="settings-mcp-readonly" ${mcpReadOnly ? "checked" : ""} style="width:auto;margin:0">
           <span>Read Only <small style="display:inline;margin:0">(block write and delete operations)</small></span>
+        </label>
+        <label style="display:flex;align-items:center;gap:10px;flex-direction:row;margin-left:28px">
+          <input type="checkbox" id="settings-mcp-autocommit" ${mcpAutoCommit ? "checked" : ""} style="width:auto;margin:0">
+          <span>Auto-snapshot before AI edits <small style="display:inline;margin:0">(freeze the current version the first time MCP writes to it, preserving a rollback point)</small></span>
         </label>
         <hr style="border:none;border-top:1px solid var(--border);margin:12px 0">
         <label>
@@ -1308,10 +1377,11 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
     const newSpa = document.getElementById("settings-spa").checked;
     const newMcp = document.getElementById("settings-mcp").checked;
     const newMcpReadOnly = document.getElementById("settings-mcp-readonly").checked;
+    const newMcpAutoCommit = document.getElementById("settings-mcp-autocommit").checked;
     try {
       await api(`/sites/${slug}/settings`, {
         method: "POST",
-        body: JSON.stringify({ root_dir: newRoot, spa: newSpa, mcp_enabled: newMcp, mcp_read_only: newMcpReadOnly }),
+        body: JSON.stringify({ root_dir: newRoot, spa: newSpa, mcp_enabled: newMcp, mcp_read_only: newMcpReadOnly, mcp_auto_commit: newMcpAutoCommit }),
       });
       modal.remove();
       loadSites();

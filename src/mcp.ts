@@ -1,9 +1,9 @@
 import {
   existsSync, readdirSync, statSync, mkdirSync, unlinkSync,
-  realpathSync, readFileSync, writeFileSync
+  realpathSync, readFileSync, writeFileSync, appendFileSync
 } from "fs";
 import { join, resolve, dirname } from "path";
-import { getSite, listSites, SITES_DIR, type Site } from "./sites";
+import { getSite, listSites, listVersions, getVersion, commitVersion, markVersionModified, SITES_DIR, type Site } from "./sites";
 import db from "./db";
 
 // --- Schema ---
@@ -35,8 +35,38 @@ db.exec(`
 
 // --- Constants ---
 
-const MAX_WRITE_SIZE = 10 * 1024 * 1024; // 10 MB
+const MAX_WRITE_SIZE = 10 * 1024 * 1024; // 10 MB per tool call (base64 payload)
+const MAX_BINARY_FILE_SIZE = 100 * 1024 * 1024; // 100 MB total file size
 const MAX_AUDIT_ROWS = 10_000;
+
+// Allowed media formats for write_media_file, mapped to magic-byte validators.
+// Validator returns true if `bytes` starts with a valid signature for the format.
+// For chunked uploads we only validate on the first chunk (append:false); subsequent
+// appends are gated only by the extension allowlist since the header is already on disk.
+const MEDIA_FORMATS: Record<string, (b: Buffer) => boolean> = {
+  ".jpg":  b => b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
+  ".jpeg": b => b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
+  ".png":  b => b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47
+    && b[4] === 0x0d && b[5] === 0x0a && b[6] === 0x1a && b[7] === 0x0a,
+  ".gif":  b => b.length >= 6 && b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38
+    && (b[4] === 0x37 || b[4] === 0x39) && b[5] === 0x61,
+  ".mp3":  b => b.length >= 3 && (
+    // ID3v2 tag
+    (b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33) ||
+    // MPEG audio frame sync (11 bits set)
+    (b[0] === 0xff && (b[1] & 0xe0) === 0xe0)
+  ),
+  // MP4 / ISO BMFF: bytes 4-7 are "ftyp"
+  ".mp4":  b => b.length >= 12 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70,
+};
+const MEDIA_EXTENSIONS = Object.keys(MEDIA_FORMATS).join(", ");
+
+function mediaExt(path: string): string | null {
+  const dot = path.lastIndexOf(".");
+  if (dot < 0) return null;
+  const ext = path.substring(dot).toLowerCase();
+  return MEDIA_FORMATS[ext] ? ext : null;
+}
 
 // --- Token Management ---
 
@@ -300,6 +330,20 @@ const TOOLS = [
     },
   },
   {
+    name: "write_media_file",
+    description: "Write a media file (image or audio/video) to a site. Allowed formats: JPEG, PNG, GIF, MP3, MP4 — identified by both file extension and magic-byte signature. Content must be base64-encoded. Supports chunked uploads: set `append: false` (or omit) on the first call to create/truncate, then call again with `append: true` for additional chunks. Per-call payload limit is 10 MB of base64 (~7.5 MB raw); total file size limit is 100 MB. For files larger than ~7 MB raw, split into multiple calls. Blocked if site is read-only.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        site: { type: "string" as const, description: "Site slug" },
+        path: { type: "string" as const, description: "File path relative to site root. Extension must be one of: .jpg, .jpeg, .png, .gif, .mp3, .mp4 (e.g. 'media/intro.mp4')" },
+        content: { type: "string" as const, description: "Base64-encoded media content for this chunk" },
+        append: { type: "boolean" as const, description: "If true, append to existing file (for chunk 2+ of a large upload). Default: false (truncate/create)." },
+      },
+      required: ["site", "path", "content"],
+    },
+  },
+  {
     name: "delete_file",
     description: "Delete a file from a site. Blocked if site is read-only.",
     inputSchema: {
@@ -311,9 +355,57 @@ const TOOLS = [
       required: ["site", "path"],
     },
   },
+  {
+    name: "list_versions",
+    description: "List all snapshot versions of a site, newest first. Each entry includes the version id, optional label, file count, size, and whether the version has been modified by MCP writes.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        site: { type: "string" as const, description: "Site slug" },
+      },
+      required: ["site"],
+    },
+  },
+  {
+    name: "commit_version",
+    description: "Freeze the current working state of a site as a named snapshot, then fork a new mutable copy for further edits. Use this to mark meaningful checkpoints (e.g. 'first draft', 'after hero redesign') that an admin can roll back to. Blocked if site is read-only.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        site: { type: "string" as const, description: "Site slug" },
+        label: { type: "string" as const, description: "Optional short label applied to the snapshot being frozen (e.g. 'v1 — initial layout')" },
+      },
+      required: ["site"],
+    },
+  },
 ];
 
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean };
+
+// If the site has auto-commit enabled and its current version has not yet been
+// touched by MCP, snapshot it before applying the incoming write/delete so the
+// pre-MCP state is preserved as a rollback point.
+function autoCommitIfNeeded(siteSlug: string, token: ValidatedToken): void {
+  const site = getSite(siteSlug);
+  if (!site || !site.mcp_auto_commit || !site.current_version) return;
+  const current = getVersion(siteSlug, site.current_version);
+  if (!current || current.mcp_modified) return;
+  try {
+    const newVer = commitVersion(siteSlug, null);
+    if (newVer) {
+      logAudit(token.id, token.label, "auto_commit", siteSlug, null, true, null);
+    }
+  } catch (e: any) {
+    logAudit(token.id, token.label, "auto_commit", siteSlug, null, false, e?.message || "unknown");
+  }
+}
+
+function markCurrentModified(siteSlug: string): void {
+  const site = getSite(siteSlug);
+  if (site?.current_version) {
+    markVersionModified(siteSlug, site.current_version);
+  }
+}
 
 function handleToolCall(name: string, args: any, token: ValidatedToken): ToolResult {
   try {
@@ -392,6 +484,8 @@ function handleToolCall(name: string, args: any, token: ValidatedToken): ToolRes
           return { content: [{ type: "text", text: err }], isError: true };
         }
 
+        autoCommitIfNeeded(siteSlug, token);
+
         const contentDir = getContentDir(siteSlug);
         if (!contentDir) return siteError(siteSlug, token, name);
         const resolved = safePath(contentDir, args.path);
@@ -399,8 +493,87 @@ function handleToolCall(name: string, args: any, token: ValidatedToken): ToolRes
 
         mkdirSync(dirname(resolved), { recursive: true });
         writeFileSync(resolved, args.content, "utf-8");
+        markCurrentModified(siteSlug);
         logAudit(token.id, token.label, name, siteSlug, args.path, true, null);
         return { content: [{ type: "text", text: `Written ${args.content.length} bytes to ${args.path}` }] };
+      }
+
+      case "write_media_file": {
+        if (!siteSlug) return missingArg("site");
+
+        const site = getSite(siteSlug);
+        if (site?.mcp_read_only) {
+          const err = `Site '${siteSlug}' is read-only`;
+          logAudit(token.id, token.label, name, siteSlug, args.path, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+
+        if (typeof args.path !== "string") return missingArg("path");
+        const ext = mediaExt(args.path);
+        if (!ext) {
+          const err = `File extension not allowed. Supported media formats: ${MEDIA_EXTENSIONS}`;
+          logAudit(token.id, token.label, name, siteSlug, args.path, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+
+        if (typeof args.content !== "string") {
+          const err = "`content` must be a base64-encoded string";
+          logAudit(token.id, token.label, name, siteSlug, args.path, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+        if (args.content.length > MAX_WRITE_SIZE) {
+          const err = `Chunk exceeds per-call limit of ${MAX_WRITE_SIZE / (1024 * 1024)} MB of base64. Split into smaller chunks with append: true.`;
+          logAudit(token.id, token.label, name, siteSlug, args.path, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+
+        const bytes = Buffer.from(args.content, "base64");
+        // Bun/Node's base64 decoder silently drops invalid chars, so a zero-length
+        // decode from a non-empty input signals garbage content.
+        if (bytes.length === 0 && args.content.length > 0) {
+          const err = "Invalid base64 content: decoded to zero bytes";
+          logAudit(token.id, token.label, name, siteSlug, args.path, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+
+        const append = args.append === true;
+
+        // Verify magic bytes on the first chunk only. Appends can't be re-validated
+        // (header is already on disk) but the extension allowlist above still applies.
+        if (!append) {
+          const validate = MEDIA_FORMATS[ext];
+          if (!validate(bytes)) {
+            const err = `File content doesn't match ${ext} format (magic-byte signature mismatch). First chunk must contain a valid ${ext} header.`;
+            logAudit(token.id, token.label, name, siteSlug, args.path, false, err);
+            return { content: [{ type: "text", text: err }], isError: true };
+          }
+        }
+
+        const contentDir = getContentDir(siteSlug);
+        if (!contentDir) return siteError(siteSlug, token, name);
+        const resolved = safePath(contentDir, args.path);
+        if (!resolved) return pathError(token, name, siteSlug, args.path);
+
+        const existingSize = append && existsSync(resolved) ? statSync(resolved).size : 0;
+        if (existingSize + bytes.length > MAX_BINARY_FILE_SIZE) {
+          const err = `Total file size would exceed ${MAX_BINARY_FILE_SIZE / (1024 * 1024)} MB limit`;
+          logAudit(token.id, token.label, name, siteSlug, args.path, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+
+        // Only snapshot on the first chunk; appends are continuations of a single logical write.
+        if (!append) autoCommitIfNeeded(siteSlug, token);
+
+        mkdirSync(dirname(resolved), { recursive: true });
+        if (append) {
+          appendFileSync(resolved, bytes);
+        } else {
+          writeFileSync(resolved, bytes);
+        }
+        const totalSize = existingSize + bytes.length;
+        markCurrentModified(siteSlug);
+        logAudit(token.id, token.label, name, siteSlug, args.path, true, null);
+        return { content: [{ type: "text", text: `${append ? "Appended" : "Wrote"} ${bytes.length} bytes to ${args.path} (file now ${totalSize} bytes)` }] };
       }
 
       case "delete_file": {
@@ -413,6 +586,8 @@ function handleToolCall(name: string, args: any, token: ValidatedToken): ToolRes
           logAudit(token.id, token.label, name, siteSlug, args.path, false, err);
           return { content: [{ type: "text", text: err }], isError: true };
         }
+
+        autoCommitIfNeeded(siteSlug, token);
 
         const contentDir = getContentDir(siteSlug);
         if (!contentDir) return siteError(siteSlug, token, name);
@@ -428,8 +603,46 @@ function handleToolCall(name: string, args: any, token: ValidatedToken): ToolRes
         }
 
         unlinkSync(resolved);
+        markCurrentModified(siteSlug);
         logAudit(token.id, token.label, name, siteSlug, args.path, true, null);
         return { content: [{ type: "text", text: `Deleted ${args.path}` }] };
+      }
+
+      case "list_versions": {
+        if (!siteSlug) return missingArg("site");
+        const site = getSite(siteSlug);
+        if (!site || !site.mcp_enabled) return siteError(siteSlug, token, name);
+        const versions = listVersions(siteSlug).map(v => ({
+          version: v.version,
+          label: v.label,
+          size_bytes: v.size_bytes,
+          file_count: v.file_count,
+          created_at: v.created_at,
+          mcp_modified: !!v.mcp_modified,
+          current: v.version === site.current_version,
+        }));
+        logAudit(token.id, token.label, name, siteSlug, null, true, null);
+        return { content: [{ type: "text", text: JSON.stringify(versions, null, 2) }] };
+      }
+
+      case "commit_version": {
+        if (!siteSlug) return missingArg("site");
+        const site = getSite(siteSlug);
+        if (!site || !site.mcp_enabled) return siteError(siteSlug, token, name);
+        if (site.mcp_read_only) {
+          const err = `Site '${siteSlug}' is read-only`;
+          logAudit(token.id, token.label, name, siteSlug, null, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+        const label = typeof args.label === "string" ? args.label : null;
+        const newVer = commitVersion(siteSlug, label);
+        if (!newVer) {
+          const err = `Site '${siteSlug}' has no current version to commit`;
+          logAudit(token.id, token.label, name, siteSlug, null, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+        logAudit(token.id, token.label, name, siteSlug, label, true, null);
+        return { content: [{ type: "text", text: `Committed snapshot${label ? ` '${label}'` : ""}; new working version is ${newVer.version}` }] };
       }
 
       default:

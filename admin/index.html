@@ -143,12 +143,43 @@
         <div id="view-sites" class="view" hidden>
           <div class="view-header">
             <h1>Sites</h1>
-            <button class="btn btn-primary" id="upload-btn">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17,8 12,3 7,8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-              Deploy Site
-            </button>
+            <div style="display:flex;gap:8px">
+              <button class="btn" id="blank-site-btn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+                New Blank Site
+              </button>
+              <button class="btn btn-primary" id="upload-btn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17,8 12,3 7,8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                Deploy Site
+              </button>
+            </div>
           </div>
           <div id="sites-list" class="sites-grid"></div>
+        </div>
+
+        <!-- Blank Site Modal -->
+        <div id="blank-site-modal" class="modal" hidden>
+          <div class="modal-backdrop"></div>
+          <div class="modal-content">
+            <h2>Create Blank Site</h2>
+            <p class="text-sm text-muted mb-2">Creates an empty site with a placeholder page. Open <em>Settings</em> on the new site to enable MCP access so AI tools can populate it.</p>
+            <form id="blank-site-form">
+              <label>
+                Slug (URL path)
+                <input type="text" id="blank-slug" placeholder="my-site" pattern="[a-z0-9][a-z0-9-]*[a-z0-9]?" required>
+                <small>Lowercase letters, numbers, hyphens. Becomes <code>sprylylabs.net/<strong>slug</strong></code></small>
+              </label>
+              <label>
+                Display Name
+                <input type="text" id="blank-name" placeholder="My Awesome Site">
+              </label>
+              <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" id="blank-cancel">Cancel</button>
+                <button type="submit" class="btn btn-primary" id="blank-submit">Create</button>
+              </div>
+              <div class="form-error" id="blank-error"></div>
+            </form>
+          </div>
         </div>
 
         <!-- Upload Modal -->
