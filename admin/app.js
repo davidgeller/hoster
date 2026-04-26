@@ -888,15 +888,15 @@ function getMcpConfigJson(token, label) {
   }, null, 2);
 }
 
-function getMcpCliCommand(token, label) {
+function getMcpCliCommand(token, label, userScope) {
   const origin = window.location.origin;
   const name = mcpServerName(label);
-  return `claude mcp add --transport http ${name} ${origin}/_mcp --header "Authorization: Bearer ${token}"`;
+  const scope = userScope ? " --scope user" : "";
+  return `claude mcp add --transport http${scope} ${name} ${origin}/_mcp --header "Authorization: Bearer ${token}"`;
 }
 
 function showMcpToken(token, label) {
   const configJson = getMcpConfigJson(token, label);
-  const cliCommand = getMcpCliCommand(token, label);
   const modal = document.createElement("div");
   modal.className = "modal";
   modal.innerHTML = `
@@ -912,7 +912,18 @@ function showMcpToken(token, label) {
       <button class="btn btn-sm" id="mcp-copy-config" style="margin-bottom:16px">Copy JSON</button>
 
       <h3 style="font-size:0.9rem;margin-bottom:8px">Option 2: Claude Code CLI</h3>
-      <pre style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:0.8rem;overflow-x:auto;margin-bottom:8px;white-space:pre-wrap">${esc(cliCommand)}</pre>
+      <fieldset style="border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin-bottom:8px;font-size:0.85rem">
+        <legend style="padding:0 6px;font-size:0.8rem;color:var(--text-muted)">Scope</legend>
+        <label style="display:flex;align-items:center;gap:6px;margin:4px 0;flex-direction:row">
+          <input type="radio" name="mcp-cli-scope" value="local" checked style="width:auto;margin:0">
+          <span>This project only <small style="display:inline;margin:0;color:var(--text-muted)">(default)</small></span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin:4px 0;flex-direction:row">
+          <input type="radio" name="mcp-cli-scope" value="user" style="width:auto;margin:0">
+          <span>All projects for this user <small style="display:inline;margin:0;color:var(--text-muted)">(<code>--scope user</code>)</small></span>
+        </label>
+      </fieldset>
+      <pre id="mcp-cli-pre" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:0.8rem;overflow-x:auto;margin-bottom:8px;white-space:pre-wrap"></pre>
       <button class="btn btn-sm" id="mcp-copy-cli" style="margin-bottom:16px">Copy Command</button>
 
       <p class="text-sm text-muted" style="margin-bottom:16px">Restart your AI tool after adding the config.</p>
@@ -923,6 +934,13 @@ function showMcpToken(token, label) {
     </div>
   `;
   document.body.appendChild(modal);
+
+  const cliPre = modal.querySelector("#mcp-cli-pre");
+  const getScope = () => modal.querySelector('input[name="mcp-cli-scope"]:checked')?.value === "user";
+  const renderCli = () => { cliPre.textContent = getMcpCliCommand(token, label, getScope()); };
+  modal.querySelectorAll('input[name="mcp-cli-scope"]').forEach(r => r.addEventListener("change", renderCli));
+  renderCli();
+
   modal.querySelector(".modal-backdrop").addEventListener("click", () => modal.remove());
   modal.querySelector(".close-modal").addEventListener("click", () => modal.remove());
   modal.querySelector("#mcp-copy-token").addEventListener("click", () => {
@@ -934,17 +952,13 @@ function showMcpToken(token, label) {
     modal.querySelector("#mcp-copy-config").textContent = "Copied!";
   });
   modal.querySelector("#mcp-copy-cli").addEventListener("click", () => {
-    navigator.clipboard.writeText(cliCommand);
+    navigator.clipboard.writeText(getMcpCliCommand(token, label, getScope()));
     modal.querySelector("#mcp-copy-cli").textContent = "Copied!";
   });
 }
 
 function showMcpSetup(label) {
-  const origin = window.location.origin;
   const placeholder = "<your-token>";
-
-  function buildConfig(token) { return getMcpConfigJson(token, label); }
-  function buildCli(token) { return getMcpCliCommand(token, label); }
 
   const modal = document.createElement("div");
   modal.className = "modal";
@@ -959,11 +973,22 @@ function showMcpSetup(label) {
 
       <h3 style="font-size:0.9rem;margin-bottom:8px">Option 1: JSON Config</h3>
       <p class="text-sm text-muted" style="margin-bottom:8px">Add to your tool's MCP settings file (e.g. Claude Code <code>settings.json</code>, Cursor config, etc.):</p>
-      <pre id="mcp-setup-json" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:0.8rem;overflow-x:auto;margin-bottom:8px;white-space:pre-wrap">${esc(buildConfig(placeholder))}</pre>
+      <pre id="mcp-setup-json" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:0.8rem;overflow-x:auto;margin-bottom:8px;white-space:pre-wrap"></pre>
       <button class="btn btn-sm" id="mcp-copy-setup-json" style="margin-bottom:16px">Copy JSON</button>
 
       <h3 style="font-size:0.9rem;margin-bottom:8px">Option 2: Claude Code CLI</h3>
-      <pre id="mcp-setup-cli" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:0.8rem;overflow-x:auto;margin-bottom:8px;white-space:pre-wrap">${esc(buildCli(placeholder))}</pre>
+      <fieldset style="border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin-bottom:8px;font-size:0.85rem">
+        <legend style="padding:0 6px;font-size:0.8rem;color:var(--text-muted)">Scope</legend>
+        <label style="display:flex;align-items:center;gap:6px;margin:4px 0;flex-direction:row">
+          <input type="radio" name="mcp-setup-cli-scope" value="local" checked style="width:auto;margin:0">
+          <span>This project only <small style="display:inline;margin:0;color:var(--text-muted)">(default)</small></span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin:4px 0;flex-direction:row">
+          <input type="radio" name="mcp-setup-cli-scope" value="user" style="width:auto;margin:0">
+          <span>All projects for this user <small style="display:inline;margin:0;color:var(--text-muted)">(<code>--scope user</code>)</small></span>
+        </label>
+      </fieldset>
+      <pre id="mcp-setup-cli" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:0.8rem;overflow-x:auto;margin-bottom:8px;white-space:pre-wrap"></pre>
       <button class="btn btn-sm" id="mcp-copy-setup-cli" style="margin-bottom:16px">Copy Command</button>
 
       <p class="text-sm text-muted" style="margin-bottom:16px">Paste your token above to fill in the config, then copy. Restart your AI tool after adding the config.</p>
@@ -981,21 +1006,23 @@ function showMcpSetup(label) {
   const jsonPre = modal.querySelector("#mcp-setup-json");
   const cliPre = modal.querySelector("#mcp-setup-cli");
 
+  const currentToken = () => tokenInput.value.trim() || placeholder;
+  const userScope = () => modal.querySelector('input[name="mcp-setup-cli-scope"]:checked')?.value === "user";
+
   function updateConfigs() {
-    const token = tokenInput.value.trim() || placeholder;
-    jsonPre.textContent = buildConfig(token);
-    cliPre.textContent = buildCli(token);
+    jsonPre.textContent = getMcpConfigJson(currentToken(), label);
+    cliPre.textContent = getMcpCliCommand(currentToken(), label, userScope());
   }
   tokenInput.addEventListener("input", updateConfigs);
+  modal.querySelectorAll('input[name="mcp-setup-cli-scope"]').forEach(r => r.addEventListener("change", updateConfigs));
+  updateConfigs();
 
   modal.querySelector("#mcp-copy-setup-json").addEventListener("click", () => {
-    const token = tokenInput.value.trim() || placeholder;
-    navigator.clipboard.writeText(buildConfig(token));
+    navigator.clipboard.writeText(getMcpConfigJson(currentToken(), label));
     modal.querySelector("#mcp-copy-setup-json").textContent = "Copied!";
   });
   modal.querySelector("#mcp-copy-setup-cli").addEventListener("click", () => {
-    const token = tokenInput.value.trim() || placeholder;
-    navigator.clipboard.writeText(buildCli(token));
+    navigator.clipboard.writeText(getMcpCliCommand(currentToken(), label, userScope()));
     modal.querySelector("#mcp-copy-setup-cli").textContent = "Copied!";
   });
 }

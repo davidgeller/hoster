@@ -229,6 +229,13 @@ claude mcp add --transport http my-project https://yourdomain.com/_mcp \
   --header "Authorization: Bearer <your-token>"
 ```
 
+By default the server is registered for the current project only. Pick **All projects for this user** in the setup dialog (or pass `--scope user` manually) to make the server available across every project on this machine — useful when you want one Hoster connection wherever you happen to be working:
+
+```bash
+claude mcp add --transport http --scope user my-project https://yourdomain.com/_mcp \
+  --header "Authorization: Bearer <your-token>"
+```
+
 **JSON config** (Claude Code `settings.json`, Cursor, etc.):
 
 ```json
