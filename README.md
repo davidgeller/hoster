@@ -275,6 +275,18 @@ Each MCP-enabled site is its own connector at `https://yourdomain.com/_mcp/<slug
 
 The active connection appears in **Settings → OAuth Connections**, where you can revoke it at any time. Revocation is instant — the next request from that client will fail.
 
+### Sharing a Site with a Collaborator (Site Delegates)
+
+If you want to give a friend or client AI access to one site without sharing your admin password, mint a **site delegate** — a per-site password that authorizes the OAuth consent screen for that one site only. Delegates can never reach `/_admin`, never touch other sites, and can be revoked instantly.
+
+1. Open **Site Settings** on the site you want to share.
+2. Under **Site Delegates**, enter a label (e.g. `joe` or `acme-client`), choose a password, and pick an expiry. Click **Add**.
+3. Hoster shows a copy-pasteable instruction block. Send it to your collaborator — it includes the connector URL, the delegate name, and the password.
+4. Your collaborator pastes the connector URL into their chat client. When they hit the consent screen, they enter the delegate name and password instead of leaving the delegate field empty.
+5. Each authorization creates an entry in **Settings → OAuth Connections** tagged `delegate <name>` — you can see at a glance which connections came through delegates and revoke any of them.
+
+Deleting a delegate stops new authorizations but leaves any tokens already issued in place until they expire (typically within an hour for access tokens; up to 30 days for refresh). To kill an active connection immediately, revoke it from **Settings → OAuth Connections**.
+
 #### OAuth Scopes
 
 | Scope | Tools |
@@ -511,7 +523,8 @@ OAuth-issued tokens stored alongside static tokens (same hashing, expiration, an
 - **Single-use authorization codes** with a 60-second lifetime; replay returns `invalid_grant`.
 - **Refresh token rotation** — every refresh issues a new access + refresh pair and invalidates the previous one, so a leaked refresh token only works until the legitimate client next refreshes.
 - **Per-tool scope enforcement** — `write_file`, `write_media_file`, and `delete_file` require the `write` scope; `commit_version` requires `commit`. Read-only sites silently downgrade any granted scopes to `read`.
-- **Consent re-authentication** — every authorization requires the admin password (and TOTP, if enabled). The consent flow does not rely on the admin session cookie surviving a cross-site redirect, and rate-limits failed attempts using the same window as admin login.
+- **Consent re-authentication** — every authorization requires either the admin password (and TOTP, if enabled) or a per-site delegate password. The consent flow does not rely on the admin session cookie surviving a cross-site redirect, and rate-limits failed attempts using the same window as admin login.
+- **Site delegates** are Argon2id-hashed (same algorithm and parameters as the admin password) and stored per-site with optional expiration. Delete cascades to no longer accept new authorizations under that delegate; existing tokens must be revoked separately. Delegates cannot bypass per-site read-only mode and cannot use TOTP recovery codes (TOTP is admin-only).
 - **Anonymous Dynamic Client Registration** — required by the MCP profile so chat clients can self-register. Hoster surfaces all registered clients in **Settings → OAuth Connections** with a one-click delete that cascades to the client's tokens.
 - **Open redirect protection** — `redirect_uri` must exactly match a value supplied at registration; mismatches show an error page rather than redirecting.
 - **CSP-safe consent screen** — the consent page uses no inline JavaScript; the Deny button is a real form submission so it works under the strict `script-src 'self'` policy.
@@ -522,6 +535,7 @@ OAuth-issued tokens stored alongside static tokens (same hashing, expiration, an
 - **Phishing the consent screen.** An attacker who registers a client with a misleading `client_name` ("System Update") could trick a careless admin into authorizing it. The consent screen prominently displays the registered name, client URI, and "first time client" warnings, but the human review remains the trust anchor — read what you're approving.
 - **Refresh tokens are long-lived.** A leaked refresh token allows silent renewal until detected. Revoke any unrecognized connection from **Settings → OAuth Connections**; revocation is immediate and ends future refreshes.
 - **Static tokens still permit cross-site access** when their scope is "All sites" — that's by design for CLI batch tools. OAuth-issued tokens are always single-site, so prefer OAuth when narrower blast radius matters.
+- **Site delegate passwords are shared secrets.** Once you send the delegate name and password to a collaborator, they can authorize any number of clients against that site. Treat delegate credentials like any other shared password — share over a secure channel, set an expiry, and revoke when the relationship ends. Delegates can also create OAuth tokens that survive after the delegate row is deleted (up to refresh-token TTL); revoke those tokens explicitly in **Settings → OAuth Connections**.
 
 ### Configuration Backup
 

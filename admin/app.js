@@ -636,6 +636,42 @@ async function loadMcpTokens() {
   } catch (_) {}
 }
 
+function showDelegateShareModal(label, password, connectorUrl) {
+  const shareText = `Hi! Here are the details to connect your AI tool to my site:
+
+Connector URL: ${connectorUrl}
+
+When prompted on the consent screen:
+  Delegate name: ${label}
+  Password: ${password}
+
+Paste the URL into your chat client's "Add MCP server" dialog
+(Claude.ai → Settings → Connectors, or equivalent), and use the
+delegate name and password above when it asks you to authorize.`;
+
+  const modal = document.createElement("div");
+  modal.className = "modal";
+  modal.innerHTML = `
+    <div class="modal-backdrop"></div>
+    <div class="modal-content" style="max-width:580px">
+      <h2>Delegate Created</h2>
+      <p class="text-sm text-muted" style="margin-bottom:12px">Copy these instructions and send them to your collaborator. The password won't be shown again.</p>
+      <textarea readonly style="width:100%;min-height:200px;font-family:monospace;font-size:0.85rem;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);resize:vertical;box-sizing:border-box">${esc(shareText)}</textarea>
+      <div class="modal-actions" style="margin-top:12px;gap:8px">
+        <button class="btn btn-sm" id="share-copy-btn">Copy Instructions</button>
+        <button class="btn btn-ghost close-modal">Done</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  modal.querySelector(".modal-backdrop").addEventListener("click", () => modal.remove());
+  modal.querySelector(".close-modal").addEventListener("click", () => modal.remove());
+  modal.querySelector("#share-copy-btn").addEventListener("click", () => {
+    navigator.clipboard.writeText(shareText);
+    modal.querySelector("#share-copy-btn").textContent = "Copied!";
+  });
+}
+
 async function loadOauthGrants() {
   const urlsEl = document.getElementById("oauth-site-urls");
   const grantsEl = document.getElementById("oauth-grants");
@@ -686,12 +722,16 @@ async function loadOauthGrants() {
     } else {
       let html = `<div style="font-size:0.85rem;font-weight:500;margin-bottom:6px">Active Connections</div>
         <table style="width:100%;font-size:0.85rem">
-          <thead><tr><th style="text-align:left">Client</th><th style="text-align:left">Site</th><th style="text-align:left">Scopes</th><th style="text-align:left">Issued</th><th></th></tr></thead>
+          <thead><tr><th style="text-align:left">Client</th><th style="text-align:left">Site</th><th style="text-align:left">Authorized by</th><th style="text-align:left">Scopes</th><th style="text-align:left">Issued</th><th></th></tr></thead>
           <tbody>`;
       for (const g of grants) {
+        const principalLabel = g.principal === "admin" || !g.principal
+          ? '<span class="text-sm text-muted">admin</span>'
+          : `<span class="text-sm">delegate <code>${esc(g.principal.replace(/^delegate:/, ""))}</code></span>`;
         html += `<tr>
           <td>${esc(g.client_name)}${g.client_uri ? ` <a href="${esc(g.client_uri)}" target="_blank" rel="noopener" style="font-size:0.75rem">↗</a>` : ""}</td>
           <td><code>${esc(g.site_slug)}</code></td>
+          <td>${principalLabel}</td>
           <td><code style="font-size:0.78rem">${esc(g.scopes)}</code></td>
           <td>${timeAgo(g.issued_at)}</td>
           <td style="text-align:right"><button class="btn btn-sm btn-danger" data-revoke-grant="${g.token_id}">Revoke</button></td>
@@ -1426,6 +1466,26 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
           <input type="checkbox" id="settings-mcp-autocommit" ${mcpAutoCommit ? "checked" : ""} style="width:auto;margin:0">
           <span>Auto-snapshot before AI edits <small style="display:inline;margin:0">(freeze the current version the first time MCP writes to it, preserving a rollback point)</small></span>
         </label>
+
+        <hr style="border:none;border-top:1px solid var(--border);margin:12px 0">
+        <label>
+          Site Delegates
+          <small>Per-site OAuth credentials you can share with collaborators. Each delegate authorizes via the OAuth consent screen using their own password — they can only access this site, never <code>/_admin</code> or other sites.</small>
+        </label>
+        <div id="settings-delegates-list" style="margin-bottom:8px"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 110px auto;gap:6px;align-items:center">
+          <input type="text" id="settings-delegate-label" placeholder="Label (e.g. 'Joe')" maxlength="60" pattern="[\\w .@\\-]+">
+          <input type="password" id="settings-delegate-password" placeholder="Password (min 8 chars)" minlength="8">
+          <select id="settings-delegate-expires">
+            <option value="30">30 days</option>
+            <option value="90" selected>90 days</option>
+            <option value="365">1 year</option>
+            <option value="">Never</option>
+          </select>
+          <button type="button" class="btn btn-sm btn-primary" id="add-delegate-btn">Add</button>
+        </div>
+        <div class="form-error" id="delegate-error" style="margin-top:4px"></div>
+
         <hr style="border:none;border-top:1px solid var(--border);margin:12px 0">
         <label>
           Aliases
@@ -1506,6 +1566,64 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
     const alias = btn.closest("[data-alias]").dataset.alias;
     btn.addEventListener("click", () => removeAliasHandler(btn.closest("[data-alias]"), alias));
   });
+
+  // --- Site delegates ---
+  async function loadDelegates() {
+    const listEl = modal.querySelector("#settings-delegates-list");
+    if (!listEl) return;
+    try {
+      const { delegates } = await api(`/sites/${slug}/delegates`);
+      if (!delegates.length) {
+        listEl.innerHTML = '<div class="text-sm text-muted" style="margin-bottom:6px">No delegates yet. Create one to share MCP access without giving out your admin password.</div>';
+        return;
+      }
+      listEl.innerHTML = `<table style="width:100%;font-size:0.85rem;margin-bottom:8px">
+        <thead><tr><th style="text-align:left">Name</th><th style="text-align:left">Last Used</th><th style="text-align:left">Expires</th><th></th></tr></thead>
+        <tbody>${delegates.map(d => `
+          <tr>
+            <td><code>${esc(d.label)}</code></td>
+            <td>${d.last_used_at ? timeAgo(d.last_used_at) : '<span class="text-muted">never</span>'}</td>
+            <td>${d.expired ? '<span style="color:var(--danger)">Expired</span>' : (d.expires_at ? timeUntil(d.expires_at) : 'Never')}</td>
+            <td style="text-align:right"><button type="button" class="btn btn-sm btn-danger" data-delete-delegate="${d.id}">Delete</button></td>
+          </tr>
+        `).join("")}</tbody></table>`;
+      listEl.querySelectorAll("[data-delete-delegate]").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          if (!confirm("Delete this delegate? Their OAuth tokens will continue to work until they expire — revoke those separately from Settings → OAuth Connections.")) return;
+          try {
+            await api(`/sites/${slug}/delegates/${btn.dataset.deleteDelegate}`, { method: "DELETE" });
+            loadDelegates();
+          } catch (err) { alert(err.message); }
+        });
+      });
+    } catch (_) {}
+  }
+
+  modal.querySelector("#add-delegate-btn").addEventListener("click", async () => {
+    const label = modal.querySelector("#settings-delegate-label").value.trim();
+    const password = modal.querySelector("#settings-delegate-password").value;
+    const expVal = modal.querySelector("#settings-delegate-expires").value;
+    const expiresInDays = expVal ? parseInt(expVal) : null;
+    const errEl = modal.querySelector("#delegate-error");
+    errEl.textContent = "";
+    if (!label) { errEl.textContent = "Label is required"; return; }
+    if (!password || password.length < 8) { errEl.textContent = "Password must be at least 8 characters"; return; }
+    try {
+      await api(`/sites/${slug}/delegates`, {
+        method: "POST",
+        body: JSON.stringify({ label, password, expires_in_days: expiresInDays }),
+      });
+      // Show shareable instructions, then refresh the list
+      const origin = window.location.origin;
+      const connectorUrl = `${origin}/_mcp/${slug}`;
+      showDelegateShareModal(label, password, connectorUrl);
+      modal.querySelector("#settings-delegate-label").value = "";
+      modal.querySelector("#settings-delegate-password").value = "";
+      loadDelegates();
+    } catch (err) { errEl.textContent = err.message; }
+  });
+
+  loadDelegates();
 
   // Save settings form
   modal.querySelector("#site-settings-form").addEventListener("submit", async (e) => {

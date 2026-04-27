@@ -20,7 +20,10 @@ import {
   getAutoBlockConfig, setAutoBlockConfig, getBlockedIps, unblockIp
 } from "./analytics";
 import { createMcpToken, listMcpTokens, deleteMcpToken, getMcpAuditLog } from "./mcp";
-import { listOauthGrants, revokeOauthGrant, listOauthClients, deleteOauthClient } from "./oauth";
+import {
+  listOauthGrants, revokeOauthGrant, listOauthClients, deleteOauthClient,
+  listSiteDelegates, createSiteDelegate, deleteSiteDelegate,
+} from "./oauth";
 import { createBackup, previewBackup, restoreBackup } from "./backup";
 
 function json(data: any, status = 200, headers: Record<string, string> = {}): Response {
@@ -496,6 +499,36 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     const ok = revokeOauthGrant(id);
     if (ok) auditLog("oauth_grant_revoked", `grant ${id}`, ip);
     return ok ? json({ ok: true }) : json({ error: "Grant not found" }, 404);
+  }
+
+  // --- Per-site delegate credentials (used at the OAuth consent screen) ---
+  const siteDelegateMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9][a-z0-9-]*)\/delegates$/);
+  if (siteDelegateMatch && req.method === "GET") {
+    return json({ delegates: listSiteDelegates(siteDelegateMatch[1]) });
+  }
+  if (siteDelegateMatch && req.method === "POST") {
+    const slug = siteDelegateMatch[1];
+    const body = await req.json() as { label?: string; password?: string; expires_in_days?: number | null };
+    try {
+      const result = await createSiteDelegate({
+        siteSlug: slug,
+        label: body.label || "",
+        password: body.password || "",
+        expiresInDays: body.expires_in_days ?? null,
+      });
+      auditLog("site_delegate_created", `${slug}/${body.label}`, ip);
+      return json({ ok: true, id: result.id });
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
+  }
+  const siteDelegateDeleteMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9][a-z0-9-]*)\/delegates\/(\d+)$/);
+  if (siteDelegateDeleteMatch && req.method === "DELETE") {
+    const slug = siteDelegateDeleteMatch[1];
+    const id = parseInt(siteDelegateDeleteMatch[2]);
+    const ok = deleteSiteDelegate(slug, id);
+    if (ok) auditLog("site_delegate_deleted", `${slug}/${id}`, ip);
+    return ok ? json({ ok: true }) : json({ error: "Delegate not found" }, 404);
   }
 
   // --- OAuth registered clients ---

@@ -5,10 +5,15 @@
 // RFC 8707 (Resource Indicators) / RFC 9728 (Protected Resource metadata)
 // required by the MCP authorization profile.
 //
-// Identity: single Hoster admin. The consent screen prompts for the admin
-// password (and TOTP if enabled) on every authorization to avoid relying
-// on the SameSite=Strict admin session cookie surviving a cross-site
-// redirect from the OAuth client (e.g. claude.ai → /oauth/authorize).
+// Identity: a Hoster instance has one admin. The consent screen accepts
+// either the admin password (full access) or a per-site delegate
+// password the admin has minted and shared with a collaborator. Delegate
+// auth lets the admin hand a friend MCP access to one site without
+// sharing the admin login.
+//
+// Either way, the consent screen re-prompts for credentials on every
+// authorization — we don't rely on the SameSite=Strict admin session
+// cookie surviving a cross-site redirect from the OAuth client.
 //
 // Tokens issued by this AS are stored in the existing `mcp_tokens` table
 // with `issued_via = 'oauth'` so the resource server's bearer validator
@@ -42,10 +47,25 @@ db.exec(`
     redirect_uri TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     consumed INTEGER DEFAULT 0,
+    principal TEXT DEFAULT 'admin',
     created_at TEXT DEFAULT (datetime('now'))
   );
 
   CREATE INDEX IF NOT EXISTS idx_oauth_codes_expires ON oauth_codes(expires_at);
+
+  CREATE TABLE IF NOT EXISTS site_delegates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_slug TEXT NOT NULL,
+    label TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    expires_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    last_used_at TEXT,
+    UNIQUE(site_slug, label),
+    FOREIGN KEY (site_slug) REFERENCES sites(slug) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_site_delegates_site ON site_delegates(site_slug);
 `);
 
 // Extend mcp_tokens for OAuth-issued tokens. Defensive ALTERs.
@@ -53,6 +73,8 @@ try { db.exec("ALTER TABLE mcp_tokens ADD COLUMN issued_via TEXT DEFAULT 'static
 try { db.exec("ALTER TABLE mcp_tokens ADD COLUMN client_id TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE mcp_tokens ADD COLUMN refresh_hash TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE mcp_tokens ADD COLUMN scopes TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE mcp_tokens ADD COLUMN principal TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE oauth_codes ADD COLUMN principal TEXT DEFAULT 'admin'"); } catch (_) {}
 
 // --- Constants ---
 
@@ -400,9 +422,13 @@ function renderConsent(p: AuthorizeParams, client: OauthClientRow, slug: string,
 
     <form method="POST" action="/oauth/authorize" autocomplete="off">
       ${hiddenFields}
-      <label for="password">Admin password</label>
+
+      <label for="delegate_label">Delegate name <small style="color:#888;font-weight:normal">(leave empty to authorize as the admin)</small></label>
+      <input type="text" id="delegate_label" name="delegate_label" autocomplete="username" placeholder="empty = admin">
+
+      <label for="password">Password</label>
       <input type="password" id="password" name="password" required autofocus>
-      ${totp ? `<label for="totp_code">2FA code</label><input type="text" id="totp_code" name="totp_code" inputmode="numeric" pattern="[0-9]*" autocomplete="off">` : ""}
+      ${totp ? `<label for="totp_code">2FA code <small style="color:#888;font-weight:normal">(admin only)</small></label><input type="text" id="totp_code" name="totp_code" inputmode="numeric" pattern="[0-9]*" autocomplete="off">` : ""}
       <div class="actions">
         <button type="submit" name="decision" value="deny" class="btn-secondary" formnovalidate>Deny</button>
         <button type="submit" name="decision" value="approve" class="btn-primary">Authorize</button>
@@ -475,23 +501,38 @@ export async function handleAuthorize(req: Request, ip: string): Promise<Respons
   }
 
   // --- Rate limit before touching the password verifier so we don't spend Argon2 cycles
-  //     on attackers who are already locked out by the standard login rate limit. ---
+  //     on attackers who are already locked out by the standard login rate limit.
+  //     The same gate covers both admin and delegate auth. ---
   if (isRateLimited(ip)) {
     return renderConsent(p, client, slug, scopes, "Too many failed attempts. Try again later.");
   }
 
-  // --- Authenticate the admin via password (and TOTP if enabled) ---
   const password = (formData!.get("password") as string | null) || "";
-  if (!password || !(await verifyPassword(password, ip))) {
-    return renderConsent(p, client, slug, scopes, "Incorrect admin password.");
-  }
-  if (isTotpEnabled()) {
-    const code = ((formData!.get("totp_code") as string | null) || "").trim();
-    const secret = getTotpSecret();
-    const totpOk = !!code && !!secret && (verifyTotpCode(secret, code) || useRecoveryCode(code));
-    if (!totpOk) {
-      return renderConsent(p, client, slug, scopes, "Invalid 2FA code.");
+  const delegateLabel = ((formData!.get("delegate_label") as string | null) || "").trim();
+
+  // --- Authenticate as either admin (no delegate label) or site delegate ---
+  let principal: string;       // who authenticated, for the token label and audit
+  let delegateRow: SiteDelegateRow | null = null;
+  if (delegateLabel) {
+    delegateRow = await verifyDelegate(slug, delegateLabel, password);
+    if (!delegateRow) {
+      return renderConsent(p, client, slug, scopes, "Incorrect delegate password, or no such delegate for this site.");
     }
+    principal = `delegate:${delegateRow.label}`;
+    // Delegates do not have TOTP — admin is the only TOTP-protected identity.
+  } else {
+    if (!password || !(await verifyPassword(password, ip))) {
+      return renderConsent(p, client, slug, scopes, "Incorrect admin password.");
+    }
+    if (isTotpEnabled()) {
+      const code = ((formData!.get("totp_code") as string | null) || "").trim();
+      const secret = getTotpSecret();
+      const totpOk = !!code && !!secret && (verifyTotpCode(secret, code) || useRecoveryCode(code));
+      if (!totpOk) {
+        return renderConsent(p, client, slug, scopes, "Invalid 2FA code.");
+      }
+    }
+    principal = "admin";
   }
 
   // --- Issue authorization code ---
@@ -499,11 +540,12 @@ export async function handleAuthorize(req: Request, ip: string): Promise<Respons
   const codeHash = sha256Hex(code);
   const expires = new Date(Date.now() + CODE_TTL_SECONDS * 1000).toISOString();
   db.run(
-    `INSERT INTO oauth_codes (code_hash, client_id, site_slug, scopes, code_challenge, redirect_uri, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    codeHash, client.id, slug, scopes.join(" "), p.code_challenge, p.redirect_uri, expires
+    `INSERT INTO oauth_codes (code_hash, client_id, site_slug, scopes, code_challenge, redirect_uri, expires_at, principal)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    codeHash, client.id, slug, scopes.join(" "), p.code_challenge, p.redirect_uri, expires, principal
   );
   db.run("UPDATE oauth_clients SET last_used_at = datetime('now') WHERE id = ?", client.id);
+  if (delegateRow) markDelegateUsed(delegateRow.id);
 
   const redirect = new URL(p.redirect_uri);
   redirect.searchParams.set("code", code);
@@ -523,16 +565,17 @@ interface OauthTokenRow {
   client_id: string | null;
   refresh_hash: string | null;
   scopes: string | null;
+  principal: string | null;
 }
 
 function insertOauthAccessToken(args: {
   tokenHash: string; label: string; siteSlug: string; expiresAt: string;
-  clientId: string; refreshHash: string | null; scopes: string;
+  clientId: string; refreshHash: string | null; scopes: string; principal: string;
 }) {
   db.run(
-    `INSERT INTO mcp_tokens (token_hash, label, site_slug, expires_at, issued_via, client_id, refresh_hash, scopes)
-     VALUES (?, ?, ?, ?, 'oauth', ?, ?, ?)`,
-    args.tokenHash, args.label, args.siteSlug, args.expiresAt, args.clientId, args.refreshHash, args.scopes
+    `INSERT INTO mcp_tokens (token_hash, label, site_slug, expires_at, issued_via, client_id, refresh_hash, scopes, principal)
+     VALUES (?, ?, ?, ?, 'oauth', ?, ?, ?, ?)`,
+    args.tokenHash, args.label, args.siteSlug, args.expiresAt, args.clientId, args.refreshHash, args.scopes, args.principal
   );
 }
 
@@ -627,15 +670,20 @@ function handleAuthCodeGrant(form: FormData, client: OauthClientRow): Response {
   const accessHash = sha256Hex(accessToken);
   const refreshHash = sha256Hex(refreshToken);
   const expiresAt = new Date(Date.now() + ACCESS_TOKEN_TTL_SECONDS * 1000).toISOString().replace("T", " ").substring(0, 19);
+  const principal = row.principal || "admin";
+  // Suffix the label with the delegate name so admins can tell at a glance which
+  // human/principal actually authorized this connection in the OAuth Connections list.
+  const principalSuffix = principal.startsWith("delegate:") ? ` (as ${principal.substring("delegate:".length)})` : "";
 
   insertOauthAccessToken({
     tokenHash: accessHash,
-    label: `OAuth · ${client.name}`,
+    label: `OAuth · ${client.name}${principalSuffix}`,
     siteSlug: row.site_slug,
     expiresAt,
     clientId: client.id,
     refreshHash,
     scopes: row.scopes,
+    principal,
   });
 
   return jsonResponse({
@@ -674,6 +722,7 @@ function handleRefreshGrant(form: FormData, client: OauthClientRow): Response {
     clientId: client.id,
     refreshHash: newRefreshHash,
     scopes: row.scopes,
+    principal: row.principal || "admin",
   });
 
   return jsonResponse({
@@ -732,11 +781,12 @@ export interface OauthGrantSummary {
   issued_at: string;
   expires_at: string | null;
   has_refresh: boolean;
+  principal: string;
 }
 
 export function listOauthGrants(): OauthGrantSummary[] {
   const rows = db.query(`
-    SELECT t.id as token_id, t.client_id, t.site_slug, t.scopes, t.created_at as issued_at, t.expires_at, t.refresh_hash,
+    SELECT t.id as token_id, t.client_id, t.site_slug, t.scopes, t.created_at as issued_at, t.expires_at, t.refresh_hash, t.principal,
            c.name as client_name, c.client_uri
     FROM mcp_tokens t LEFT JOIN oauth_clients c ON c.id = t.client_id
     WHERE t.issued_via = 'oauth'
@@ -752,6 +802,7 @@ export function listOauthGrants(): OauthGrantSummary[] {
     issued_at: r.issued_at,
     expires_at: r.expires_at,
     has_refresh: !!r.refresh_hash,
+    principal: r.principal || "admin",
   }));
 }
 
@@ -786,3 +837,118 @@ export function deleteOauthClient(clientId: string): boolean {
   const result = db.run("DELETE FROM oauth_clients WHERE id = ?", clientId);
   return result.changes > 0;
 }
+
+// --- Site delegate credentials ---
+//
+// The admin mints these per-site to share MCP access with collaborators
+// without giving them the admin password. A delegate's password is checked
+// at the OAuth consent screen for that one site only; nothing about the
+// rest of the system (other sites, /_admin) is reachable.
+
+export interface SiteDelegateRow {
+  id: number;
+  site_slug: string;
+  label: string;
+  password_hash: string;
+  expires_at: string | null;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export interface SiteDelegateInfo {
+  id: number;
+  site_slug: string;
+  label: string;
+  expires_at: string | null;
+  expired: boolean;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export function listSiteDelegates(siteSlug: string): SiteDelegateInfo[] {
+  const rows = db.query(
+    `SELECT id, site_slug, label, expires_at, created_at, last_used_at
+     FROM site_delegates WHERE site_slug = ? ORDER BY created_at DESC`
+  ).all(siteSlug) as Array<Omit<SiteDelegateInfo, "expired">>;
+  const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+  return rows.map(r => ({ ...r, expired: r.expires_at ? r.expires_at < now : false }));
+}
+
+export async function createSiteDelegate(args: {
+  siteSlug: string; label: string; password: string; expiresInDays?: number | null;
+}): Promise<{ id: number }> {
+  const site = getSite(args.siteSlug);
+  if (!site) throw new Error("Site not found");
+  if (!site.mcp_enabled) throw new Error("MCP is not enabled on this site");
+
+  const label = args.label.trim();
+  if (!label) throw new Error("Label is required");
+  if (label.length > 60) throw new Error("Label is too long");
+  if (!/^[\w .@\-]+$/.test(label)) throw new Error("Label may only contain letters, digits, spaces, and . @ - _");
+  if (label.toLowerCase() === "admin") throw new Error("Label 'admin' is reserved");
+
+  if (!args.password || args.password.length < 8) {
+    throw new Error("Delegate password must be at least 8 characters");
+  }
+
+  const passwordHash = await Bun.password.hash(args.password, { algorithm: "argon2id" });
+
+  let expiresAt: string | null = null;
+  if (args.expiresInDays && args.expiresInDays > 0) {
+    const d = new Date();
+    d.setDate(d.getDate() + args.expiresInDays);
+    expiresAt = d.toISOString().replace("T", " ").substring(0, 19);
+  }
+
+  try {
+    const result = db.run(
+      `INSERT INTO site_delegates (site_slug, label, password_hash, expires_at) VALUES (?, ?, ?, ?)`,
+      args.siteSlug, label, passwordHash, expiresAt
+    );
+    return { id: Number(result.lastInsertRowid) };
+  } catch (e: any) {
+    if (String(e.message || "").includes("UNIQUE")) {
+      throw new Error(`A delegate named '${label}' already exists for this site`);
+    }
+    throw e;
+  }
+}
+
+export function deleteSiteDelegate(siteSlug: string, id: number): boolean {
+  const result = db.run(
+    "DELETE FROM site_delegates WHERE id = ? AND site_slug = ?",
+    id, siteSlug
+  );
+  return result.changes > 0;
+}
+
+// Verify a delegate password for the given site. Returns the matching
+// delegate row on success, or null on no-match / expired / wrong password.
+// Always runs a password verify to keep timing roughly constant whether or
+// not the label exists.
+async function verifyDelegate(siteSlug: string, label: string, password: string): Promise<SiteDelegateRow | null> {
+  const row = db.query(
+    "SELECT * FROM site_delegates WHERE site_slug = ? AND label = ?"
+  ).get(siteSlug, label) as SiteDelegateRow | null;
+
+  // Argon2id-hash a dummy if no row, so timing leaks less about which labels exist.
+  const hashToCheck = row?.password_hash || "$argon2id$v=19$m=65536,t=3,p=4$ZHVtbXk$ZHVtbXk";
+  let ok = false;
+  try { ok = await Bun.password.verify(password, hashToCheck); } catch { ok = false; }
+  if (!row || !ok) return null;
+
+  // Expiration check
+  if (row.expires_at) {
+    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    if (row.expires_at < now) return null;
+  }
+  return row;
+}
+
+function markDelegateUsed(id: number): void {
+  db.run("UPDATE site_delegates SET last_used_at = datetime('now') WHERE id = ?", id);
+}
+
+// Expose the delegate verifier so handleAuthorize (above) can call it. Defined
+// after the function it uses to keep the module ordering clean.
+export { verifyDelegate, markDelegateUsed };
