@@ -203,7 +203,14 @@ Aliases share the same content, versions, and settings as the original site. The
 
 ## MCP (Model Context Protocol) Support
 
-Hoster includes a built-in MCP server that lets AI tools like Claude Code, Cursor, and other MCP-compatible clients read and write files on your hosted sites.
+Hoster includes a built-in MCP server that lets AI tools like Claude Code, Cursor, Claude.ai, and other MCP-compatible clients read and write files on your hosted sites.
+
+Two transports are supported:
+
+- **Static bearer tokens** at `https://yourdomain.com/_mcp` — for CLI tools (Claude Code, Cursor) that don't need an interactive login. The admin issues a token and pastes it into the tool's config.
+- **OAuth 2.1** at `https://yourdomain.com/_mcp/<slug>` — for chat clients (Claude.ai, ChatGPT) that auto-discover the auth server and walk the admin through a consent flow. Each MCP-enabled site is its own OAuth-protected resource with per-site scopes.
+
+Static and OAuth tokens coexist; you can use both at the same time.
 
 ### Enabling MCP for a Site
 
@@ -253,6 +260,45 @@ claude mcp add --transport http --scope user my-project https://yourdomain.com/_
 ```
 
 The server name is derived from the token label, so each token gets a distinct, recognizable name in your AI tool's config.
+
+### Connecting a Chat Client (OAuth)
+
+For chat clients that don't accept a static bearer token — Claude.ai web and desktop, ChatGPT custom connectors, etc. — Hoster speaks OAuth 2.1 with the MCP authorization profile.
+
+Each MCP-enabled site is its own connector at `https://yourdomain.com/_mcp/<slug>`. To connect:
+
+1. Go to **Settings → OAuth Connections** in Hoster admin and click **Copy** next to the site you want to connect.
+2. In your chat client, choose "Add MCP server" (or equivalent) and paste the URL.
+3. The client auto-registers itself, then redirects you to Hoster's consent screen showing the client's name, the target site, and the requested scopes (`read`, `write`, `commit`).
+4. Type your admin password (and 2FA code if enabled) and click **Authorize**.
+5. The client receives a token and is connected.
+
+The active connection appears in **Settings → OAuth Connections**, where you can revoke it at any time. Revocation is instant — the next request from that client will fail.
+
+#### OAuth Scopes
+
+| Scope | Tools |
+|---|---|
+| `read` | `list_files`, `read_file`, `list_versions` |
+| `write` | `write_file`, `write_media_file`, `delete_file` |
+| `commit` | `commit_version` |
+
+The chat client requests scopes during the authorize flow; the admin sees them on the consent screen and can decline. Sites configured as **Read Only** silently reduce any granted scopes to `read`.
+
+#### Endpoints
+
+For client implementers:
+
+| URL | Purpose |
+|---|---|
+| `/.well-known/oauth-authorization-server` | RFC 8414 AS metadata |
+| `/.well-known/oauth-protected-resource/_mcp/<slug>` | RFC 9728 resource metadata |
+| `/oauth/register` | RFC 7591 Dynamic Client Registration |
+| `/oauth/authorize` | Authorization endpoint (PKCE-only) |
+| `/oauth/token` | Token endpoint (`authorization_code`, `refresh_token`) |
+| `/oauth/revoke` | RFC 7009 token revocation |
+
+Tokens are short-lived (1 hour access, 30-day rotating refresh) and bound to a single site via the `resource` parameter (RFC 8707).
 
 ### Available MCP Tools
 
@@ -432,6 +478,8 @@ Hoster is designed to be safe for public exposure. Since the source code is publ
 
 ### MCP Access
 
+#### Static Tokens
+
 - Bearer tokens are SHA-256 hashed before storage — raw tokens are never persisted
 - Token validation uses **constant-time comparison** to prevent timing attacks
 - Tokens can be scoped to a single site, given an expiration date, and revoked instantly
@@ -453,6 +501,27 @@ MCP tokens are by design trusted credentials — anyone holding one can modify t
 - **Non-atomic chunked writes** — during a multi-chunk `write_media_file` upload, the target path contains a partial file that is served as-is. Visitors mid-upload see a corrupt asset. Use versioned paths or auto-snapshot if this matters for your workflow.
 - **Append-phase polyglots** — a valid media header on chunk 1 followed by arbitrary bytes on subsequent chunks produces a polyglot file on disk. The `nosniff` header blocks browsers from executing this as script, and the file extension remains an allowlisted media type, but the bytes themselves are not re-validated after the first chunk.
 - **Auto-snapshot scope** — auto-snapshot only fires on the **first** MCP write to a given working version. Further writes within the same session mutate the working copy; use `commit_version` to create additional checkpoints mid-session.
+
+#### OAuth 2.1 Connections
+
+OAuth-issued tokens stored alongside static tokens (same hashing, expiration, and audit-logging guarantees), with several added properties:
+
+- **Audience binding** — OAuth tokens are bound to a single site at issue time and rejected if presented at a different `/_mcp/<slug>` URL. The `WWW-Authenticate` challenge on a 401 response includes a `resource_metadata` link per RFC 9728.
+- **PKCE-only** authorization (S256). Plain `code_challenge_method` is not supported.
+- **Single-use authorization codes** with a 60-second lifetime; replay returns `invalid_grant`.
+- **Refresh token rotation** — every refresh issues a new access + refresh pair and invalidates the previous one, so a leaked refresh token only works until the legitimate client next refreshes.
+- **Per-tool scope enforcement** — `write_file`, `write_media_file`, and `delete_file` require the `write` scope; `commit_version` requires `commit`. Read-only sites silently downgrade any granted scopes to `read`.
+- **Consent re-authentication** — every authorization requires the admin password (and TOTP, if enabled). The consent flow does not rely on the admin session cookie surviving a cross-site redirect, and rate-limits failed attempts using the same window as admin login.
+- **Anonymous Dynamic Client Registration** — required by the MCP profile so chat clients can self-register. Hoster surfaces all registered clients in **Settings → OAuth Connections** with a one-click delete that cascades to the client's tokens.
+- **Open redirect protection** — `redirect_uri` must exactly match a value supplied at registration; mismatches show an error page rather than redirecting.
+- **CSP-safe consent screen** — the consent page uses no inline JavaScript; the Deny button is a real form submission so it works under the strict `script-src 'self'` policy.
+
+##### Residual Risks of OAuth
+
+- **Anyone can register a client.** The MCP profile mandates anonymous DCR, so anyone on the internet who hits `/oauth/register` gets a `client_id`. PKCE + the consent password gate prevent that registration from ever obtaining a token without admin approval, but a flood of registrations can still bloat the `oauth_clients` table. The endpoint is globally rate-limited to ~30 registrations per hour and unused clients can be pruned from the admin UI.
+- **Phishing the consent screen.** An attacker who registers a client with a misleading `client_name` ("System Update") could trick a careless admin into authorizing it. The consent screen prominently displays the registered name, client URI, and "first time client" warnings, but the human review remains the trust anchor — read what you're approving.
+- **Refresh tokens are long-lived.** A leaked refresh token allows silent renewal until detected. Revoke any unrecognized connection from **Settings → OAuth Connections**; revocation is immediate and ends future refreshes.
+- **Static tokens still permit cross-site access** when their scope is "All sites" — that's by design for CLI batch tools. OAuth-issued tokens are always single-site, so prefer OAuth when narrower blast radius matters.
 
 ### Configuration Backup
 

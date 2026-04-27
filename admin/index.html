@@ -317,8 +317,15 @@
           </div>
           <div class="card mt-4" style="max-width:640px">
             <h3>MCP Access Tokens</h3>
-            <p class="text-sm text-muted mb-2">Manage tokens for AI tools to access MCP-enabled sites. Tokens can be scoped to a single site and set to expire.</p>
+            <p class="text-sm text-muted mb-2">Static bearer tokens for CLI tools (Claude Code, Cursor) that don't need an interactive login. Tokens can be scoped to a single site and set to expire.</p>
             <div id="mcp-token-list"></div>
+          </div>
+          <div class="card mt-4" style="max-width:640px">
+            <h3>OAuth Connections</h3>
+            <p class="text-sm text-muted mb-2">Chat clients (Claude.ai, ChatGPT, etc.) connect via OAuth. Each MCP-enabled site is a separate connector — paste its URL into your chat client's "Add MCP server" dialog and complete the consent flow.</p>
+            <div id="oauth-site-urls"></div>
+            <div id="oauth-grants" style="margin-top:16px"></div>
+            <div id="oauth-clients" style="margin-top:16px"></div>
           </div>
           <div class="card mt-4" style="max-width:640px">
             <h3>MCP Activity Log</h3>

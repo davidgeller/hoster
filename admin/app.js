@@ -377,6 +377,7 @@ async function loadSettings() {
   loadBlockedIps();
   loadTotpSettings();
   loadMcpTokens();
+  loadOauthGrants();
   loadMcpAudit();
 }
 
@@ -632,6 +633,115 @@ async function loadMcpTokens() {
         loadMcpTokens();
       } catch (err) { alert(err.message); }
     });
+  } catch (_) {}
+}
+
+async function loadOauthGrants() {
+  const urlsEl = document.getElementById("oauth-site-urls");
+  const grantsEl = document.getElementById("oauth-grants");
+  const clientsEl = document.getElementById("oauth-clients");
+  if (!urlsEl || !grantsEl || !clientsEl) return;
+
+  try {
+    const [{ grants }, { clients }, { sites }] = await Promise.all([
+      api("/oauth/grants"),
+      api("/oauth/clients"),
+      api("/sites"),
+    ]);
+    const mcpSites = sites.filter(s => s.mcp_enabled);
+    const origin = window.location.origin;
+
+    // --- Per-site connector URLs (helper for pasting into chat clients) ---
+    if (mcpSites.length === 0) {
+      urlsEl.innerHTML = '<p class="text-muted text-sm" style="margin:0">No MCP-enabled sites yet. Enable MCP on a site under Sites → Settings.</p>';
+    } else {
+      urlsEl.innerHTML = `
+        <div style="font-size:0.85rem;font-weight:500;margin-bottom:6px">Connector URLs</div>
+        <table style="width:100%;font-size:0.85rem">
+          <thead><tr><th style="text-align:left">Site</th><th style="text-align:left">Connector URL</th><th></th></tr></thead>
+          <tbody>
+            ${mcpSites.map(s => `
+              <tr>
+                <td>${esc(s.name)}</td>
+                <td><code style="font-size:0.8rem">${esc(origin)}/_mcp/${esc(s.slug)}</code></td>
+                <td style="text-align:right"><button class="btn btn-sm" data-copy-url="${esc(origin)}/_mcp/${esc(s.slug)}">Copy</button></td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      `;
+      urlsEl.querySelectorAll("[data-copy-url]").forEach(btn => {
+        btn.addEventListener("click", () => {
+          navigator.clipboard.writeText(btn.dataset.copyUrl);
+          const orig = btn.textContent;
+          btn.textContent = "Copied!";
+          setTimeout(() => { btn.textContent = orig; }, 1500);
+        });
+      });
+    }
+
+    // --- Active OAuth grants ---
+    if (grants.length === 0) {
+      grantsEl.innerHTML = '<div style="font-size:0.85rem;font-weight:500;margin-bottom:6px">Active Connections</div><p class="text-muted text-sm" style="margin:0">No active OAuth connections. Connections appear here after a chat client completes the authorize flow.</p>';
+    } else {
+      let html = `<div style="font-size:0.85rem;font-weight:500;margin-bottom:6px">Active Connections</div>
+        <table style="width:100%;font-size:0.85rem">
+          <thead><tr><th style="text-align:left">Client</th><th style="text-align:left">Site</th><th style="text-align:left">Scopes</th><th style="text-align:left">Issued</th><th></th></tr></thead>
+          <tbody>`;
+      for (const g of grants) {
+        html += `<tr>
+          <td>${esc(g.client_name)}${g.client_uri ? ` <a href="${esc(g.client_uri)}" target="_blank" rel="noopener" style="font-size:0.75rem">↗</a>` : ""}</td>
+          <td><code>${esc(g.site_slug)}</code></td>
+          <td><code style="font-size:0.78rem">${esc(g.scopes)}</code></td>
+          <td>${timeAgo(g.issued_at)}</td>
+          <td style="text-align:right"><button class="btn btn-sm btn-danger" data-revoke-grant="${g.token_id}">Revoke</button></td>
+        </tr>`;
+      }
+      html += "</tbody></table>";
+      grantsEl.innerHTML = html;
+
+      grantsEl.querySelectorAll("[data-revoke-grant]").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          if (!confirm("Revoke this OAuth connection? The client will need to re-authorize.")) return;
+          try {
+            await api(`/oauth/grants/${btn.dataset.revokeGrant}`, { method: "DELETE" });
+            loadOauthGrants();
+          } catch (err) { alert(err.message); }
+        });
+      });
+    }
+
+    // --- Registered clients (collapsed by default) ---
+    if (clients.length === 0) {
+      clientsEl.innerHTML = "";
+    } else {
+      let html = `<details style="font-size:0.85rem">
+        <summary style="cursor:pointer;font-weight:500;margin-bottom:6px">Registered Clients (${clients.length})</summary>
+        <table style="width:100%;font-size:0.85rem;margin-top:6px">
+          <thead><tr><th style="text-align:left">Name</th><th style="text-align:left">Client ID</th><th style="text-align:left">Last Used</th><th style="text-align:left">Active Grants</th><th></th></tr></thead>
+          <tbody>`;
+      for (const c of clients) {
+        html += `<tr>
+          <td>${esc(c.name)}${c.client_uri ? ` <a href="${esc(c.client_uri)}" target="_blank" rel="noopener" style="font-size:0.75rem">↗</a>` : ""}</td>
+          <td><code style="font-size:0.78rem">${esc(c.id.slice(0, 12))}…</code></td>
+          <td>${c.last_used_at ? timeAgo(c.last_used_at) : '<span class="text-muted">never</span>'}</td>
+          <td>${c.active_grants}</td>
+          <td style="text-align:right"><button class="btn btn-sm btn-danger" data-delete-client="${esc(c.id)}">Delete</button></td>
+        </tr>`;
+      }
+      html += "</tbody></table></details>";
+      clientsEl.innerHTML = html;
+
+      clientsEl.querySelectorAll("[data-delete-client]").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          if (!confirm("Delete this client and all its tokens? It will need to re-register before it can connect again.")) return;
+          try {
+            await api(`/oauth/clients/${btn.dataset.deleteClient}`, { method: "DELETE" });
+            loadOauthGrants();
+          } catch (err) { alert(err.message); }
+        });
+      });
+    }
   } catch (_) {}
 }
 
