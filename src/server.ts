@@ -170,10 +170,11 @@ export function createServer(port: number) {
 
         // --- MCP endpoint ---
         if (path === "/_mcp") {
-          const res = await handleMcp(req);
-          status = res.status;
+          const { response, siteSlug: mcpSlug } = await handleMcp(req);
+          status = response.status;
+          siteSlug = mcpSlug;
           logReq();
-          return addSecurityHeaders(res);
+          return addSecurityHeaders(response);
         }
 
         // --- Admin API ---
@@ -226,11 +227,32 @@ export function createServer(port: number) {
 
         const candidateSlug = resolveAlias(parts[0]);
         const reqPath = parts.slice(1).join("/") || "index.html";
+
+        // If a .html URL has a trailing slash (e.g. /slug/page.html/), strip it.
+        // The browser would otherwise resolve relative asset paths against the
+        // file as if it were a directory, breaking CSS/JS references.
+        if (/\.html\/$/.test(path)) {
+          status = 301;
+          logReq();
+          return new Response(null, {
+            status: 301,
+            headers: { Location: path.replace(/\/+$/, "") + url.search },
+          });
+        }
+
         const resolved = resolveSitePath(candidateSlug, reqPath);
 
         // Redirect /slug to /slug/ (and /slug/subdir to /slug/subdir/) so
         // relative asset paths in HTML resolve correctly in the browser.
-        if (resolved && !path.endsWith("/") && resolved.filePath.endsWith("index.html")) {
+        // Skip when the URL explicitly names a file (e.g. /slug/index.html or
+        // /slug/sub/index.html); appending a slash would make the browser treat
+        // the file as a directory and break relative paths.
+        if (
+          resolved &&
+          !path.endsWith("/") &&
+          !path.endsWith(".html") &&
+          resolved.filePath.endsWith("index.html")
+        ) {
           status = 301;
           logReq();
           return new Response(null, {

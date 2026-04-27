@@ -1622,11 +1622,17 @@ async function loadLogs() {
   tbody.innerHTML = logs.map((r) => {
     const statusClass = r.status < 300 ? "status-2xx" : r.status < 400 ? "status-3xx" : r.status < 500 ? "status-4xx" : "status-5xx";
     const isBlocked = r.status === 403;
+    // Annotate /_mcp rows with the site(s) the call touched, when known.
+    const isMcp = r.path === "/_mcp" || r.path?.startsWith("/_mcp/");
+    const pathDisplay = isMcp && r.site_slug
+      ? `${esc(r.path)} <span class="text-sm text-muted">(${esc(r.site_slug)})</span>`
+      : esc(r.path);
+    const pathTitle = isMcp && r.site_slug ? `${r.path} (${r.site_slug})` : r.path;
     return `
       <tr${isBlocked ? ' class="row-blocked"' : ""}>
         <td>${timeAgo(r.created_at)}</td>
         <td>${r.method}</td>
-        <td class="truncate" title="${esc(r.path)}">${esc(r.path)}</td>
+        <td class="truncate" title="${esc(pathTitle)}">${pathDisplay}</td>
         <td><span class="status-badge ${statusClass}">${r.status}</span>${isBlocked ? ' <span class="chip-blocked">Blocked</span>' : ""}</td>
         <td class="text-sm">${esc(r.browser || "—")}</td>
         <td class="text-mono text-sm">${esc(r.ip)}</td>

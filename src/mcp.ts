@@ -407,10 +407,11 @@ function markCurrentModified(siteSlug: string): void {
   }
 }
 
-function handleToolCall(name: string, args: any, token: ValidatedToken): ToolResult {
+function handleToolCall(name: string, args: any, token: ValidatedToken, touched: Set<string>): ToolResult {
   try {
     // For site-specific tools, check token scope
     const siteSlug = args.site as string | undefined;
+    if (siteSlug) touched.add(siteSlug);
 
     if (siteSlug && token.site_slug && token.site_slug !== siteSlug) {
       const err = `Token is scoped to site '${token.site_slug}', cannot access '${siteSlug}'`;
@@ -669,7 +670,7 @@ function pathError(token: ValidatedToken, tool: string, slug: string, path: stri
   return { content: [{ type: "text", text: "Invalid path" }], isError: true };
 }
 
-function handleRpc(request: JsonRpcRequest, token: ValidatedToken): JsonRpcResponse | null {
+function handleRpc(request: JsonRpcRequest, token: ValidatedToken, touched: Set<string>): JsonRpcResponse | null {
   const { id, method, params } = request;
 
   switch (method) {
@@ -692,7 +693,7 @@ function handleRpc(request: JsonRpcRequest, token: ValidatedToken): JsonRpcRespo
     case "tools/call": {
       const { name, arguments: args } = params || {};
       if (!name) return rpcError(id ?? null, -32602, "Missing tool name");
-      const result = handleToolCall(name, args || {}, token);
+      const result = handleToolCall(name, args || {}, token, touched);
       return rpcResult(id ?? null, result);
     }
 
@@ -701,29 +702,38 @@ function handleRpc(request: JsonRpcRequest, token: ValidatedToken): JsonRpcRespo
   }
 }
 
-export async function handleMcp(req: Request): Promise<Response> {
+export interface McpResult {
+  response: Response;
+  siteSlug: string | null;  // For request-log annotation. Joined comma-list if a batch touched several sites.
+}
+
+function bare(response: Response): McpResult {
+  return { response, siteSlug: null };
+}
+
+export async function handleMcp(req: Request): Promise<McpResult> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
 
   if (req.method !== "POST") {
-    return new Response(JSON.stringify({ error: "Method not allowed" }), { status: 405, headers });
+    return bare(new Response(JSON.stringify({ error: "Method not allowed" }), { status: 405, headers }));
   }
 
   // Authenticate via Bearer token
   const authHeader = req.headers.get("authorization");
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return new Response(
+    return bare(new Response(
       JSON.stringify(rpcError(null, -32000, "Unauthorized — Bearer token required")),
       { status: 401, headers }
-    );
+    ));
   }
 
   const rawToken = authHeader.substring(7);
   const token = validateMcpToken(rawToken);
   if (!token) {
-    return new Response(
+    return bare(new Response(
       JSON.stringify(rpcError(null, -32000, "Invalid or expired token")),
       { status: 401, headers }
-    );
+    ));
   }
 
   // Parse request body
@@ -731,22 +741,32 @@ export async function handleMcp(req: Request): Promise<Response> {
   try {
     body = await req.json();
   } catch {
-    return new Response(JSON.stringify(rpcError(null, -32700, "Parse error")), { status: 400, headers });
+    return bare(new Response(JSON.stringify(rpcError(null, -32700, "Parse error")), { status: 400, headers }));
   }
+
+  // A scoped token always implicates its site, even on tools that don't take a site arg
+  // (e.g. tools/list, ping). Pre-seeding `touched` keeps log annotations accurate.
+  const touched = new Set<string>();
+  if (token.site_slug) touched.add(token.site_slug);
+
+  let response: Response;
 
   // Batch requests
   if (Array.isArray(body)) {
     const responses = body
-      .map((r: JsonRpcRequest) => handleRpc(r, token))
+      .map((r: JsonRpcRequest) => handleRpc(r, token, touched))
       .filter((r): r is JsonRpcResponse => r !== null);
-    if (responses.length === 0) return new Response(null, { status: 204 });
-    return new Response(JSON.stringify(responses), { headers });
+    response = responses.length === 0
+      ? new Response(null, { status: 204 })
+      : new Response(JSON.stringify(responses), { headers });
+  } else {
+    // Single request
+    const single = handleRpc(body, token, touched);
+    response = single === null
+      ? new Response(null, { status: 204 })
+      : new Response(JSON.stringify(single), { headers });
   }
 
-  // Single request
-  const response = handleRpc(body, token);
-  if (response === null) {
-    return new Response(null, { status: 204 });
-  }
-  return new Response(JSON.stringify(response), { headers });
+  const siteSlug = touched.size === 0 ? null : [...touched].sort().join(",");
+  return { response, siteSlug };
 }
