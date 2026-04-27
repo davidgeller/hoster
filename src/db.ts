@@ -107,4 +107,18 @@ db.exec(`
 // Add columns if not present (for existing databases)
 try { db.exec("ALTER TABLE sessions ADD COLUMN csrf_token TEXT"); } catch (_) {}
 
+// Produces a SQLite-compatible UTC timestamp string that compares correctly
+// against columns populated by `datetime('now')`. Both formats must agree
+// or string comparison silently breaks (T vs space at index 10), defeating
+// every WHERE-time-window query.
+//
+// Prefer SQL-side `datetime('now', '+/-N units')` whenever the value is being
+// inserted or compared in a single query — that keeps both sides in SQLite's
+// hands and avoids JS/SQLite clock-skew. Use sqliteNow() only when the value
+// must round-trip through JS (e.g. an INSERT that also returns the timestamp,
+// or a multi-step in-memory comparison).
+export function sqliteNow(offsetMs: number = 0): string {
+  return new Date(Date.now() + offsetMs).toISOString().replace("T", " ").substring(0, 19);
+}
+
 export default db;

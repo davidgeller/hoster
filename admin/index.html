@@ -398,7 +398,13 @@
               <h2>Confirm Configuration Load</h2>
               <p style="margin-bottom:12px;color:var(--danger);font-weight:500">This will replace all current settings, sites, and data.</p>
               <div id="backup-preview-info" style="margin-bottom:16px"></div>
-              <p class="text-sm text-muted" style="margin-bottom:16px">This action cannot be undone. You may want to save your current configuration first.</p>
+              <p class="text-sm text-muted" style="margin-bottom:8px">This action cannot be undone. You may want to save your current configuration first.</p>
+              <label style="display:block;font-size:0.85rem;font-weight:500;margin-bottom:4px">
+                Re-enter your current admin password to confirm
+                <small style="display:block;color:var(--text-muted);font-weight:normal">Restoring a backup overwrites the admin password and TOTP setup, so this is treated as a privileged operation.</small>
+              </label>
+              <input type="password" id="backup-confirm-admin-password" autocomplete="current-password" style="width:100%;padding:8px 10px;font-size:0.9rem;margin-bottom:12px;box-sizing:border-box">
+              <div class="form-error" id="backup-confirm-error" style="margin-bottom:8px"></div>
               <div class="modal-actions">
                 <button class="btn btn-ghost" id="backup-confirm-cancel">Cancel</button>
                 <button class="btn btn-danger" id="backup-confirm-ok">Replace Everything</button>

@@ -201,20 +201,22 @@ Compatible with all major authenticator apps:
 **Date:** 2026-04-27
 **Scope:** Re-audit after shipping OAuth 2.1 authorization server, per-site delegate credentials, write_media_file, blank-site creation, and version snapshot tools.
 **Audited files:** `src/oauth.ts` (new, ~770 lines), `src/mcp.ts`, `src/server.ts`, `src/auth.ts`, `src/admin-api.ts`, `src/sites.ts`, `src/backup.ts`, `src/analytics.ts`, `src/db.ts`.
-**Status:** *Findings only — fixes not yet applied.* Every issue below is real (verified by inspection or test). The codebase is currently exposed; treat the Critical list as a deploy gate.
+**Status:** *All six Critical findings remediated in commits leading up to v1.0.0.* High-severity items remain — they're tracked for a follow-up hardening release. The April section below is preserved verbatim as a reference; remediation notes are inline next to each finding.
 
 The audit incorporates two independent review passes plus targeted hand-verification of the highest-impact claims. The earlier (March 2026) audit's 15 findings remain remediated — this section covers issues introduced or surfaced by the OAuth/delegate work.
 
 ## Prioritized Fix List (April)
 
-| # | Severity | Title | Fix Summary |
+All six Criticals were remediated before v1.0.0. Status column reflects current state:
+
+| # | Severity | Title | Status |
 |---|---|---|---|
-| 1 | Critical | Timestamp-format mismatch breaks brute-force rate limiting | Standardize on a single timestamp format and audit every comparison |
-| 2 | Critical | Backup restore overwrites the admin password hash | Require current-password re-auth before importing; reject `admin_password_hash`/`totp_*` rows |
-| 3 | Critical | Refresh tokens have no absolute expiry | Add `refresh_expires_at`; detect rotated-then-replayed refresh as theft |
-| 4 | Critical | DCR rate limiter doesn't actually rate-limit per IP | Track DCR IP, cap per-IP and globally; auto-prune unused clients |
-| 5 | Critical | DCR accepts arbitrary `http://` redirect URIs | Restrict to `https://` + loopback HTTP only |
-| 6 | Critical | Pending-2FA token not IP-bound; sessions not rotated post-login | Enforce IP match on 2FA consume; destroy other sessions on login |
+| 1 | Critical | Timestamp-format mismatch breaks brute-force rate limiting | **Fixed** — `sqliteNow()` helper + SQL-side `datetime('now', '...')` everywhere |
+| 2 | Critical | Backup restore overwrites the admin password hash | **Fixed** — current admin password required for restore; rate-limited and audit-logged |
+| 3 | Critical | Refresh tokens have no absolute expiry | **Fixed** — `refresh_expires_at` column + replay detection (rotated-then-replayed refresh revokes the entire chain) |
+| 4 | Critical | DCR rate limiter doesn't actually rate-limit per IP | **Fixed** — `created_ip` column + 5/hr/IP and 200/day/global caps |
+| 5 | Critical | DCR accepts arbitrary `http://` redirect URIs | **Fixed** — `https://` only, plus `http://` for loopback hosts (127.0.0.1, ::1, localhost) |
+| 6 | Critical | Pending-2FA token not IP-bound; sessions not rotated post-login | **Fixed** — `consumePending2faToken(token, ip)` checks IP; sessions rotated on every login |
 | 7 | High | `originOf` trusts forwarded headers without Cloudflare gate | Mirror `auth.ts:111-119` Cloudflare-signal test |
 | 8 | High | OAuth POST endpoints bypass country/IP-block lists | Apply `isIpBlocked` / `checkAndAutoBlock` to OAuth POST endpoints |
 | 9 | High | `pruneExpired` never invoked + wrong predicate | Schedule from `index.ts`; rewrite predicate |

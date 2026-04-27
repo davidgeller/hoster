@@ -958,19 +958,30 @@ async function loadMcpAudit() {
       `;
 
       const modal = document.getElementById("backup-confirm-modal");
+      const adminPwInput = document.getElementById("backup-confirm-admin-password");
+      const confirmErrEl = document.getElementById("backup-confirm-error");
+      adminPwInput.value = "";
+      confirmErrEl.textContent = "";
       modal.hidden = false;
+      setTimeout(() => adminPwInput.focus(), 50);
 
       // Wait for confirm or cancel
       const confirmBtn = document.getElementById("backup-confirm-ok");
       const cancelBtn = document.getElementById("backup-confirm-cancel");
 
-      await new Promise((resolve, reject) => {
+      const adminPassword = await new Promise((resolve, reject) => {
         const cleanup = () => {
           confirmBtn.removeEventListener("click", onConfirm);
           cancelBtn.removeEventListener("click", onCancel);
           modal.querySelector(".modal-backdrop").removeEventListener("click", onCancel);
         };
-        const onConfirm = () => { cleanup(); modal.hidden = true; resolve(); };
+        const onConfirm = () => {
+          const pw = adminPwInput.value;
+          if (!pw) { confirmErrEl.textContent = "Admin password is required."; return; }
+          cleanup();
+          modal.hidden = true;
+          resolve(pw);
+        };
         const onCancel = () => { cleanup(); modal.hidden = true; reject(new Error("Cancelled")); };
         confirmBtn.addEventListener("click", onConfirm);
         cancelBtn.addEventListener("click", onCancel);
@@ -985,6 +996,7 @@ async function loadMcpAudit() {
       const importForm = new FormData();
       importForm.append("file", pendingBackupFile);
       if (password) importForm.append("password", password);
+      importForm.append("admin_password", adminPassword);
       importForm.append("confirm", "yes");
 
       const importHeaders = {};

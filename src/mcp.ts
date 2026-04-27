@@ -4,7 +4,7 @@ import {
 } from "fs";
 import { join, resolve, dirname } from "path";
 import { getSite, listSites, listVersions, getVersion, commitVersion, markVersionModified, SITES_DIR, type Site } from "./sites";
-import db from "./db";
+import db, { sqliteNow } from "./db";
 
 // --- Schema ---
 
@@ -110,9 +110,7 @@ export function createMcpToken(label: string, siteSlug: string | null, expiresIn
 
   let expiresAt: string | null = null;
   if (expiresInDays && expiresInDays > 0) {
-    const d = new Date();
-    d.setDate(d.getDate() + expiresInDays);
-    expiresAt = d.toISOString().replace("T", " ").substring(0, 19);
+    expiresAt = sqliteNow(expiresInDays * 24 * 60 * 60 * 1000);
   }
 
   db.run(
@@ -124,7 +122,7 @@ export function createMcpToken(label: string, siteSlug: string | null, expiresIn
 
 export function listMcpTokens(): McpTokenInfo[] {
   const rows = db.query("SELECT id, label, site_slug, expires_at, created_at FROM mcp_tokens ORDER BY created_at DESC").all() as McpTokenInfo[];
-  const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+  const now = sqliteNow();
   return rows.map(r => ({
     ...r,
     expired: r.expires_at ? r.expires_at < now : false,
@@ -154,7 +152,7 @@ function validateMcpToken(token: string): ValidatedToken | null {
     if (constantTimeEqual(incoming, row.token_hash)) {
       // Check expiration
       if (row.expires_at) {
-        const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+        const now = sqliteNow();
         if (row.expires_at < now) return null; // expired
       }
       const issuedVia = (row.issued_via === "oauth" ? "oauth" : "static") as "static" | "oauth";

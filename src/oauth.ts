@@ -19,7 +19,7 @@
 // with `issued_via = 'oauth'` so the resource server's bearer validator
 // works unchanged for both static and OAuth tokens.
 
-import db from "./db";
+import db, { sqliteNow } from "./db";
 import { verifyPassword, isTotpEnabled, getTotpSecret, verifyTotpCode, isRateLimited } from "./auth";
 import { useRecoveryCode } from "./auth";
 import { getSite } from "./sites";
@@ -75,6 +75,12 @@ try { db.exec("ALTER TABLE mcp_tokens ADD COLUMN refresh_hash TEXT"); } catch (_
 try { db.exec("ALTER TABLE mcp_tokens ADD COLUMN scopes TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE mcp_tokens ADD COLUMN principal TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE oauth_codes ADD COLUMN principal TEXT DEFAULT 'admin'"); } catch (_) {}
+try { db.exec("ALTER TABLE oauth_clients ADD COLUMN created_ip TEXT"); } catch (_) {}
+// Refresh tokens get an absolute expiry so a leaked token can't be rotated forever.
+try { db.exec("ALTER TABLE mcp_tokens ADD COLUMN refresh_expires_at TEXT"); } catch (_) {}
+// Single-cycle previous refresh tracking for stolen-refresh-token detection: if a
+// refresh hash that was just rotated comes back, the chain is compromised.
+try { db.exec("ALTER TABLE mcp_tokens ADD COLUMN prev_refresh_hash TEXT"); } catch (_) {}
 
 // --- Constants ---
 
@@ -83,6 +89,11 @@ const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
 const CODE_TTL_SECONDS = 60;                         // 60 seconds — codes are very short-lived
 const VALID_SCOPES = new Set(["read", "write", "commit"]);
 const DEFAULT_SCOPES = "read";
+
+// DCR rate limits — anonymous registrations need real per-IP tracking so a single
+// attacker can't fill the global cap and lock everyone else out.
+const DCR_RATE_PER_IP_HOUR = 5;
+const DCR_RATE_PER_DAY_GLOBAL = 200;
 
 // --- Crypto helpers ---
 
@@ -239,16 +250,35 @@ interface DcrBody {
   scope?: string;
 }
 
-const DCR_RATE_PER_HOUR = 30; // per-IP cap
+// Per OAuth 2.1 §3.1.2.1, redirect URIs must use HTTPS except for explicit
+// loopback HTTP. Reject anything else at registration so a phisher can't
+// register a client whose redirect_uri delivers tokens over plaintext or to
+// arbitrary internet hosts via http://.
+function isValidRedirectUri(uri: string): boolean {
+  if (uri === "urn:ietf:wg:oauth:2.0:oob") return true;
+  let parsed: URL;
+  try { parsed = new URL(uri); } catch { return false; }
+  if (parsed.username || parsed.password) return false;
+  if (parsed.hash) return false;
+  if (parsed.protocol === "https:") return true;
+  if (parsed.protocol === "http:") {
+    const host = parsed.hostname.toLowerCase();
+    return host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1";
+  }
+  return false;
+}
 
 function dcrRateLimited(ip: string): boolean {
-  // Use audit_log table indirectly — count recent registrations from this IP.
-  const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-  const row = db.query(
-    "SELECT COUNT(*) as c FROM oauth_clients WHERE created_at > ? AND id IN (SELECT id FROM oauth_clients WHERE created_at > ?)"
-  ).get(cutoff, cutoff) as any;
-  // Without storing IP per registration, this is a global cap. Acceptable for v1.
-  return (row?.c ?? 0) > DCR_RATE_PER_HOUR;
+  // Per-IP cap (5/hr/IP) plus a global daily cap (200/day). Both via SQL-side
+  // datetime to keep formats aligned with the column's datetime('now') default.
+  const perIp = db.query(
+    "SELECT COUNT(*) as c FROM oauth_clients WHERE created_ip = ? AND created_at > datetime('now', '-1 hour')"
+  ).get(ip) as { c: number };
+  if (perIp.c >= DCR_RATE_PER_IP_HOUR) return true;
+  const global = db.query(
+    "SELECT COUNT(*) as c FROM oauth_clients WHERE created_at > datetime('now', '-24 hours')"
+  ).get() as { c: number };
+  return global.c >= DCR_RATE_PER_DAY_GLOBAL;
 }
 
 export async function handleRegister(req: Request, ip: string): Promise<Response> {
@@ -267,14 +297,27 @@ export async function handleRegister(req: Request, ip: string): Promise<Response
   }
 
   const name = (body.client_name || "Unnamed Client").toString().slice(0, 200);
-  const clientUri = body.client_uri ? String(body.client_uri).slice(0, 500) : null;
+  // Validate client_uri scheme — it's rendered as a clickable link on the
+  // consent page, so a `javascript:` URL would execute in the admin's session.
+  let clientUri: string | null = null;
+  if (body.client_uri) {
+    const raw = String(body.client_uri).slice(0, 500);
+    try {
+      const u = new URL(raw);
+      if (u.protocol === "http:" || u.protocol === "https:") clientUri = raw;
+    } catch { /* ignore — clientUri stays null */ }
+  }
+
   const redirectUris = Array.isArray(body.redirect_uris) ? body.redirect_uris.filter(u => typeof u === "string") : [];
   if (redirectUris.length === 0) {
     return jsonResponse({ error: "invalid_redirect_uri", error_description: "At least one redirect_uri is required" }, 400);
   }
   for (const uri of redirectUris) {
-    if (!/^https?:\/\//.test(uri) && uri !== "urn:ietf:wg:oauth:2.0:oob") {
-      return jsonResponse({ error: "invalid_redirect_uri", error_description: `Invalid redirect_uri: ${uri}` }, 400);
+    if (!isValidRedirectUri(uri)) {
+      return jsonResponse({
+        error: "invalid_redirect_uri",
+        error_description: `Invalid redirect_uri: ${uri}. Must be https:// or http://localhost (loopback).`
+      }, 400);
     }
   }
 
@@ -290,9 +333,9 @@ export async function handleRegister(req: Request, ip: string): Promise<Response
   const ratHash = null;
 
   db.run(
-    `INSERT INTO oauth_clients (id, secret_hash, name, client_uri, redirect_uris, registration_access_token_hash)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    clientId, secretHash, name, clientUri, JSON.stringify(redirectUris), ratHash
+    `INSERT INTO oauth_clients (id, secret_hash, name, client_uri, redirect_uris, registration_access_token_hash, created_ip)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    clientId, secretHash, name, clientUri, JSON.stringify(redirectUris), ratHash, ip
   );
 
   return jsonResponse({
@@ -538,11 +581,12 @@ export async function handleAuthorize(req: Request, ip: string): Promise<Respons
   // --- Issue authorization code ---
   const code = randHex(32);
   const codeHash = sha256Hex(code);
-  const expires = new Date(Date.now() + CODE_TTL_SECONDS * 1000).toISOString();
+  // SQL-side expiry so it stores in the same format datetime('now') comparisons produce.
   db.run(
     `INSERT INTO oauth_codes (code_hash, client_id, site_slug, scopes, code_challenge, redirect_uri, expires_at, principal)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    codeHash, client.id, slug, scopes.join(" "), p.code_challenge, p.redirect_uri, expires, principal
+     VALUES (?, ?, ?, ?, ?, ?, datetime('now', ?), ?)`,
+    codeHash, client.id, slug, scopes.join(" "), p.code_challenge, p.redirect_uri,
+    `+${CODE_TTL_SECONDS} seconds`, principal
   );
   db.run("UPDATE oauth_clients SET last_used_at = datetime('now') WHERE id = ?", client.id);
   if (delegateRow) markDelegateUsed(delegateRow.id);
@@ -569,13 +613,22 @@ interface OauthTokenRow {
 }
 
 function insertOauthAccessToken(args: {
-  tokenHash: string; label: string; siteSlug: string; expiresAt: string;
-  clientId: string; refreshHash: string | null; scopes: string; principal: string;
+  tokenHash: string; label: string; siteSlug: string;
+  clientId: string; refreshHash: string | null; refreshExpiresAt: string | null;
+  prevRefreshHash: string | null; scopes: string; principal: string;
 }) {
+  // Both expiry timestamps are produced SQL-side from the same datetime('now')
+  // baseline so they compare consistently with later WHERE expires_at < datetime('now')
+  // queries during pruning.
   db.run(
-    `INSERT INTO mcp_tokens (token_hash, label, site_slug, expires_at, issued_via, client_id, refresh_hash, scopes, principal)
-     VALUES (?, ?, ?, ?, 'oauth', ?, ?, ?, ?)`,
-    args.tokenHash, args.label, args.siteSlug, args.expiresAt, args.clientId, args.refreshHash, args.scopes, args.principal
+    `INSERT INTO mcp_tokens
+       (token_hash, label, site_slug, expires_at, issued_via, client_id,
+        refresh_hash, refresh_expires_at, prev_refresh_hash, scopes, principal)
+     VALUES (?, ?, ?, datetime('now', ?), 'oauth', ?, ?, ?, ?, ?, ?)`,
+    args.tokenHash, args.label, args.siteSlug,
+    `+${ACCESS_TOKEN_TTL_SECONDS} seconds`,
+    args.clientId, args.refreshHash, args.refreshExpiresAt, args.prevRefreshHash,
+    args.scopes, args.principal
   );
 }
 
@@ -640,7 +693,9 @@ function handleAuthCodeGrant(form: FormData, client: OauthClientRow): Response {
     // Spec says we MAY revoke any tokens issued from this code on replay.
     return jsonResponse({ error: "invalid_grant", error_description: "Authorization code already used" }, 400);
   }
-  if (row.expires_at < new Date().toISOString()) {
+  // expires_at and the comparison both use SQLite's space-format YYYY-MM-DD HH:MM:SS;
+  // sqliteNow() must return the same.
+  if (row.expires_at < sqliteNow()) {
     return jsonResponse({ error: "invalid_grant", error_description: "Authorization code expired" }, 400);
   }
   if (row.redirect_uri !== redirectUri) {
@@ -669,7 +724,7 @@ function handleAuthCodeGrant(form: FormData, client: OauthClientRow): Response {
   const refreshToken = randHex(32);
   const accessHash = sha256Hex(accessToken);
   const refreshHash = sha256Hex(refreshToken);
-  const expiresAt = new Date(Date.now() + ACCESS_TOKEN_TTL_SECONDS * 1000).toISOString().replace("T", " ").substring(0, 19);
+  const refreshExpiresAt = sqliteNow(REFRESH_TOKEN_TTL_SECONDS * 1000);
   const principal = row.principal || "admin";
   // Suffix the label with the delegate name so admins can tell at a glance which
   // human/principal actually authorized this connection in the OAuth Connections list.
@@ -679,9 +734,10 @@ function handleAuthCodeGrant(form: FormData, client: OauthClientRow): Response {
     tokenHash: accessHash,
     label: `OAuth · ${client.name}${principalSuffix}`,
     siteSlug: row.site_slug,
-    expiresAt,
     clientId: client.id,
     refreshHash,
+    refreshExpiresAt,
+    prevRefreshHash: null,
     scopes: row.scopes,
     principal,
   });
@@ -700,27 +756,57 @@ function handleRefreshGrant(form: FormData, client: OauthClientRow): Response {
   if (!refreshToken) return jsonResponse({ error: "invalid_request", error_description: "refresh_token required" }, 400);
 
   const refreshHash = sha256Hex(refreshToken);
+
+  // --- Stolen-refresh detection: if the incoming hash matches the *previous*
+  //     refresh of any active row (i.e. a token that was already rotated out),
+  //     treat it as theft and revoke the entire chain for this principal+site. ---
+  const replayed = db.query(
+    `SELECT id, client_id, site_slug, principal FROM mcp_tokens
+     WHERE issued_via = 'oauth' AND prev_refresh_hash = ?`
+  ).get(refreshHash) as { id: number; client_id: string; site_slug: string; principal: string | null } | null;
+  if (replayed) {
+    db.run(
+      `DELETE FROM mcp_tokens
+       WHERE issued_via = 'oauth' AND client_id = ? AND site_slug = ?
+         AND COALESCE(principal, 'admin') = COALESCE(?, 'admin')`,
+      replayed.client_id, replayed.site_slug, replayed.principal
+    );
+    return jsonResponse({
+      error: "invalid_grant",
+      error_description: "Refresh token replay detected — entire token chain has been revoked. Re-authorize."
+    }, 400);
+  }
+
   const row = findOauthRowByRefreshHash(refreshHash);
   if (!row || row.client_id !== client.id || !row.site_slug || !row.scopes) {
     return jsonResponse({ error: "invalid_grant" }, 400);
   }
 
+  // --- Absolute refresh expiry — leaked token can't rotate forever. ---
+  const refreshExpiresAt = (row as any).refresh_expires_at as string | null;
+  if (refreshExpiresAt && refreshExpiresAt < sqliteNow()) {
+    db.run("DELETE FROM mcp_tokens WHERE id = ?", row.id);
+    return jsonResponse({ error: "invalid_grant", error_description: "Refresh token expired. Re-authorize." }, 400);
+  }
+
   // Refresh token rotation: invalidate old access+refresh, issue new pair.
+  // Carry the absolute refresh_expires_at from the original grant so rotation
+  // doesn't reset the clock — a leaked token only buys time until that boundary.
   db.run("DELETE FROM mcp_tokens WHERE id = ?", row.id);
 
   const newAccess = randHex(32);
   const newRefresh = randHex(32);
   const newAccessHash = sha256Hex(newAccess);
   const newRefreshHash = sha256Hex(newRefresh);
-  const expiresAt = new Date(Date.now() + ACCESS_TOKEN_TTL_SECONDS * 1000).toISOString().replace("T", " ").substring(0, 19);
 
   insertOauthAccessToken({
     tokenHash: newAccessHash,
     label: row.label,
     siteSlug: row.site_slug,
-    expiresAt,
     clientId: client.id,
     refreshHash: newRefreshHash,
+    refreshExpiresAt: refreshExpiresAt || sqliteNow(REFRESH_TOKEN_TTL_SECONDS * 1000),
+    prevRefreshHash: refreshHash,  // for stolen-refresh detection on next replay
     scopes: row.scopes,
     principal: row.principal || "admin",
   });
@@ -757,16 +843,31 @@ export async function handleRevoke(req: Request): Promise<Response> {
   return new Response(null, { status: 200 });
 }
 
-// --- Periodic cleanup (called from index.ts on a timer) ---
+// --- Periodic cleanup (scheduled from index.ts) ---
 
 export function pruneExpired(): void {
+  // Consumed and expired authorization codes — short TTL, prune aggressively.
   db.run("DELETE FROM oauth_codes WHERE expires_at < datetime('now') OR consumed = 1");
-  // Access tokens expire on use via mcp.ts validateMcpToken; prune fully-expired oauth rows here
-  // so the table doesn't accumulate dead refresh-token-only rows.
-  db.run(
-    `DELETE FROM mcp_tokens WHERE issued_via = 'oauth' AND expires_at IS NOT NULL AND expires_at < datetime('now')
-     AND (refresh_hash IS NULL)`
-  );
+
+  // OAuth-issued tokens whose refresh has either lapsed or never had an absolute
+  // expiry recorded (legacy rows from before refresh_expires_at was introduced).
+  // A token is fully dead when both the access token AND the refresh window have
+  // expired — at that point neither half can produce a fresh access token.
+  db.run(`
+    DELETE FROM mcp_tokens
+    WHERE issued_via = 'oauth'
+      AND (expires_at IS NULL OR expires_at < datetime('now'))
+      AND (refresh_expires_at IS NULL OR refresh_expires_at < datetime('now'))
+  `);
+
+  // Auto-prune anonymous DCR registrations that were never used after 7 days.
+  // Caps unbounded growth from registration spam (issue A-C4 in SECURITY-AUDIT.md).
+  db.run(`
+    DELETE FROM oauth_clients
+    WHERE last_used_at IS NULL
+      AND created_at < datetime('now', '-7 days')
+      AND id NOT IN (SELECT DISTINCT client_id FROM mcp_tokens WHERE client_id IS NOT NULL)
+  `);
 }
 
 // --- Admin-side queries ---
@@ -870,7 +971,7 @@ export function listSiteDelegates(siteSlug: string): SiteDelegateInfo[] {
     `SELECT id, site_slug, label, expires_at, created_at, last_used_at
      FROM site_delegates WHERE site_slug = ? ORDER BY created_at DESC`
   ).all(siteSlug) as Array<Omit<SiteDelegateInfo, "expired">>;
-  const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+  const now = sqliteNow();
   return rows.map(r => ({ ...r, expired: r.expires_at ? r.expires_at < now : false }));
 }
 
@@ -895,9 +996,7 @@ export async function createSiteDelegate(args: {
 
   let expiresAt: string | null = null;
   if (args.expiresInDays && args.expiresInDays > 0) {
-    const d = new Date();
-    d.setDate(d.getDate() + args.expiresInDays);
-    expiresAt = d.toISOString().replace("T", " ").substring(0, 19);
+    expiresAt = sqliteNow(args.expiresInDays * 24 * 60 * 60 * 1000);
   }
 
   try {
@@ -939,7 +1038,7 @@ async function verifyDelegate(siteSlug: string, label: string, password: string)
 
   // Expiration check
   if (row.expires_at) {
-    const now = new Date().toISOString().replace("T", " ").substring(0, 19);
+    const now = sqliteNow();
     if (row.expires_at < now) return null;
   }
   return row;

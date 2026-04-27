@@ -151,7 +151,8 @@ export function isCountryAllowed(country: string | null): boolean {
 // --- Dashboard queries ---
 
 export function getOverviewStats(hours: number = 24) {
-  const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+  // SQL-side cutoff so created_at (in datetime('now') format) compares correctly.
+  const cutoff = `-${hours} hours`;
 
   const requestStats = db.query(`
     SELECT
@@ -160,7 +161,7 @@ export function getOverviewStats(hours: number = 24) {
       ROUND(AVG(response_time_ms), 1) as avg_response_ms,
       ROUND(MIN(response_time_ms), 1) as min_response_ms,
       ROUND(MAX(response_time_ms), 1) as max_response_ms
-    FROM requests WHERE created_at > ?
+    FROM requests WHERE created_at > datetime('now', ?)
   `).get(cutoff) as any;
 
   // Active sites from the sites table, not requests
@@ -170,32 +171,35 @@ export function getOverviewStats(hours: number = 24) {
 }
 
 export function getTopSites(hours: number = 24, limit: number = 10) {
-  const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+  // SQL-side cutoff so created_at (in datetime('now') format) compares correctly.
+  const cutoff = `-${hours} hours`;
   return db.query(`
     SELECT site_slug, COUNT(*) as hits, COUNT(DISTINCT ip) as visitors
-    FROM requests WHERE created_at > ? AND site_slug IS NOT NULL
+    FROM requests WHERE created_at > datetime('now', ?) AND site_slug IS NOT NULL
     GROUP BY site_slug ORDER BY hits DESC LIMIT ?
   `).all(cutoff, limit);
 }
 
 export function getTopPaths(siteSlug: string | null, hours: number = 24, limit: number = 20) {
-  const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+  // SQL-side cutoff so created_at (in datetime('now') format) compares correctly.
+  const cutoff = `-${hours} hours`;
   if (siteSlug) {
     return db.query(`
       SELECT path, COUNT(*) as hits FROM requests
-      WHERE created_at > ? AND site_slug = ?
+      WHERE created_at > datetime('now', ?) AND site_slug = ?
       GROUP BY path ORDER BY hits DESC LIMIT ?
     `).all(cutoff, siteSlug, limit);
   }
   return db.query(`
     SELECT path, COUNT(*) as hits FROM requests
-    WHERE created_at > ?
+    WHERE created_at > datetime('now', ?)
     GROUP BY path ORDER BY hits DESC LIMIT ?
   `).all(cutoff, limit);
 }
 
 export function getTrafficOverTime(hours: number = 24) {
-  const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+  // SQL-side cutoff so created_at (in datetime('now') format) compares correctly.
+  const cutoff = `-${hours} hours`;
 
   // Adaptive bucket sizing: finer granularity for shorter time ranges
   let bucketExpr: string;
@@ -218,25 +222,27 @@ export function getTrafficOverTime(hours: number = 24) {
       ${bucketExpr} as bucket,
       COUNT(*) as hits,
       COUNT(DISTINCT ip) as visitors
-    FROM requests WHERE created_at > ?
+    FROM requests WHERE created_at > datetime('now', ?)
     GROUP BY bucket ORDER BY bucket
   `).all(cutoff);
 }
 
 export function getTopCountries(hours: number = 24, limit: number = 15) {
-  const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+  // SQL-side cutoff so created_at (in datetime('now') format) compares correctly.
+  const cutoff = `-${hours} hours`;
   return db.query(`
     SELECT country, COUNT(*) as hits, COUNT(DISTINCT ip) as visitors
-    FROM requests WHERE created_at > ? AND country IS NOT NULL
+    FROM requests WHERE created_at > datetime('now', ?) AND country IS NOT NULL
     GROUP BY country ORDER BY hits DESC LIMIT ?
   `).all(cutoff, limit);
 }
 
 export function getTopBrowsers(hours: number = 24, limit: number = 10) {
-  const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+  // SQL-side cutoff so created_at (in datetime('now') format) compares correctly.
+  const cutoff = `-${hours} hours`;
   return db.query(`
     SELECT browser, COUNT(*) as hits
-    FROM requests WHERE created_at > ? AND browser IS NOT NULL
+    FROM requests WHERE created_at > datetime('now', ?) AND browser IS NOT NULL
     GROUP BY browser ORDER BY hits DESC LIMIT ?
   `).all(cutoff, limit);
 }
@@ -271,7 +277,8 @@ export function getRecentRequests(limit: number = 50, filters: {
 }
 
 export function getStatusCodeBreakdown(hours: number = 24) {
-  const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+  // SQL-side cutoff so created_at (in datetime('now') format) compares correctly.
+  const cutoff = `-${hours} hours`;
   return db.query(`
     SELECT
       CASE
@@ -282,33 +289,34 @@ export function getStatusCodeBreakdown(hours: number = 24) {
         ELSE 'other'
       END as status_group,
       COUNT(*) as count
-    FROM requests WHERE created_at > ?
+    FROM requests WHERE created_at > datetime('now', ?)
     GROUP BY status_group ORDER BY status_group
   `).all(cutoff);
 }
 
 export function getBlockedRequests(hours: number = 24, limit: number = 10) {
-  const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+  // SQL-side cutoff so created_at (in datetime('now') format) compares correctly.
+  const cutoff = `-${hours} hours`;
 
   const totalBlocked = db.query(`
-    SELECT COUNT(*) as count FROM requests WHERE created_at > ? AND status = 403
+    SELECT COUNT(*) as count FROM requests WHERE created_at > datetime('now', ?) AND status = 403
   `).get(cutoff) as any;
 
   const blockedCountries = db.query(`
     SELECT country, COUNT(*) as hits, COUNT(DISTINCT ip) as ips
-    FROM requests WHERE created_at > ? AND status = 403 AND country IS NOT NULL
+    FROM requests WHERE created_at > datetime('now', ?) AND status = 403 AND country IS NOT NULL
     GROUP BY country ORDER BY hits DESC LIMIT ?
   `).all(cutoff, limit);
 
   const blockedPaths = db.query(`
     SELECT path, COUNT(*) as hits, COUNT(DISTINCT ip) as ips
-    FROM requests WHERE created_at > ? AND status = 403
+    FROM requests WHERE created_at > datetime('now', ?) AND status = 403
     GROUP BY path ORDER BY hits DESC LIMIT ?
   `).all(cutoff, limit);
 
   const blockedIps = db.query(`
     SELECT ip, country, COUNT(*) as hits
-    FROM requests WHERE created_at > ? AND status = 403
+    FROM requests WHERE created_at > datetime('now', ?) AND status = 403
     GROUP BY ip ORDER BY hits DESC LIMIT ?
   `).all(cutoff, limit);
 
@@ -316,30 +324,31 @@ export function getBlockedRequests(hours: number = 24, limit: number = 10) {
 }
 
 export function getSiteStats(slug: string, hours: number = 24) {
-  const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+  // SQL-side cutoff so created_at (in datetime('now') format) compares correctly.
+  const cutoff = `-${hours} hours`;
   const overview = db.query(`
     SELECT
       COUNT(*) as total_requests,
       COUNT(DISTINCT ip) as unique_visitors,
       ROUND(AVG(response_time_ms), 1) as avg_response_ms
-    FROM requests WHERE created_at > ? AND site_slug = ?
+    FROM requests WHERE created_at > datetime('now', ?) AND site_slug = ?
   `).get(cutoff, slug);
 
   const paths = db.query(`
     SELECT path, COUNT(*) as hits FROM requests
-    WHERE created_at > ? AND site_slug = ?
+    WHERE created_at > datetime('now', ?) AND site_slug = ?
     GROUP BY path ORDER BY hits DESC LIMIT 20
   `).all(cutoff, slug);
 
   const countries = db.query(`
     SELECT country, COUNT(*) as hits FROM requests
-    WHERE created_at > ? AND site_slug = ? AND country IS NOT NULL
+    WHERE created_at > datetime('now', ?) AND site_slug = ? AND country IS NOT NULL
     GROUP BY country ORDER BY hits DESC LIMIT 10
   `).all(cutoff, slug);
 
   const traffic = db.query(`
     SELECT strftime('%Y-%m-%dT%H:00:00', created_at) as bucket, COUNT(*) as hits
-    FROM requests WHERE created_at > ? AND site_slug = ?
+    FROM requests WHERE created_at > datetime('now', ?) AND site_slug = ?
     GROUP BY bucket ORDER BY bucket
   `).all(cutoff, slug);
 
@@ -388,19 +397,20 @@ export function setAutoBlockConfig(config: Partial<AutoBlockConfig>): AutoBlockC
 }
 
 // --- Blocked IP management ---
+//
+// All time comparisons use SQL-side datetime so they line up with column
+// values stored via datetime('now') / datetime('now', '+/-X')-style INSERTs.
 
 export function isIpBlocked(ip: string): boolean {
-  const now = new Date().toISOString();
   const row = db.query(
-    "SELECT id FROM blocked_ips WHERE ip = ? AND (expires_at IS NULL OR expires_at > ?)"
-  ).get(ip, now) as any;
+    "SELECT id FROM blocked_ips WHERE ip = ? AND (expires_at IS NULL OR expires_at > datetime('now'))"
+  ).get(ip) as any;
   return !!row;
 }
 
 export function getBlockedIps(): any[] {
-  const now = new Date().toISOString();
   // Clean expired entries
-  db.run("DELETE FROM blocked_ips WHERE expires_at IS NOT NULL AND expires_at <= ?", now);
+  db.run("DELETE FROM blocked_ips WHERE expires_at IS NOT NULL AND expires_at <= datetime('now')");
   return db.query(
     "SELECT id, ip, reason, blocked_at, expires_at FROM blocked_ips ORDER BY blocked_at DESC"
   ).all();
@@ -411,13 +421,20 @@ export function unblockIp(id: number): void {
 }
 
 export function blockIp(ip: string, reason: string, durationHours: number): void {
-  const expiresAt = durationHours > 0
-    ? new Date(Date.now() + durationHours * 60 * 60 * 1000).toISOString()
-    : null;
-  db.run(
-    "INSERT INTO blocked_ips (ip, reason, expires_at) VALUES (?, ?, ?) ON CONFLICT(ip) DO UPDATE SET reason = ?, blocked_at = datetime('now'), expires_at = ?",
-    ip, reason, expiresAt, reason, expiresAt
-  );
+  // SQL-side expiry so the value matches datetime('now') comparisons used at lookup.
+  if (durationHours > 0) {
+    db.run(
+      `INSERT INTO blocked_ips (ip, reason, expires_at) VALUES (?, ?, datetime('now', ?))
+       ON CONFLICT(ip) DO UPDATE SET reason = ?, blocked_at = datetime('now'), expires_at = datetime('now', ?)`,
+      ip, reason, `+${durationHours} hours`, reason, `+${durationHours} hours`
+    );
+  } else {
+    db.run(
+      `INSERT INTO blocked_ips (ip, reason, expires_at) VALUES (?, ?, NULL)
+       ON CONFLICT(ip) DO UPDATE SET reason = ?, blocked_at = datetime('now'), expires_at = NULL`,
+      ip, reason, reason
+    );
+  }
 }
 
 export function checkAndAutoBlock(ip: string): boolean {
@@ -427,11 +444,10 @@ export function checkAndAutoBlock(ip: string): boolean {
   // Already blocked?
   if (isIpBlocked(ip)) return true;
 
-  // Count recent 403s for this IP
-  const cutoff = new Date(Date.now() - config.window_minutes * 60 * 1000).toISOString();
+  // Count recent 403s for this IP — SQL-side datetime arithmetic keeps formats aligned.
   const row = db.query(
-    "SELECT COUNT(*) as cnt FROM requests WHERE ip = ? AND status = 403 AND created_at > ?"
-  ).get(ip, cutoff) as { cnt: number };
+    "SELECT COUNT(*) as cnt FROM requests WHERE ip = ? AND status = 403 AND created_at > datetime('now', ?)"
+  ).get(ip, `-${config.window_minutes} minutes`) as { cnt: number };
 
   if (row.cnt >= config.threshold) {
     blockIp(ip, `Auto-blocked: ${row.cnt} blocked requests in ${config.window_minutes}min`, config.duration_hours);

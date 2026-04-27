@@ -32,18 +32,20 @@ export function isSetup(): boolean {
 }
 
 export function isRateLimited(ip: string): boolean {
-  const cutoff = new Date(Date.now() - LOCKOUT_MINUTES * 60 * 1000).toISOString();
+  // Use SQL-side datetime arithmetic so the comparison stays in SQLite's native
+  // YYYY-MM-DD HH:MM:SS format. JS toISOString() produces a different format
+  // (T separator + Z) and string-compares incorrectly against datetime('now').
   const row = db.query(
-    "SELECT COUNT(*) as cnt FROM login_attempts WHERE ip = ? AND created_at > ? AND success = 0"
-  ).get(ip, cutoff) as { cnt: number };
+    `SELECT COUNT(*) as cnt FROM login_attempts
+     WHERE ip = ? AND created_at > datetime('now', ?) AND success = 0`
+  ).get(ip, `-${LOCKOUT_MINUTES} minutes`) as { cnt: number };
   return row.cnt >= MAX_LOGIN_ATTEMPTS;
 }
 
 function recordLoginAttempt(ip: string, success: boolean): void {
   db.run("INSERT INTO login_attempts (ip, success) VALUES (?, ?)", ip, success ? 1 : 0);
-  // Clean old attempts
-  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  db.run("DELETE FROM login_attempts WHERE created_at < ?", cutoff);
+  // Clean old attempts (older than 24 hours) — SQL-side datetime keeps formats aligned.
+  db.run("DELETE FROM login_attempts WHERE created_at < datetime('now', '-24 hours')");
 }
 
 export async function verifyPassword(password: string, ip: string): Promise<boolean> {
@@ -58,8 +60,14 @@ export async function verifyPassword(password: string, ip: string): Promise<bool
 export function createSession(ip: string): { sessionToken: string; csrfToken: string } {
   const sessionToken = randomBytes(32).toString("hex");
   const csrfToken = randomBytes(32).toString("hex");
-  const expires = new Date(Date.now() + SESSION_DURATION_HOURS * 60 * 60 * 1000).toISOString();
-  db.run("INSERT INTO sessions (token, csrf_token, expires_at, ip) VALUES (?, ?, ?, ?)", sessionToken, csrfToken, expires, ip);
+  // SQL-side datetime so expires_at is stored in the same format that
+  // datetime('now') comparisons (validateSession, getCsrfToken, cleanExpiredSessions)
+  // produce. Mixing toISOString() with datetime('now') silently breaks expiry.
+  db.run(
+    `INSERT INTO sessions (token, csrf_token, expires_at, ip)
+     VALUES (?, ?, datetime('now', ?), ?)`,
+    sessionToken, csrfToken, `+${SESSION_DURATION_HOURS} hours`, ip
+  );
   return { sessionToken, csrfToken };
 }
 
@@ -99,6 +107,13 @@ export function destroySession(token: string): void {
   db.run("DELETE FROM sessions WHERE token = ?", token);
 }
 
+// Destroy every session — used on successful login and password change so a
+// previously-stolen-but-quietly-held cookie is invalidated. Hoster is single-
+// admin, so there's no other principal whose sessions we'd preserve.
+export function destroyAllSessions(): void {
+  db.run("DELETE FROM sessions");
+}
+
 export function cleanExpiredSessions(): void {
   db.run("DELETE FROM sessions WHERE expires_at < datetime('now')");
 }
@@ -133,9 +148,8 @@ export function sessionCookie(token: string, maxAge: number = SESSION_DURATION_H
 
 export function auditLog(action: string, detail: string | null, ip: string): void {
   db.run("INSERT INTO audit_log (action, detail, ip) VALUES (?, ?, ?)", action, detail, ip);
-  // Prune entries older than 90 days
-  const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
-  db.run("DELETE FROM audit_log WHERE created_at < ?", cutoff);
+  // Prune entries older than 90 days. SQL-side datetime keeps formats aligned.
+  db.run("DELETE FROM audit_log WHERE created_at < datetime('now', '-90 days')");
 }
 
 export function getAuditLog(limit: number = 50): any[] {
@@ -260,12 +274,16 @@ export function clearPendingTotpSecret(): void {
   setConfigValue("totp_pending_secret", null);
 }
 
-// Pending 2FA sessions — password verified but awaiting TOTP code
+// Pending 2FA sessions — password verified but awaiting TOTP code.
+// SQL-side datetime keeps expires_at in the same format that the validate/consume
+// queries (datetime('now')) produce, so expiry comparisons actually work.
 export function createPending2faToken(ip: string): string {
   const token = randomBytes(32).toString("hex");
   const hash = sha256(token);
-  const expires = new Date(Date.now() + 5 * 60 * 1000).toISOString(); // 5 min expiry
-  db.run("INSERT INTO pending_2fa (token_hash, expires_at, ip) VALUES (?, ?, ?)", hash, expires, ip);
+  db.run(
+    "INSERT INTO pending_2fa (token_hash, expires_at, ip) VALUES (?, datetime('now', '+5 minutes'), ?)",
+    hash, ip
+  );
   return token;
 }
 
@@ -278,15 +296,22 @@ export function validatePending2faToken(token: string | undefined): boolean {
   return row !== null;
 }
 
-// Atomically validate and consume — prevents race conditions
-export function consumePending2faToken(token: string): boolean {
+// Atomically validate and consume — prevents race conditions.
+// IP must match the IP that began the login (the password step). Otherwise a
+// stolen pending_token could complete 2FA from a different machine.
+export function consumePending2faToken(token: string, ip: string): boolean {
   const hash = sha256(token);
   // Select-then-delete in a transaction for atomicity
   const consume = db.transaction(() => {
     const row = db.query(
-      "SELECT token_hash FROM pending_2fa WHERE token_hash = ? AND expires_at > datetime('now')"
-    ).get(hash);
+      "SELECT token_hash, ip FROM pending_2fa WHERE token_hash = ? AND expires_at > datetime('now')"
+    ).get(hash) as { token_hash: string; ip: string | null } | null;
     if (!row) return false;
+    // IP-binding: reject if the consume attempt comes from a different address.
+    // 'unknown' on either side is treated as a mismatch (don't authorize without
+    // a verifiable IP). This is conservative — legitimate IP changes mid-flow
+    // (mobile/Wi-Fi handoff in 5 minutes) require restarting the login.
+    if (!row.ip || row.ip === "unknown" || ip === "unknown" || row.ip !== ip) return false;
     db.run("DELETE FROM pending_2fa WHERE token_hash = ?", hash);
     return true;
   });
@@ -300,15 +325,14 @@ export function cleanExpiredPending2fa(): void {
 // --- TOTP Rate Limiting ---
 
 export function isTotpRateLimited(ip: string): boolean {
-  const cutoff = new Date(Date.now() - LOCKOUT_MINUTES * 60 * 1000).toISOString();
   const row = db.query(
-    "SELECT COUNT(*) as cnt FROM totp_attempts WHERE ip = ? AND created_at > ? AND success = 0"
-  ).get(ip, cutoff) as { cnt: number };
+    `SELECT COUNT(*) as cnt FROM totp_attempts
+     WHERE ip = ? AND created_at > datetime('now', ?) AND success = 0`
+  ).get(ip, `-${LOCKOUT_MINUTES} minutes`) as { cnt: number };
   return row.cnt >= MAX_TOTP_ATTEMPTS;
 }
 
 export function recordTotpAttempt(ip: string, success: boolean): void {
   db.run("INSERT INTO totp_attempts (ip, success) VALUES (?, ?)", ip, success ? 1 : 0);
-  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  db.run("DELETE FROM totp_attempts WHERE created_at < ?", cutoff);
+  db.run("DELETE FROM totp_attempts WHERE created_at < datetime('now', '-24 hours')");
 }

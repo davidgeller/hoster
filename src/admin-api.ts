@@ -1,5 +1,5 @@
 import {
-  verifyPassword, createSession, destroySession, validateSession,
+  verifyPassword, createSession, destroySession, destroyAllSessions, validateSession,
   getSessionToken, getClientIp, isRateLimited, isSetup, setAdminPassword,
   sessionCookie, cleanExpiredSessions, validateCsrf, getCsrfToken,
   isTotpEnabled, generateTotpSecret, getTotpQrDataUrl, verifyTotpCode,
@@ -38,6 +38,10 @@ function unauthorized(): Response {
 }
 
 function sessionResponse(ip: string): Response {
+  // Rotate sessions on every successful login: any previously-issued cookie
+  // (stolen, leaked, or just stale) is invalidated. Hoster is single-admin so
+  // there are no other principals whose sessions we'd preserve.
+  destroyAllSessions();
   const { sessionToken, csrfToken } = createSession(ip);
   return json({ ok: true, csrf_token: csrfToken }, 200, { "Set-Cookie": sessionCookie(sessionToken) });
 }
@@ -97,9 +101,11 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
 
     // Try TOTP code first, then recovery code
     if (verifyTotpCode(secret, code) || useRecoveryCode(code)) {
-      // Atomically consume the pending token — prevents race conditions
-      if (!consumePending2faToken(body.pending_token)) {
-        return json({ error: "Session expired. Please log in again." }, 401);
+      // Atomically consume the pending token — prevents race conditions.
+      // Also enforces IP-binding: the consume must come from the same IP that
+      // began the login flow. Refuses to complete 2FA across an IP change.
+      if (!consumePending2faToken(body.pending_token, ip)) {
+        return json({ error: "Session expired or IP changed. Please log in again." }, 401);
       }
       recordTotpAttempt(ip, true);
       auditLog("login_2fa", null, ip);
@@ -593,11 +599,31 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
       const formData = await req.formData();
       const file = formData.get("file") as File;
       const password = (formData.get("password") as string) || undefined;
+      const adminPassword = (formData.get("admin_password") as string) || "";
       const confirm = formData.get("confirm") as string;
       if (!file) return json({ error: "Backup file is required" }, 400);
       if (confirm !== "yes") return json({ error: "Confirmation required" }, 400);
+
+      // Restoring a backup overwrites admin_password_hash and totp_secret in
+      // the imported config — equivalent privilege to changing the admin
+      // password. Require the current admin password as a step-up auth so a
+      // brief session compromise can't take over the account through restore.
+      if (!adminPassword) {
+        return json({ error: "Current admin password is required to import a backup" }, 400);
+      }
+      if (isRateLimited(ip)) return json({ error: "Too many attempts. Try again later." }, 429);
+      const ok = await verifyPassword(adminPassword, ip);
+      if (!ok) {
+        auditLog("config_import_denied", "wrong admin password", ip);
+        return json({ error: "Incorrect admin password" }, 401);
+      }
+
       const buffer = Buffer.from(await file.arrayBuffer());
       const manifest = await restoreBackup(buffer, password);
+      // Restore replaces the admin password / TOTP — invalidate every session
+      // including this one so a stale cookie in another tab can't keep using
+      // the (now possibly different) credentials.
+      destroyAllSessions();
       auditLog("config_imported", `${manifest.site_count} sites restored`, ip);
       return json({ ok: true, manifest });
     } catch (e: any) {
