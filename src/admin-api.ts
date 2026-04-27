@@ -20,6 +20,7 @@ import {
   getAutoBlockConfig, setAutoBlockConfig, getBlockedIps, unblockIp
 } from "./analytics";
 import { createMcpToken, listMcpTokens, deleteMcpToken, getMcpAuditLog } from "./mcp";
+import { listOauthGrants, revokeOauthGrant, listOauthClients, deleteOauthClient } from "./oauth";
 import { createBackup, previewBackup, restoreBackup } from "./backup";
 
 function json(data: any, status = 200, headers: Record<string, string> = {}): Response {
@@ -483,6 +484,29 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   if (path === "/_admin/api/mcp/audit" && req.method === "GET") {
     const limit = clampInt(new URL(req.url).searchParams.get("limit"), 50, 1, 500);
     return json({ entries: getMcpAuditLog(limit) });
+  }
+
+  // --- OAuth grants (active access tokens issued via OAuth) ---
+  if (path === "/_admin/api/oauth/grants" && req.method === "GET") {
+    return json({ grants: listOauthGrants() });
+  }
+  const oauthGrantDeleteMatch = path.match(/^\/_admin\/api\/oauth\/grants\/(\d+)$/);
+  if (oauthGrantDeleteMatch && req.method === "DELETE") {
+    const id = parseInt(oauthGrantDeleteMatch[1]);
+    const ok = revokeOauthGrant(id);
+    if (ok) auditLog("oauth_grant_revoked", `grant ${id}`, ip);
+    return ok ? json({ ok: true }) : json({ error: "Grant not found" }, 404);
+  }
+
+  // --- OAuth registered clients ---
+  if (path === "/_admin/api/oauth/clients" && req.method === "GET") {
+    return json({ clients: listOauthClients() });
+  }
+  const oauthClientDeleteMatch = path.match(/^\/_admin\/api\/oauth\/clients\/([a-f0-9]+)$/);
+  if (oauthClientDeleteMatch && req.method === "DELETE") {
+    const ok = deleteOauthClient(oauthClientDeleteMatch[1]);
+    if (ok) auditLog("oauth_client_deleted", oauthClientDeleteMatch[1], ip);
+    return ok ? json({ ok: true }) : json({ error: "Client not found" }, 404);
   }
 
   // --- Audit log ---

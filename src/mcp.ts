@@ -140,11 +140,15 @@ interface ValidatedToken {
   id: number;
   label: string;
   site_slug: string | null;
+  issued_via: "static" | "oauth";
+  scopes: string[] | null; // null for static tokens (full access within scope)
 }
 
 function validateMcpToken(token: string): ValidatedToken | null {
   const incoming = hashToken(token);
-  const rows = db.query("SELECT id, token_hash, label, site_slug, expires_at FROM mcp_tokens").all() as McpTokenRecord[];
+  const rows = db.query(
+    "SELECT id, token_hash, label, site_slug, expires_at, issued_via, scopes FROM mcp_tokens"
+  ).all() as Array<McpTokenRecord & { issued_via: string | null; scopes: string | null }>;
 
   for (const row of rows) {
     if (constantTimeEqual(incoming, row.token_hash)) {
@@ -153,7 +157,14 @@ function validateMcpToken(token: string): ValidatedToken | null {
         const now = new Date().toISOString().replace("T", " ").substring(0, 19);
         if (row.expires_at < now) return null; // expired
       }
-      return { id: row.id, label: row.label, site_slug: row.site_slug };
+      const issuedVia = (row.issued_via === "oauth" ? "oauth" : "static") as "static" | "oauth";
+      return {
+        id: row.id,
+        label: row.label,
+        site_slug: row.site_slug,
+        issued_via: issuedVia,
+        scopes: row.scopes ? row.scopes.split(/\s+/).filter(Boolean) : null,
+      };
     }
   }
   return null;
@@ -407,6 +418,18 @@ function markCurrentModified(siteSlug: string): void {
   }
 }
 
+// Map MCP tool names to the OAuth scope they require. Tools with no entry
+// require no scope check (e.g. list_sites is always allowed within audience).
+const TOOL_SCOPE: Record<string, "read" | "write" | "commit"> = {
+  list_files: "read",
+  read_file: "read",
+  list_versions: "read",
+  write_file: "write",
+  write_media_file: "write",
+  delete_file: "write",
+  commit_version: "commit",
+};
+
 function handleToolCall(name: string, args: any, token: ValidatedToken, touched: Set<string>): ToolResult {
   try {
     // For site-specific tools, check token scope
@@ -417,6 +440,16 @@ function handleToolCall(name: string, args: any, token: ValidatedToken, touched:
       const err = `Token is scoped to site '${token.site_slug}', cannot access '${siteSlug}'`;
       logAudit(token.id, token.label, name, siteSlug, args.path || null, false, err);
       return { content: [{ type: "text", text: err }], isError: true };
+    }
+
+    // OAuth scope enforcement (static tokens skip — they have full access within their site scope).
+    if (token.issued_via === "oauth" && token.scopes) {
+      const required = TOOL_SCOPE[name];
+      if (required && !token.scopes.includes(required)) {
+        const err = `OAuth token lacks '${required}' scope for tool '${name}'`;
+        logAudit(token.id, token.label, name, siteSlug || null, args.path || null, false, err);
+        return { content: [{ type: "text", text: err }], isError: true };
+      }
     }
 
     switch (name) {
@@ -711,7 +744,23 @@ function bare(response: Response): McpResult {
   return { response, siteSlug: null };
 }
 
-export async function handleMcp(req: Request): Promise<McpResult> {
+// Build a WWW-Authenticate Bearer challenge that points clients at the
+// resource metadata endpoint, per the MCP authorization profile.
+function unauthorizedHeaders(req: Request, urlSlug: string | null, error: string, description: string): Record<string, string> {
+  const url = new URL(req.url);
+  const proto = req.headers.get("x-forwarded-proto") || url.protocol.replace(":", "");
+  const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || url.host;
+  const origin = `${proto}://${host}`;
+  const resourceMeta = urlSlug
+    ? `${origin}/.well-known/oauth-protected-resource/_mcp/${urlSlug}`
+    : `${origin}/.well-known/oauth-protected-resource`;
+  return {
+    "Content-Type": "application/json",
+    "WWW-Authenticate": `Bearer error="${error}", error_description="${description}", resource_metadata="${resourceMeta}"`,
+  };
+}
+
+export async function handleMcp(req: Request, urlSlug: string | null = null): Promise<McpResult> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
 
   if (req.method !== "POST") {
@@ -723,7 +772,7 @@ export async function handleMcp(req: Request): Promise<McpResult> {
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return bare(new Response(
       JSON.stringify(rpcError(null, -32000, "Unauthorized — Bearer token required")),
-      { status: 401, headers }
+      { status: 401, headers: unauthorizedHeaders(req, urlSlug, "invalid_token", "Bearer token required") }
     ));
   }
 
@@ -732,8 +781,26 @@ export async function handleMcp(req: Request): Promise<McpResult> {
   if (!token) {
     return bare(new Response(
       JSON.stringify(rpcError(null, -32000, "Invalid or expired token")),
-      { status: 401, headers }
+      { status: 401, headers: unauthorizedHeaders(req, urlSlug, "invalid_token", "Invalid or expired token") }
     ));
+  }
+
+  // Audience binding: when the request hit /_mcp/<slug>, the token must be
+  // scoped to that site. OAuth tokens are always single-site; static tokens
+  // may be scoped or unscoped, but if scoped must match the URL.
+  if (urlSlug !== null) {
+    if (token.site_slug && token.site_slug !== urlSlug) {
+      return bare(new Response(
+        JSON.stringify(rpcError(null, -32000, `Token not valid for site '${urlSlug}'`)),
+        { status: 401, headers: unauthorizedHeaders(req, urlSlug, "invalid_token", "Token audience does not match resource URL") }
+      ));
+    }
+    if (token.issued_via === "oauth" && token.site_slug !== urlSlug) {
+      return bare(new Response(
+        JSON.stringify(rpcError(null, -32000, `OAuth token audience mismatch`)),
+        { status: 401, headers: unauthorizedHeaders(req, urlSlug, "invalid_token", "OAuth tokens are bound to a single site") }
+      ));
+    }
   }
 
   // Parse request body

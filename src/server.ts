@@ -2,6 +2,10 @@ import { existsSync, statSync } from "fs";
 import { join, resolve } from "path";
 import { handleAdminApi } from "./admin-api";
 import { handleMcp } from "./mcp";
+import {
+  handleAsMetadata, handleProtectedResourceMetadata,
+  handleRegister, handleAuthorize, handleToken, handleRevoke,
+} from "./oauth";
 import { logRequest, extractRequestMeta, shouldTrack, isCountryAllowed, isIpBlocked, checkAndAutoBlock } from "./analytics";
 import { resolveSitePath, resolveAlias } from "./sites";
 
@@ -149,8 +153,16 @@ export function createServer(port: number) {
           });
         }
 
-        // --- IP auto-block check (skip for admin) ---
-        if (!path.startsWith("/_admin") && path !== "/_mcp") {
+        // Paths that opt out of the country/IP gating below: admin UI/API, MCP
+        // endpoints (any /_mcp variant), OAuth endpoints, and OAuth/MCP discovery.
+        const isInfraPath =
+          path.startsWith("/_admin") ||
+          path === "/_mcp" || path.startsWith("/_mcp/") ||
+          path.startsWith("/oauth/") ||
+          path.startsWith("/.well-known/oauth-");
+
+        // --- IP auto-block check (skip for infra paths) ---
+        if (!isInfraPath) {
           if (isIpBlocked(meta.ip)) {
             status = 403;
             logReq();
@@ -158,8 +170,8 @@ export function createServer(port: number) {
           }
         }
 
-        // --- Country restriction (skip for admin and MCP) ---
-        if (!path.startsWith("/_admin") && path !== "/_mcp") {
+        // --- Country restriction (skip for infra paths) ---
+        if (!isInfraPath) {
           if (!isCountryAllowed(meta.country)) {
             status = 403;
             logReq();
@@ -168,11 +180,59 @@ export function createServer(port: number) {
           }
         }
 
-        // --- MCP endpoint ---
-        if (path === "/_mcp") {
-          const { response, siteSlug: mcpSlug } = await handleMcp(req);
+        // --- OAuth Authorization Server discovery ---
+        if (path === "/.well-known/oauth-authorization-server") {
+          const res = handleAsMetadata(req);
+          status = res.status;
+          logReq();
+          return addSecurityHeaders(res);
+        }
+
+        // --- OAuth Protected Resource discovery (per-site or generic) ---
+        if (path === "/.well-known/oauth-protected-resource" ||
+            path.startsWith("/.well-known/oauth-protected-resource/_mcp/") ||
+            path === "/.well-known/oauth-protected-resource/_mcp") {
+          const m = path.match(/^\/\.well-known\/oauth-protected-resource\/_mcp\/([a-z0-9][a-z0-9-]*)\/?$/);
+          const slug = m ? m[1] : null;
+          const res = handleProtectedResourceMetadata(req, slug);
+          status = res.status;
+          logReq();
+          return addSecurityHeaders(res);
+        }
+
+        // --- OAuth endpoints ---
+        if (path === "/oauth/register") {
+          const res = await handleRegister(req, meta.ip);
+          status = res.status;
+          logReq();
+          return addSecurityHeaders(res);
+        }
+        if (path === "/oauth/authorize") {
+          const res = await handleAuthorize(req, meta.ip);
+          status = res.status;
+          logReq();
+          return addSecurityHeaders(res);
+        }
+        if (path === "/oauth/token") {
+          const res = await handleToken(req);
+          status = res.status;
+          logReq();
+          return addSecurityHeaders(res);
+        }
+        if (path === "/oauth/revoke") {
+          const res = await handleRevoke(req);
+          status = res.status;
+          logReq();
+          return addSecurityHeaders(res);
+        }
+
+        // --- MCP endpoint (legacy multi-site + per-site) ---
+        const mcpSiteMatch = path.match(/^\/_mcp\/([a-z0-9][a-z0-9-]*)\/?$/);
+        if (path === "/_mcp" || mcpSiteMatch) {
+          const urlSlug = mcpSiteMatch ? mcpSiteMatch[1] : null;
+          const { response, siteSlug: mcpSlug } = await handleMcp(req, urlSlug);
           status = response.status;
-          siteSlug = mcpSlug;
+          siteSlug = mcpSlug ?? urlSlug;
           logReq();
           return addSecurityHeaders(response);
         }
