@@ -7,7 +7,7 @@ import {
   handleRegister, handleAuthorize, handleToken, handleRevoke,
 } from "./oauth";
 import { logRequest, extractRequestMeta, shouldTrack, isCountryAllowed, isIpBlocked, checkAndAutoBlock } from "./analytics";
-import { resolveSitePath, resolveAlias } from "./sites";
+import { resolveSitePath, resolveAlias, resolveHostAlias, normalizeHost } from "./sites";
 
 const SECURITY_HEADERS: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
@@ -19,7 +19,7 @@ const SECURITY_HEADERS: Record<string, string> = {
 };
 
 import { dirname } from "path";
-const BASE_DIR = dirname(process.execPath);
+const BASE_DIR = process.env.HOSTER_HOME || dirname(process.execPath);
 const ADMIN_DIR = join(BASE_DIR, "admin");
 
 const MIME_TYPES: Record<string, string> = {
@@ -84,7 +84,7 @@ function checkNotModified(req: Request, etag: string | null): Response | null {
   return null;
 }
 
-async function serveHtml(filePath: string, slug: string, req: Request, version?: string | null): Promise<Response> {
+async function serveHtml(filePath: string, basePath: string, req: Request, version?: string | null): Promise<Response> {
   try {
     const etag = generateEtag(filePath, version);
     const notModified = checkNotModified(req, etag);
@@ -92,8 +92,10 @@ async function serveHtml(filePath: string, slug: string, req: Request, version?:
 
     const file = Bun.file(filePath);
     let html = await file.text();
-    // Rewrite base href to include the site slug prefix
-    html = html.replace(/<base\s+href="\/"\s*\/?>/i, `<base href="/${slug}/">`);
+    // Rewrite <base href="/"> so relative asset paths resolve under the
+    // serving prefix. For path-routed sites this is "/<slug>/"; for
+    // host-aliased requests the site IS the host root, so it stays "/".
+    html = html.replace(/<base\s+href="\/"\s*\/?>/i, `<base href="${basePath}">`);
     const headers: Record<string, string> = {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-cache",
@@ -144,15 +146,13 @@ export function createServer(port: number) {
       let status = 200;
       let siteSlug: string | null = null;
 
-      try {
-        // --- Version check (no auth needed) ---
-        if (path === "/_admin/api/version") {
-          const { VERSION } = await import("./index");
-          return new Response(JSON.stringify({ version: VERSION }), {
-            headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
-          });
-        }
+      // Resolve host alias once. If the incoming Host header maps to a site,
+      // every non-reserved request on this host is served from that site,
+      // and reserved paths (admin/oauth/mcp/well-known) return 404 — those
+      // surfaces are only valid on the canonical hostname.
+      const hostAliasSlug = resolveHostAlias(normalizeHost(req.headers.get("host")));
 
+      try {
         // Paths that opt out of the country/IP gating below: admin UI/API, MCP
         // endpoints (any /_mcp variant), OAuth endpoints, and OAuth/MCP discovery.
         const isInfraPath =
@@ -160,6 +160,23 @@ export function createServer(port: number) {
           path === "/_mcp" || path.startsWith("/_mcp/") ||
           path.startsWith("/oauth/") ||
           path.startsWith("/.well-known/oauth-");
+
+        // Block reserved infra paths on host-aliased hostnames. Admin, OAuth,
+        // and MCP must only be reachable via the canonical hostname so an
+        // external custom domain never accidentally exposes them.
+        if (hostAliasSlug && isInfraPath) {
+          status = 404;
+          logReq();
+          return new Response("Not found", { status: 404 });
+        }
+
+        // --- Version check (no auth needed) ---
+        if (path === "/_admin/api/version") {
+          const { VERSION } = await import("./index");
+          return new Response(JSON.stringify({ version: VERSION }), {
+            headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
+          });
+        }
 
         // --- IP auto-block check (skip for infra paths) ---
         if (!isInfraPath) {
@@ -276,17 +293,33 @@ export function createServer(port: number) {
         }
 
         // --- Hosted sites ---
-        // Parse /<slug>/rest/of/path
+        // Two routing modes:
+        //   - Host-aliased: the entire path on this host belongs to one site,
+        //     resolved via Host header. URL has no slug prefix.
+        //   - Path-based: parse /<slug>/rest/of/path on the canonical host.
         const parts = path.split("/").filter(Boolean);
-        if (parts.length === 0) {
-          // Root — show a simple landing or redirect to admin
-          status = 302;
-          logReq();
-          return new Response(null, { status: 302, headers: { Location: "/_admin" } });
-        }
 
-        const candidateSlug = resolveAlias(parts[0]);
-        const reqPath = parts.slice(1).join("/") || "index.html";
+        let candidateSlug: string;
+        let reqPath: string;
+        let basePath: string;
+
+        if (hostAliasSlug) {
+          // Host alias maps directly to a slug; the slug may itself be a
+          // path alias, so run it through resolveAlias.
+          candidateSlug = resolveAlias(hostAliasSlug);
+          reqPath = parts.join("/") || "index.html";
+          basePath = "/";
+        } else {
+          if (parts.length === 0) {
+            // Root on canonical host — redirect to admin.
+            status = 302;
+            logReq();
+            return new Response(null, { status: 302, headers: { Location: "/_admin" } });
+          }
+          candidateSlug = resolveAlias(parts[0]);
+          reqPath = parts.slice(1).join("/") || "index.html";
+          basePath = `/${parts[0]}/`;
+        }
 
         // If a .html URL has a trailing slash (e.g. /slug/page.html/), strip it.
         // The browser would otherwise resolve relative asset paths against the
@@ -307,7 +340,10 @@ export function createServer(port: number) {
         // Skip when the URL explicitly names a file (e.g. /slug/index.html or
         // /slug/sub/index.html); appending a slash would make the browser treat
         // the file as a directory and break relative paths.
+        // Host-aliased requests always serve at host root, so this only fires
+        // for path-based routing.
         if (
+          !hostAliasSlug &&
           resolved &&
           !path.endsWith("/") &&
           !path.endsWith(".html") &&
@@ -324,10 +360,10 @@ export function createServer(port: number) {
         if (resolved) {
           siteSlug = candidateSlug;
           logReq();
-          // For HTML files, rewrite <base href="/"> to <base href="/slug/">
-          // Use the original URL path segment so aliases work correctly
+          // For HTML files, rewrite <base href="/"> to the appropriate prefix:
+          // path-based routing: "/<slug>/"; host-aliased: "/".
           if (resolved.filePath.endsWith(".html")) {
-            return serveHtml(resolved.filePath, parts[0], req, resolved.version);
+            return serveHtml(resolved.filePath, basePath, req, resolved.version);
           }
           // Content-hashed filenames (e.g. main.a1b2c3.js) get immutable caching;
           // everything else must revalidate so redeployments take effect immediately.

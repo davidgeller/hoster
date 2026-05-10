@@ -3,7 +3,7 @@ import { mkdirSync, rmSync, existsSync, readdirSync, statSync, symlinkSync, read
 import { join, resolve } from "path";
 
 import { dirname } from "path";
-const BASE_DIR = dirname(process.execPath);
+const BASE_DIR = process.env.HOSTER_HOME || dirname(process.execPath);
 export const SITES_DIR = join(BASE_DIR, "sites");
 mkdirSync(SITES_DIR, { recursive: true });
 
@@ -54,6 +54,16 @@ db.exec(`
 db.exec(`
   CREATE TABLE IF NOT EXISTS site_aliases (
     alias TEXT PRIMARY KEY,
+    site_slug TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (site_slug) REFERENCES sites(slug) ON DELETE CASCADE
+  );
+`);
+
+// Ensure host alias table exists (maps incoming Host header -> site slug)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS host_aliases (
+    host TEXT PRIMARY KEY,
     site_slug TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (site_slug) REFERENCES sites(slug) ON DELETE CASCADE
@@ -485,8 +495,10 @@ export function deleteSite(slug: string): boolean {
   db.run("DELETE FROM sites WHERE slug = ?", slug);
   db.run("DELETE FROM site_versions WHERE site_slug = ?", slug);
   db.run("DELETE FROM site_aliases WHERE site_slug = ?", slug);
+  db.run("DELETE FROM host_aliases WHERE site_slug = ?", slug);
   db.run("DELETE FROM requests WHERE site_slug = ?", slug);
   invalidateSiteCache(slug);
+  invalidateHostAliasCache();
   return true;
 }
 
@@ -723,5 +735,111 @@ export function addAlias(alias: string, siteSlug: string): void {
 
 export function removeAlias(alias: string, siteSlug: string): boolean {
   const result = db.run("DELETE FROM site_aliases WHERE alias = ? AND site_slug = ?", alias, siteSlug);
+  return result.changes > 0;
+}
+
+// --- Host aliases (custom domain -> site slug) ---
+
+// Normalize a Host header value: lowercase, strip port, strip IPv6 brackets.
+// Returns "" for missing/empty input. Does not validate — that's a separate step.
+export function normalizeHost(hostHeader: string | null | undefined): string {
+  if (!hostHeader) return "";
+  let h = hostHeader.toLowerCase().trim();
+  if (!h) return "";
+  if (h.startsWith("[")) {
+    // IPv6: [::1]:8080 -> ::1, [::1] -> ::1
+    const close = h.indexOf("]");
+    if (close === -1) return "";
+    h = h.substring(1, close);
+  } else {
+    // host:port -> host. Bare hosts without ":" are unaffected.
+    const colon = h.lastIndexOf(":");
+    if (colon !== -1) h = h.substring(0, colon);
+  }
+  return h;
+}
+
+// Validate a host alias: lowercase DNS hostname with at least one dot,
+// labels start/end with alphanumeric (no leading/trailing hyphens), max 253 chars.
+// Bare IPs and "localhost" are rejected by design — host aliases are for custom
+// domains, not the canonical hostname.
+const HOST_ALIAS_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+export function validateHostAlias(host: string): string {
+  const normalized = host.toLowerCase().trim();
+  if (!normalized) throw new Error("Host is required");
+  if (normalized.length > 253) throw new Error("Host exceeds 253 characters");
+  if (!HOST_ALIAS_PATTERN.test(normalized)) {
+    throw new Error("Host must be a valid domain (e.g. example.com), lowercase, no underscores or leading/trailing hyphens");
+  }
+  return normalized;
+}
+
+// In-memory cache of host -> slug mapping. Invalidated on any write.
+let hostAliasCache: Map<string, string> | null = null;
+const hostAliasCacheLock = { ts: 0 };
+const HOST_ALIAS_CACHE_TTL = 60_000;
+
+function loadHostAliasCache(): Map<string, string> {
+  const rows = db.query("SELECT host, site_slug FROM host_aliases").all() as { host: string; site_slug: string }[];
+  const map = new Map<string, string>();
+  for (const r of rows) map.set(r.host, r.site_slug);
+  return map;
+}
+
+export function invalidateHostAliasCache(): void {
+  hostAliasCache = null;
+  hostAliasCacheLock.ts = 0;
+}
+
+// Look up a normalized host. Returns the target site slug, or null if no match.
+export function resolveHostAlias(host: string): string | null {
+  if (!host) return null;
+  const now = Date.now();
+  if (!hostAliasCache || now - hostAliasCacheLock.ts > HOST_ALIAS_CACHE_TTL) {
+    hostAliasCache = loadHostAliasCache();
+    hostAliasCacheLock.ts = now;
+  }
+  return hostAliasCache.get(host) || null;
+}
+
+export function listAllHostAliases(): { host: string; site_slug: string; created_at: string }[] {
+  return db.query("SELECT host, site_slug, created_at FROM host_aliases ORDER BY host")
+    .all() as { host: string; site_slug: string; created_at: string }[];
+}
+
+export function getHostAliases(siteSlug: string): string[] {
+  const rows = db.query("SELECT host FROM host_aliases WHERE site_slug = ? ORDER BY host")
+    .all(siteSlug) as { host: string }[];
+  return rows.map(r => r.host);
+}
+
+export function addHostAlias(host: string, siteSlug: string): string {
+  const normalized = validateHostAlias(host);
+  const site = getSite(siteSlug);
+  if (!site) {
+    throw new Error(`Site '${siteSlug}' does not exist`);
+  }
+  // Reject collisions across all sites (PRIMARY KEY also enforces this, but a
+  // friendlier error tells the admin which site already owns the host).
+  const existing = db.query("SELECT site_slug FROM host_aliases WHERE host = ?")
+    .get(normalized) as { site_slug: string } | null;
+  if (existing) {
+    if (existing.site_slug === siteSlug) {
+      throw new Error(`Host '${normalized}' is already aliased to this site`);
+    }
+    throw new Error(`Host '${normalized}' is already aliased to site '${existing.site_slug}'`);
+  }
+  db.run("INSERT INTO host_aliases (host, site_slug) VALUES (?, ?)", normalized, siteSlug);
+  invalidateHostAliasCache();
+  return normalized;
+}
+
+export function removeHostAlias(host: string, siteSlug: string): boolean {
+  const normalized = host.toLowerCase().trim();
+  const result = db.run(
+    "DELETE FROM host_aliases WHERE host = ? AND site_slug = ?",
+    normalized, siteSlug
+  );
+  if (result.changes > 0) invalidateHostAliasCache();
   return result.changes > 0;
 }

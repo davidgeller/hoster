@@ -12,6 +12,7 @@ Upload a ZIP file through the web admin panel and your site is live at `https://
 - **Web admin panel** — deploy, update, and manage sites from anywhere
 - **Version management** — each upload creates a new version; roll back instantly
 - **SPA support** — auto-detects Angular, React, and Vue builds (with deep root directory detection); rewrites `<base href>` for subpath hosting
+- **Custom domains (host aliases)** — point any domain at a specific site so `spryly.com/about` serves the same content as `/spryly/about` on the canonical hostname, with no slug in the URL
 - **Configuration backup** — save and restore your entire hoster setup (settings, sites, versions) to a `.hoster` file with optional AES-256-GCM encryption for device migration
 - **Analytics dashboard** — request logs, visitor stats, countries, top pages, status codes, blocked request intelligence, min/avg/max response times
 - **IP auto-blocking** — automatically block IPs that accumulate too many denied requests, with configurable thresholds and duration
@@ -200,6 +201,66 @@ You can create aliases so a site is reachable at multiple URL paths. For example
 3. In the **Aliases** section, type the alias slug and click **Add Alias**
 
 Aliases share the same content, versions, and settings as the original site. They appear on the site card alongside the primary slug.
+
+### Host Aliases (Custom Domains)
+
+Map a custom domain to a site so visitors hit it at the domain root instead of under a path prefix. For example, if your site lives at `/spryly` on the canonical hostname, you can add `spryly.com` as a host alias and requests to `https://spryly.com/about` will serve the same content as `https://yourdomain.com/spryly/about`.
+
+This is the right choice when:
+
+- You own a vanity domain you want pointed at one specific site
+- You want clean URLs without the `/<slug>/` prefix
+- You're consolidating projects from other hosts onto Hoster while preserving their domains
+
+#### 1. Add the host alias in Hoster
+
+1. Go to **Sites → Settings** on the site card
+2. In the **Host Aliases** section, enter the domain (e.g. `spryly.com`) and click **Add Host**
+3. The host appears in the site card listing as `host: spryly.com`
+
+You can add multiple hosts to the same site (for example, both `spryly.com` and `www.spryly.com`).
+
+#### 2. Point DNS to your tunnel
+
+Route the new hostname through the same Cloudflare Tunnel:
+
+```bash
+cloudflared tunnel route dns hoster spryly.com
+```
+
+This creates a CNAME record on Cloudflare pointing `spryly.com` to your tunnel.
+
+> If `spryly.com` is hosted on a DNS provider other than Cloudflare, you'll first need to add it as a Cloudflare site (free tier works) so Cloudflare can issue the CNAME and provision SSL.
+
+#### 3. Add an ingress rule to your tunnel config
+
+Edit `/etc/cloudflared/config.yml` and add an entry for the new hostname pointing at the same Hoster port:
+
+```yaml
+ingress:
+  - hostname: spryly.com
+    service: http://localhost:3500
+  - hostname: www.spryly.com
+    service: http://localhost:3500
+  - hostname: yourdomain.com           # canonical Hoster hostname
+    service: http://localhost:3500
+  - service: http_status:404
+```
+
+Then reload cloudflared:
+
+```bash
+sudo systemctl restart cloudflared
+```
+
+That's it — `https://spryly.com/` now serves the site you mapped, with Cloudflare-provisioned SSL.
+
+#### Behavior
+
+- **Path preservation** — `spryly.com/foo/bar` serves the same content as `/spryly/foo/bar` on the canonical hostname; the slug is no longer in the URL
+- **Base href** — `<base href="/">` is left as-is on host-aliased requests (instead of being rewritten to `<base href="/spryly/">`), so relative asset paths in HTML resolve at the domain root
+- **Admin/MCP/OAuth are canonical-only** — `spryly.com/_admin`, `spryly.com/_mcp`, `spryly.com/oauth/*`, and `spryly.com/.well-known/oauth-*` all return 404. Those surfaces only respond on your canonical Hoster hostname so a custom domain never accidentally exposes them.
+- **Path aliases still work** — if the target site has a path alias (e.g. `/spryly` aliases to `/spryly-v2`), host alias resolution runs through the path alias too.
 
 ## MCP (Model Context Protocol) Support
 

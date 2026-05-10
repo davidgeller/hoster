@@ -3,7 +3,7 @@ import { mkdirSync } from "fs";
 import { join } from "path";
 
 import { dirname } from "path";
-const BASE_DIR = dirname(process.execPath);
+const BASE_DIR = process.env.HOSTER_HOME || dirname(process.execPath);
 const DATA_DIR = join(BASE_DIR, "data");
 mkdirSync(DATA_DIR, { recursive: true });
 
