@@ -13,14 +13,19 @@ export interface RequestLog {
   referrer: string | null;
   content_type: string | null;
   accept_language: string | null;
+  request_bytes: number;
+  response_bytes: number;
 }
 
 // --- Extensions to track parsed browser info ---
 try { db.exec("ALTER TABLE requests ADD COLUMN browser TEXT"); } catch (_) {}
+// --- Extensions to track per-request bandwidth ---
+try { db.exec("ALTER TABLE requests ADD COLUMN request_bytes INTEGER DEFAULT 0"); } catch (_) {}
+try { db.exec("ALTER TABLE requests ADD COLUMN response_bytes INTEGER DEFAULT 0"); } catch (_) {}
 
 const insertStmt = db.prepare(`
-  INSERT INTO requests (site_slug, path, method, status, response_time_ms, ip, country, city, user_agent, referrer, content_type, accept_language, browser)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO requests (site_slug, path, method, status, response_time_ms, ip, country, city, user_agent, referrer, content_type, accept_language, browser, request_bytes, response_bytes)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 // --- File extensions we DON'T want to track ---
@@ -89,7 +94,8 @@ export function logRequest(log: RequestLog): void {
     insertStmt.run(
       log.site_slug, log.path, log.method, log.status, log.response_time_ms,
       log.ip, log.country, log.city, log.user_agent, log.referrer,
-      log.content_type, log.accept_language, browser
+      log.content_type, log.accept_language, browser,
+      log.request_bytes, log.response_bytes
     );
 
     // Periodically prune old logs to prevent unbounded growth
@@ -160,7 +166,9 @@ export function getOverviewStats(hours: number = 24) {
       COUNT(DISTINCT ip) as unique_visitors,
       ROUND(AVG(response_time_ms), 1) as avg_response_ms,
       ROUND(MIN(response_time_ms), 1) as min_response_ms,
-      ROUND(MAX(response_time_ms), 1) as max_response_ms
+      ROUND(MAX(response_time_ms), 1) as max_response_ms,
+      COALESCE(SUM(request_bytes), 0) as total_request_bytes,
+      COALESCE(SUM(response_bytes), 0) as total_response_bytes
     FROM requests WHERE created_at > datetime('now', ?)
   `).get(cutoff) as any;
 
@@ -222,6 +230,31 @@ export function getTrafficOverTime(hours: number = 24) {
       ${bucketExpr} as bucket,
       COUNT(*) as hits,
       COUNT(DISTINCT ip) as visitors
+    FROM requests WHERE created_at > datetime('now', ?)
+    GROUP BY bucket ORDER BY bucket
+  `).all(cutoff);
+}
+
+export function getBandwidthOverTime(hours: number = 24) {
+  // Mirrors getTrafficOverTime() bucketing so the chart axes line up.
+  const cutoff = `-${hours} hours`;
+
+  let bucketExpr: string;
+  if (hours <= 1) {
+    bucketExpr = `strftime('%Y-%m-%dT%H:', created_at) || printf('%02d', (CAST(strftime('%M', created_at) AS INTEGER) / 5) * 5) || ':00'`;
+  } else if (hours <= 6) {
+    bucketExpr = `strftime('%Y-%m-%dT%H:', created_at) || printf('%02d', (CAST(strftime('%M', created_at) AS INTEGER) / 15) * 15) || ':00'`;
+  } else if (hours <= 48) {
+    bucketExpr = `strftime('%Y-%m-%dT%H:00:00', created_at)`;
+  } else {
+    bucketExpr = `strftime('%Y-%m-%dT00:00:00', created_at)`;
+  }
+
+  return db.query(`
+    SELECT
+      ${bucketExpr} as bucket,
+      COALESCE(SUM(request_bytes), 0) as request_bytes,
+      COALESCE(SUM(response_bytes), 0) as response_bytes
     FROM requests WHERE created_at > datetime('now', ?)
     GROUP BY bucket ORDER BY bucket
   `).all(cutoff);
@@ -330,7 +363,9 @@ export function getSiteStats(slug: string, hours: number = 24) {
     SELECT
       COUNT(*) as total_requests,
       COUNT(DISTINCT ip) as unique_visitors,
-      ROUND(AVG(response_time_ms), 1) as avg_response_ms
+      ROUND(AVG(response_time_ms), 1) as avg_response_ms,
+      COALESCE(SUM(request_bytes), 0) as total_request_bytes,
+      COALESCE(SUM(response_bytes), 0) as total_response_bytes
     FROM requests WHERE created_at > datetime('now', ?) AND site_slug = ?
   `).get(cutoff, slug);
 

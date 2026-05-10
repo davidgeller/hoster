@@ -20,6 +20,7 @@ import {
 } from "./sites";
 import {
   getOverviewStats, getTopSites, getTopPaths, getTrafficOverTime,
+  getBandwidthOverTime,
   getTopCountries, getTopBrowsers, getRecentRequests,
   getStatusCodeBreakdown, getSiteStats, getBlockedRequests,
   getAllowedCountries, setAllowedCountries,
@@ -449,6 +450,11 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   if (path === "/_admin/api/analytics/traffic") {
     const hours = clampInt(new URL(req.url).searchParams.get("hours"), 24, 1, 8760);
     return json(getTrafficOverTime(hours));
+  }
+
+  if (path === "/_admin/api/analytics/bandwidth") {
+    const hours = clampInt(new URL(req.url).searchParams.get("hours"), 24, 1, 8760);
+    return json(getBandwidthOverTime(hours));
   }
 
   if (path === "/_admin/api/analytics/countries") {

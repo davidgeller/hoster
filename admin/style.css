@@ -671,6 +671,47 @@ tr:hover td { background: var(--bg-hover); }
 
 .bar:hover .bar-tooltip { display: block; }
 
+/* --- Stacked Bandwidth Bar --- */
+.bar-stacked {
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.bar-seg {
+  width: 100%;
+  flex-shrink: 0;
+}
+
+.bar-seg-in { background: #8b5cf6; }
+.bar-seg-out { background: var(--accent); }
+
+.chart-legend {
+  display: flex;
+  gap: 16px;
+  justify-content: center;
+  margin-top: 8px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.legend-swatch-out { background: var(--accent); }
+.legend-swatch-in { background: #8b5cf6; }
+
 /* --- Ranked List --- */
 .ranked-list { list-style: none; }
 

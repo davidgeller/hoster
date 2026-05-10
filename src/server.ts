@@ -99,6 +99,9 @@ async function serveHtml(filePath: string, basePath: string, req: Request, versi
     const headers: Record<string, string> = {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-cache",
+      // Explicit Content-Length so the request log can record bytes-out
+      // without consuming the response body. Byte length, not character count.
+      "Content-Length": String(Buffer.byteLength(html)),
     };
     if (etag) headers["ETag"] = etag;
     return new Response(html, { headers });
@@ -110,7 +113,14 @@ async function serveHtml(filePath: string, basePath: string, req: Request, versi
 
 function serveFile(filePath: string, req: Request, cacheMode: "revalidate" | "nocache" | "immutable" = "revalidate", version?: string | null): Response {
   try {
-    const etag = generateEtag(filePath, version);
+    let stat;
+    try { stat = statSync(filePath); } catch { stat = null; }
+    const etag = stat
+      ? (() => {
+          const base = `${stat.mtimeMs.toString(36)}-${stat.size.toString(36)}`;
+          return version ? `W/"${version}-${base}"` : `W/"${base}"`;
+        })()
+      : null;
 
     if (cacheMode !== "nocache") {
       const notModified = checkNotModified(req, etag);
@@ -128,6 +138,10 @@ function serveFile(filePath: string, req: Request, cacheMode: "revalidate" | "no
       "Cache-Control": cacheControl,
     };
     if (etag) headers["ETag"] = etag;
+    // Set Content-Length from stat so the request log records bytes-out
+    // (Bun adds this on the wire automatically, but it isn't on the Response
+    // object's headers — we read it back from there at log time).
+    if (stat) headers["Content-Length"] = String(stat.size);
     return new Response(file, { headers });
   } catch (e: any) {
     console.error("serveFile error:", filePath, e?.message);
@@ -182,8 +196,9 @@ export function createServer(port: number) {
         if (!isInfraPath) {
           if (isIpBlocked(meta.ip)) {
             status = 403;
-            logReq();
-            return new Response("Access denied", { status: 403 });
+            const res = new Response("Access denied", { status: 403 });
+            logReq(res);
+            return res;
           }
         }
 
@@ -191,9 +206,10 @@ export function createServer(port: number) {
         if (!isInfraPath) {
           if (!isCountryAllowed(meta.country)) {
             status = 403;
-            logReq();
+            const res = new Response("Access denied", { status: 403 });
+            logReq(res);
             checkAndAutoBlock(meta.ip);
-            return new Response("Access denied", { status: 403 });
+            return res;
           }
         }
 
@@ -201,7 +217,7 @@ export function createServer(port: number) {
         if (path === "/.well-known/oauth-authorization-server") {
           const res = handleAsMetadata(req);
           status = res.status;
-          logReq();
+          logReq(res);
           return addSecurityHeaders(res);
         }
 
@@ -213,7 +229,7 @@ export function createServer(port: number) {
           const slug = m ? m[1] : null;
           const res = handleProtectedResourceMetadata(req, slug);
           status = res.status;
-          logReq();
+          logReq(res);
           return addSecurityHeaders(res);
         }
 
@@ -221,25 +237,25 @@ export function createServer(port: number) {
         if (path === "/oauth/register") {
           const res = await handleRegister(req, meta.ip);
           status = res.status;
-          logReq();
+          logReq(res);
           return addSecurityHeaders(res);
         }
         if (path === "/oauth/authorize") {
           const res = await handleAuthorize(req, meta.ip);
           status = res.status;
-          logReq();
+          logReq(res);
           return addSecurityHeaders(res);
         }
         if (path === "/oauth/token") {
           const res = await handleToken(req);
           status = res.status;
-          logReq();
+          logReq(res);
           return addSecurityHeaders(res);
         }
         if (path === "/oauth/revoke") {
           const res = await handleRevoke(req);
           status = res.status;
-          logReq();
+          logReq(res);
           return addSecurityHeaders(res);
         }
 
@@ -250,7 +266,7 @@ export function createServer(port: number) {
           const { response, siteSlug: mcpSlug } = await handleMcp(req, urlSlug);
           status = response.status;
           siteSlug = mcpSlug ?? urlSlug;
-          logReq();
+          logReq(response);
           return addSecurityHeaders(response);
         }
 
@@ -259,7 +275,7 @@ export function createServer(port: number) {
           const res = await handleAdminApi(req, path);
           if (res) {
             status = res.status;
-            logReq();
+            logReq(res);
             return addSecurityHeaders(res);
           }
         }
@@ -269,11 +285,12 @@ export function createServer(port: number) {
           // Serve admin SPA — all non-API admin routes get index.html
           if (path.startsWith("/_admin/api/")) {
             status = 404;
-            logReq();
-            return new Response(JSON.stringify({ error: "Not found" }), {
+            const res = new Response(JSON.stringify({ error: "Not found" }), {
               status: 404,
               headers: { "Content-Type": "application/json" },
             });
+            logReq(res);
+            return res;
           }
 
           // Serve static admin assets (no-cache so updates take effect immediately)
@@ -284,12 +301,14 @@ export function createServer(port: number) {
           const resolvedAdmin = resolve(adminFile);
           const resolvedAdminDir = resolve(ADMIN_DIR);
           if (adminPath !== "/index.html" && resolvedAdmin.startsWith(resolvedAdminDir + "/") && existsSync(adminFile) && statSync(adminFile).isFile()) {
-            logReq();
-            return serveFile(adminFile, req, "nocache");
+            const res = serveFile(adminFile, req, "nocache");
+            logReq(res);
+            return res;
           }
           // SPA fallback
-          logReq();
-          return serveFile(join(ADMIN_DIR, "index.html"), req, "nocache");
+          const res = serveFile(join(ADMIN_DIR, "index.html"), req, "nocache");
+          logReq(res);
+          return res;
         }
 
         // --- Hosted sites ---
@@ -313,8 +332,9 @@ export function createServer(port: number) {
           if (parts.length === 0) {
             // Root on canonical host — redirect to admin.
             status = 302;
-            logReq();
-            return new Response(null, { status: 302, headers: { Location: "/_admin" } });
+            const res = new Response(null, { status: 302, headers: { Location: "/_admin" } });
+            logReq(res);
+            return res;
           }
           candidateSlug = resolveAlias(parts[0]);
           reqPath = parts.slice(1).join("/") || "index.html";
@@ -326,11 +346,12 @@ export function createServer(port: number) {
         // file as if it were a directory, breaking CSS/JS references.
         if (/\.html\/$/.test(path)) {
           status = 301;
-          logReq();
-          return new Response(null, {
+          const res = new Response(null, {
             status: 301,
             headers: { Location: path.replace(/\/+$/, "") + url.search },
           });
+          logReq(res);
+          return res;
         }
 
         const resolved = resolveSitePath(candidateSlug, reqPath);
@@ -350,45 +371,60 @@ export function createServer(port: number) {
           resolved.filePath.endsWith("index.html")
         ) {
           status = 301;
-          logReq();
-          return new Response(null, {
+          const res = new Response(null, {
             status: 301,
             headers: { Location: path + "/" + url.search },
           });
+          logReq(res);
+          return res;
         }
 
         if (resolved) {
           siteSlug = candidateSlug;
-          logReq();
           // For HTML files, rewrite <base href="/"> to the appropriate prefix:
           // path-based routing: "/<slug>/"; host-aliased: "/".
           if (resolved.filePath.endsWith(".html")) {
-            return serveHtml(resolved.filePath, basePath, req, resolved.version);
+            const res = await serveHtml(resolved.filePath, basePath, req, resolved.version);
+            logReq(res);
+            return res;
           }
           // Content-hashed filenames (e.g. main.a1b2c3.js) get immutable caching;
           // everything else must revalidate so redeployments take effect immediately.
           const basename = resolved.filePath.substring(resolved.filePath.lastIndexOf("/") + 1);
           const isHashed = /\.[a-f0-9]{8,}\.\w+$/.test(basename) || /[-.][\w]*\.[a-f0-9]{8,}\./.test(basename);
-          return serveFile(resolved.filePath, req, isHashed ? "immutable" : "revalidate", resolved.version);
+          const res = serveFile(resolved.filePath, req, isHashed ? "immutable" : "revalidate", resolved.version);
+          logReq(res);
+          return res;
         }
 
         // 404
         status = 404;
-        logReq();
-        return new Response("<!DOCTYPE html><html><head><title>404</title><style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f5f5;color:#333}h1{font-weight:300;font-size:2em}</style></head><body><h1>404 &mdash; Not Found</h1></body></html>", {
+        const notFoundBody = "<!DOCTYPE html><html><head><title>404</title><style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f5f5;color:#333}h1{font-weight:300;font-size:2em}</style></head><body><h1>404 &mdash; Not Found</h1></body></html>";
+        const res404 = new Response(notFoundBody, {
           status: 404,
-          headers: { "Content-Type": "text/html; charset=utf-8" },
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Content-Length": String(Buffer.byteLength(notFoundBody)),
+          },
         });
+        logReq(res404);
+        return res404;
       } catch (e: any) {
         console.error("Request error:", path, e?.message, e?.stack);
         status = 500;
-        logReq();
-        return new Response("Internal Server Error", { status: 500 });
+        const res = new Response("Internal Server Error", { status: 500 });
+        logReq(res);
+        return res;
       }
 
-      function logReq() {
+      function logReq(res?: Response | null) {
         if (!shouldTrack(path)) return;
         const elapsed = performance.now() - start;
+        // Best-effort byte counts. Only counted when Content-Length is present;
+        // chunked/streamed bodies (rare here) report 0. Inline tiny responses
+        // (errors, redirects) also report 0 — acceptable for a dashboard chart.
+        const requestBytes = parseInt(req.headers.get("content-length") || "0", 10) || 0;
+        const responseBytes = res ? (parseInt(res.headers.get("content-length") || "0", 10) || 0) : 0;
         logRequest({
           site_slug: siteSlug,
           path,
@@ -402,6 +438,8 @@ export function createServer(port: number) {
           referrer: meta.referrer,
           content_type: req.headers.get("content-type") || null,
           accept_language: meta.accept_language,
+          request_bytes: requestBytes,
+          response_bytes: responseBytes,
         });
       }
     },

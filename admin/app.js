@@ -1213,10 +1213,11 @@ function closeBlankModal() {
 async function loadDashboard() {
   const hours = document.getElementById("dash-range").value;
 
-  const [overview, topSites, traffic, countries, statusCodes, blocked] = await Promise.all([
+  const [overview, topSites, traffic, bandwidth, countries, statusCodes, blocked] = await Promise.all([
     api(`/analytics/overview?hours=${hours}`),
     api(`/analytics/top-sites?hours=${hours}`),
     api(`/analytics/traffic?hours=${hours}`),
+    api(`/analytics/bandwidth?hours=${hours}`),
     api(`/analytics/countries?hours=${hours}`),
     api(`/analytics/status-codes?hours=${hours}`),
     api(`/analytics/blocked?hours=${hours}`),
@@ -1228,11 +1229,15 @@ async function loadDashboard() {
     <div class="stat-card"><div class="stat-label">Unique Visitors</div><div class="stat-value">${fmt(overview.unique_visitors)}</div></div>
     <div class="stat-card"><div class="stat-label">Active Sites</div><div class="stat-value">${fmt(overview.active_sites)}</div></div>
     <div class="stat-card"><div class="stat-label">Avg Response</div><div class="stat-value">${overview.avg_response_ms ?? 0}ms</div><div class="stat-detail">${overview.min_response_ms ?? 0}ms – ${overview.max_response_ms ?? 0}ms</div></div>
+    <div class="stat-card"><div class="stat-label">Bandwidth Out</div><div class="stat-value">${formatBytes(overview.total_response_bytes)}</div><div class="stat-detail">${formatBytes(overview.total_request_bytes)} in</div></div>
     ${blocked.total > 0 ? `<div class="stat-card stat-card-blocked"><div class="stat-label">Blocked</div><div class="stat-value">${fmt(blocked.total)}</div></div>` : ""}
   `;
 
   // Traffic chart
   renderBarChart("dash-traffic-chart", traffic, "hits", "bucket");
+
+  // Bandwidth chart (stacked: response bytes on bottom, request bytes on top)
+  renderBandwidthChart("dash-bandwidth-chart", "dash-bandwidth-legend", bandwidth);
 
   // Top sites
   renderRankedList("dash-top-sites", topSites, "site_slug", "hits");
@@ -2021,6 +2026,71 @@ function renderBarChart(containerId, data, valueKey, labelKey) {
       </div>
     </div>
   </div>`;
+}
+
+// Stacked bandwidth chart: response bytes (out) on bottom, request bytes (in)
+// stacked above. Y-axis labels and tooltips auto-format with formatBytes.
+function renderBandwidthChart(containerId, legendId, data) {
+  const el = document.getElementById(containerId);
+  const legendEl = legendId ? document.getElementById(legendId) : null;
+  if (legendEl) legendEl.innerHTML = "";
+  if (!data || !data.length || !data.some(d => (d.request_bytes || 0) + (d.response_bytes || 0) > 0)) {
+    el.innerHTML = '<div class="empty-state"><p>No data</p></div>';
+    return;
+  }
+
+  const totals = data.map(d => (d.request_bytes || 0) + (d.response_bytes || 0));
+  const max = Math.max(...totals, 1);
+  const mid = Math.round(max / 2);
+
+  const labelCount = Math.min(data.length, 6);
+  const labelIndices = new Set();
+  if (data.length <= 6) {
+    data.forEach((_, i) => labelIndices.add(i));
+  } else {
+    for (let i = 0; i < labelCount; i++) {
+      labelIndices.add(Math.round(i * (data.length - 1) / (labelCount - 1)));
+    }
+  }
+
+  el.innerHTML = `<div class="chart-wrap">
+    <div class="chart-y-axis">
+      <span>${formatBytes(max)}</span>
+      <span>${formatBytes(mid)}</span>
+      <span>0</span>
+    </div>
+    <div class="chart-main">
+      <div class="bar-chart">
+        ${data.map((d, i) => {
+          const out = d.response_bytes || 0;
+          const inn = d.request_bytes || 0;
+          const total = out + inn;
+          const pct = (total / max) * 100;
+          const outPct = total > 0 ? (out / total) * 100 : 0;
+          const label = d.bucket?.replace("T", " ").substring(5, 16) || "";
+          return `<div class="bar bar-stacked" style="height:${Math.max(pct, 2)}%" title="${label}: ${formatBytes(total)}">
+            <div class="bar-seg bar-seg-in" style="height:${100 - outPct}%"></div>
+            <div class="bar-seg bar-seg-out" style="height:${outPct}%"></div>
+            <div class="bar-tooltip">${label}<br>${formatBytes(out)} out<br>${formatBytes(inn)} in</div>
+          </div>`;
+        }).join("")}
+      </div>
+      <div class="chart-x-axis">
+        ${data.map((d, i) => {
+          const label = d.bucket?.replace("T", " ").substring(5, 16) || "";
+          const shortLabel = label.length > 6 ? label.substring(6) : label;
+          return `<span class="chart-x-label" style="visibility:${labelIndices.has(i) ? "visible" : "hidden"}">${shortLabel}</span>`;
+        }).join("")}
+      </div>
+    </div>
+  </div>`;
+
+  if (legendEl) {
+    legendEl.innerHTML = `
+      <span class="legend-item"><span class="legend-swatch legend-swatch-out"></span>Sent (out)</span>
+      <span class="legend-item"><span class="legend-swatch legend-swatch-in"></span>Received (in)</span>
+    `;
+  }
 }
 
 function renderRankedList(containerId, data, labelKey, valueKey, truncateLabel = false) {
