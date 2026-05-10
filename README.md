@@ -1,14 +1,41 @@
 # Hoster
 
-A lightweight, self-hosted web hosting platform that runs on a Raspberry Pi (or any Linux device) and serves sites to the public via [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) — no open ports, no dynamic DNS, free SSL.
+A lightweight, self-hosted web hosting platform that runs as a single Linux binary. Works equally well on a Raspberry Pi behind a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/), on a VPS with a public IP and a reverse proxy, or anywhere else a Linux process can run. Multi-site, versioned, with a web admin panel.
 
-Upload a ZIP file through the web admin panel and your site is live at `https://yourdomain.com/your-site/` within seconds.
+Upload a ZIP file through the admin panel and your site is live at `https://yourdomain.com/your-site/` within seconds. Or attach a custom domain so the site lives at its own root.
 
 ![Dashboard](assets/dashboard.jpg)
 
+## What you can use it for
+
+Hoster started as a home-lab Pi project but the same binary works as a general-purpose static-site host on production infrastructure. Real uses:
+
+- **Multi-tenant static hosting** — one server, many sites, each at its own slug or its own custom domain. Drop in a ZIP, get a versioned URL back.
+- **A replacement for Firebase Hosting / Netlify / Vercel** for projects that don't need edge CDN or serverless functions. You own the box, no per-build pricing.
+- **A staging server for client work** — give each client a slug or a custom subdomain, snapshot before changes, roll back instantly.
+- **An AI authoring target** — point Claude Code / Cursor / Claude.ai at a blank site over MCP and let it build the content. Every edit is versioned; auto-snapshot before the first AI write preserves the pre-AI state.
+- **A self-hosted analytics-included CDN** for personal projects you don't want third parties tracking. Hoster logs requests locally to SQLite; nothing leaves the box.
+- **A drop-in webserver behind nginx/Caddy** when you want admin tooling around static content (versioning, snapshots, host aliases, MCP) without writing your own.
+
+The footprint is small enough to run on a Raspberry Pi with room to spare, but Bun.serve itself handles tens of thousands of requests per second — the constraint is whatever your machine and uplink can deliver.
+
+## Deployment topologies
+
+Hoster speaks plain HTTP on a configurable port (default `3500`). How TLS gets terminated and how requests reach the box is decoupled. Common topologies:
+
+| Topology | TLS terminated by | Best for |
+|---|---|---|
+| Cloudflare Tunnel | Cloudflare edge | Home lab / Pi behind NAT, no port-forwarding, free SSL, DDoS protection |
+| VPS + Cloudflare proxy (orange-cloud DNS) | Cloudflare edge | DigitalOcean / Linode / etc. with an open `:443` and Cloudflare proxying |
+| VPS + Caddy reverse proxy | Caddy (Let's Encrypt) | Any VPS, single-binary TLS with auto-renewal, no Cloudflare |
+| VPS + nginx reverse proxy | nginx + certbot | Existing nginx setups, custom routing, sharing :80/:443 with other services |
+| LAN-only / direct | nothing (HTTP) | Internal tools, dev/staging, behind a VPN |
+
+In every case the Hoster binary itself is identical — only the front-end TLS layer differs.
+
 ## Features
 
-- **Zero-config HTTPS** — Cloudflare handles SSL termination automatically
+- **Zero-config HTTPS** — when paired with Cloudflare or Caddy, certificates and renewal are handled outside Hoster
 - **Web admin panel** — deploy, update, and manage sites from anywhere
 - **Version management** — each upload creates a new version; roll back instantly
 - **SPA support** — auto-detects Angular, React, and Vue builds (with deep root directory detection); rewrites `<base href>` for subpath hosting
@@ -27,19 +54,23 @@ Upload a ZIP file through the web admin panel and your site is live at `https://
 ## How It Works
 
 ```
-User → Cloudflare (HTTPS) → Tunnel → Your Pi (HTTP :3500) → Static Files
+User → [Cloudflare Tunnel | Cloudflare proxy | Caddy | nginx | nothing]
+     → Hoster (HTTP :3500)
+     → Static files (versioned, slug- or host-routed)
 ```
 
-Sites are served at `yourdomain.com/<slug>/` where each slug maps to an uploaded site. The admin panel lives at `yourdomain.com/_admin`.
+Sites are served at `yourdomain.com/<slug>/` where each slug maps to an uploaded site. Or attach a custom domain via a Host alias and the site lives at the domain root. The admin panel lives at `/_admin`, OAuth/MCP under `/oauth/*` and `/_mcp/*` on the canonical hostname.
 
 ## Prerequisites
 
-- A Linux device (Raspberry Pi, VPS, old laptop, etc.)
-- [Bun](https://bun.sh) installed on your **build machine** (Mac/Linux) — not needed on the Pi
-- A domain name with DNS managed by Cloudflare (free tier works)
-- `cloudflared` installed on your Pi
+- A Linux machine — Raspberry Pi, VPS (DigitalOcean, Linode, Hetzner, EC2, etc.), or anything that runs a static binary
+- [Bun](https://bun.sh) installed on your **build machine** (Mac/Linux) — not needed on the target host
+- A domain (optional but recommended for TLS)
+- One of: a Cloudflare Tunnel, a public IP + reverse proxy (Caddy/nginx), or just LAN access
 
-## Setup Guide
+## Setup Guide — Cloudflare Tunnel (Pi or any Linux host behind NAT)
+
+This is the original topology — no open ports, no static IP needed. Skip ahead to [Setup Guide — VPS with a public IP](#setup-guide--vps-with-a-public-ip) if you have a server with `:443` directly reachable.
 
 ### 1. Set Up Cloudflare Tunnel
 
@@ -110,16 +141,18 @@ On your build machine (Mac or Linux with Bun installed):
 ```bash
 git clone https://github.com/davidgeller/hoster.git
 cd hoster
-bash build-pi.sh
+bash build-pi.sh                   # ARM64 (Pi, ARM VPS) — default
+# or:
+ARCH=x64 bash build-pi.sh          # x86_64 (most VPS droplets)
 ```
 
-This compiles a standalone ARM64 binary and packages it into a self-extracting installer (`hoster-pi.sh`).
+This compiles a standalone binary for the chosen architecture and packages it into a self-extracting installer named `hoster-<arch>.sh` (e.g. `hoster-arm64.sh` or `hoster-x64.sh`).
 
 ### 6. Deploy to Your Pi
 
 ```bash
-scp hoster-pi.sh youruser@yourpi:~/
-ssh youruser@yourpi 'bash ~/hoster-pi.sh'
+scp hoster-arm64.sh youruser@yourpi:~/
+ssh youruser@yourpi 'bash ~/hoster-arm64.sh'
 ```
 
 ### 7. Start Hoster
@@ -137,6 +170,78 @@ sudo journalctl -u hoster -f
 ### 8. Set Your Admin Password
 
 Open `https://yourdomain.com/_admin` in your browser. On first visit, you'll be prompted to create an admin password (minimum 8 characters).
+
+## Setup Guide — VPS with a public IP
+
+If your machine has a publicly routable IP (DigitalOcean, Linode, Hetzner, EC2, …), you don't need Cloudflare Tunnel. Three popular front-ends:
+
+### Option A — Cloudflare proxy (orange-cloud DNS)
+
+The simplest non-tunnel path. Cloudflare still terminates TLS at the edge and proxies HTTP to your origin.
+
+1. Open `:80` on the droplet's firewall.
+2. In Cloudflare DNS, create an `A` record pointing `yourdomain.com` at the droplet's public IP. Keep it proxied (orange cloud).
+3. Set SSL/TLS mode to **Flexible** (HTTPS to browser, HTTP origin) or **Full** if you also run TLS on the origin.
+4. Hoster listens on `:3500`. Either run a tiny proxy on `:80` (Caddy/nginx, see Option B/C) or change Hoster's port to `80` directly:
+
+   ```bash
+   # In /etc/systemd/system/hoster.service, set Environment=PORT=80
+   # and grant the binary cap_net_bind_service so non-root can bind :80:
+   sudo setcap 'cap_net_bind_service=+ep' /home/youruser/hoster/hoster
+   sudo systemctl daemon-reload
+   sudo systemctl restart hoster
+   ```
+
+### Option B — Caddy reverse proxy (recommended for standalone TLS)
+
+Caddy auto-fetches Let's Encrypt certificates and renews them. Single config file, no Cloudflare required:
+
+```caddyfile
+yourdomain.com {
+    reverse_proxy localhost:3500
+}
+spryly.com, www.spryly.com {
+    reverse_proxy localhost:3500
+}
+```
+
+Install Caddy from the official repos, drop the config in `/etc/caddy/Caddyfile`, and `sudo systemctl reload caddy`. The same Hoster service stays unchanged on `:3500`.
+
+### Option C — nginx + certbot
+
+Use when you already run nginx for other services. Sketch:
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name yourdomain.com;
+    ssl_certificate     /etc/letsencrypt/live/yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/yourdomain.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:3500;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+> **Note:** Hoster's analytics use Cloudflare's `cf-connecting-ip` and `cf-ipcountry` headers to detect the real client IP and country. Behind a non-Cloudflare proxy, those headers are absent and the dashboard will show your proxy's IP. The IP auto-block feature still works but operates on the proxy IP rather than the visitor IP unless you forward the equivalent headers yourself.
+
+### Build for x86_64 VPS
+
+```bash
+ARCH=x64 bash build-pi.sh
+scp hoster-x64.sh user@your-vps:~/
+ssh user@your-vps 'bash ~/hoster-x64.sh'
+```
+
+The installer creates `~/hoster/`, drops a `hoster.service` file you can `sudo cp` into `/etc/systemd/system/`, and the rest follows the same systemd flow as the Pi.
+
+### LAN-only / no public access
+
+Skip TLS entirely and just run Hoster as-is. The admin panel and sites are reachable at `http://<host-ip>:3500/`. Combine with a VPN (Tailscale, WireGuard) for remote access without exposing anything.
 
 ### 9. Enable Two-Factor Authentication (Recommended)
 
@@ -451,23 +556,31 @@ On your build machine:
 ```bash
 cd hoster
 git pull
+
+# Pi or ARM VPS:
 bash build-pi.sh
-scp hoster-pi.sh youruser@yourpi:~/
-ssh youruser@yourpi 'bash ~/hoster-pi.sh && sudo systemctl restart hoster'
+scp hoster-arm64.sh youruser@yourhost:~/
+ssh youruser@yourhost 'bash ~/hoster-arm64.sh && sudo systemctl restart hoster'
+
+# x86_64 VPS (DigitalOcean default droplets, most cloud providers):
+ARCH=x64 bash build-pi.sh
+scp hoster-x64.sh youruser@yourhost:~/
+ssh youruser@yourhost 'bash ~/hoster-x64.sh && sudo systemctl restart hoster'
 ```
 
-Your data (admin password, sites, analytics) is preserved across upgrades.
+Your data (admin password, sites, analytics) is preserved across upgrades. The startup self-heal also rebuilds any missing `_current` symlinks automatically — so even if a previous upgrade or restore left sites in a half-broken state, restarting picks them up.
 
 ## Verifying Your Setup
 
 ```bash
-# Check tunnel is connected
+# If using Cloudflare Tunnel, check it's connected:
 sudo systemctl status cloudflared
 
-# Check hoster is running
+# Check hoster is running:
+sudo systemctl status hoster
 curl -s http://localhost:3500/_admin/api/version
 
-# Check from the internet
+# Check from the internet:
 curl -s https://yourdomain.com/_admin/api/version
 ```
 
@@ -492,7 +605,7 @@ hoster/
 │   └── setup.ts        # CLI password setup
 ├── deploy/
 │   └── install.sh      # Pi installer template
-├── build-pi.sh         # Build script
+├── build-pi.sh         # Build script (ARM64 default; `ARCH=x64 bash build-pi.sh` for x86_64)
 ├── package.json
 └── .gitignore
 ```

@@ -1,7 +1,7 @@
 #!/bin/bash
-# Hoster Raspberry Pi Installer
+# Hoster Installer (Linux ARM64 / x86_64)
 # This script is embedded at the top of the deploy archive.
-# Usage: bash hoster-pi.sh
+# Usage: bash hoster-<arch>.sh
 
 set -e
 
@@ -10,7 +10,7 @@ SCRIPT_PATH="$(realpath "$0")"
 ARCHIVE_MARKER="__ARCHIVE_BELOW__"
 ARCHIVE_LINE=$(grep -an "^${ARCHIVE_MARKER}$" "$SCRIPT_PATH" | tail -1 | cut -d: -f1)
 
-echo "=== Hoster Installer for Raspberry Pi ==="
+echo "=== Hoster Installer ==="
 echo ""
 echo "Install directory: $INSTALL_DIR"
 
