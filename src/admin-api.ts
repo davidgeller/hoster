@@ -17,6 +17,7 @@ import {
   getAliases, addAlias, removeAlias,
   getHostAliases, addHostAlias, removeHostAlias, listAllHostAliases,
   listSiteFiles, reloadSite,
+  checkSiteHealth, rebuildCurrentSymlinks,
 } from "./sites";
 import {
   getOverviewStats, getTopSites, getTopPaths, getTrafficOverTime,
@@ -227,11 +228,16 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
 
   // --- Sites CRUD ---
   if (path === "/_admin/api/sites" && req.method === "GET") {
-    const sites = listSites().map(s => ({
-      ...s,
-      aliases: getAliases(s.slug),
-      host_aliases: getHostAliases(s.slug),
-    }));
+    const sites = listSites().map(s => {
+      const health = checkSiteHealth(s.slug);
+      return {
+        ...s,
+        aliases: getAliases(s.slug),
+        host_aliases: getHostAliases(s.slug),
+        health: health.status,
+        health_detail: health.status === "ok" ? null : health.detail,
+      };
+    });
     return json({ sites });
   }
 
@@ -678,11 +684,25 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
       // including this one so a stale cookie in another tab can't keep using
       // the (now possibly different) credentials.
       destroyAllSessions();
-      auditLog("config_imported", `${manifest.site_count} sites restored`, ip);
+      const auditDetail = `${manifest.site_count} sites restored, ` +
+        `${manifest.repaired.length} _current symlink(s) rebuilt, ` +
+        `${manifest.warnings.length} warning(s)`;
+      auditLog("config_imported", auditDetail, ip);
       return json({ ok: true, manifest });
     } catch (e: any) {
       return json({ error: e.message }, 400);
     }
+  }
+
+  // --- Manual repair: walk every site and (re)create _current from DB ---
+  // Same logic that runs at startup and after restore; exposed so an admin
+  // can fix a broken site without restarting the server.
+  if (path === "/_admin/api/sites/repair" && req.method === "POST") {
+    const result = rebuildCurrentSymlinks();
+    if (result.repaired.length > 0 || result.warnings.length > 0) {
+      auditLog("sites_repaired", `repaired ${result.repaired.length}, ${result.warnings.length} warning(s)`, ip);
+    }
+    return json({ ok: true, ...result });
   }
 
   return null;

@@ -843,3 +843,138 @@ export function removeHostAlias(host: string, siteSlug: string): boolean {
   if (result.changes > 0) invalidateHostAliasCache();
   return result.changes > 0;
 }
+
+// --- Site health: detecting and repairing broken state ---
+//
+// A site is "broken" when its on-disk layout doesn't match what the DB says.
+// Typical causes: a restore that stripped the _current symlink (zip-slip
+// defense also strips legitimate _current), a manual rm of a version dir,
+// or an interrupted deploy.
+
+export type SiteHealthStatus =
+  | "ok"
+  | "no_current_version"     // DB has no current_version recorded
+  | "missing_version_dir"    // current_version is set but its directory is gone
+  | "missing_current_link"   // version dir exists but _current symlink is gone
+  | "wrong_current_link";    // _current points at a different version than DB says
+
+export interface SiteHealth {
+  slug: string;
+  status: SiteHealthStatus;
+  current_version: string | null;
+  detail: string;
+}
+
+// Check whether a site's on-disk state matches the DB. Pure inspection — no writes.
+export function checkSiteHealth(slug: string): SiteHealth {
+  const site = getSite(slug);
+  if (!site) {
+    return { slug, status: "missing_version_dir", current_version: null, detail: "site not in database" };
+  }
+  if (!site.current_version) {
+    return { slug, status: "no_current_version", current_version: null, detail: "DB has no current_version recorded" };
+  }
+  const versionDir = join(SITES_DIR, slug, site.current_version);
+  if (!existsSync(versionDir)) {
+    return { slug, status: "missing_version_dir", current_version: site.current_version, detail: `version directory missing: ${site.current_version}` };
+  }
+  const currentLink = join(SITES_DIR, slug, "_current");
+  if (!existsSync(currentLink)) {
+    return { slug, status: "missing_current_link", current_version: site.current_version, detail: "_current symlink missing" };
+  }
+  try {
+    const target = realpathSync(currentLink);
+    const expected = realpathSync(versionDir);
+    if (target !== expected) {
+      return { slug, status: "wrong_current_link", current_version: site.current_version, detail: `_current points at ${target}, expected ${expected}` };
+    }
+  } catch {
+    return { slug, status: "missing_current_link", current_version: site.current_version, detail: "_current symlink unreadable" };
+  }
+  return { slug, status: "ok", current_version: site.current_version, detail: "" };
+}
+
+export function isSiteBroken(slug: string): boolean {
+  return checkSiteHealth(slug).status !== "ok";
+}
+
+export interface RebuildResult {
+  repaired: string[];        // slugs whose _current was (re)created or corrected
+  warnings: string[];        // human-readable messages for sites that can't be repaired
+  ok: string[];              // slugs that were already healthy
+}
+
+// Walk every site in the DB and (re)create the _current symlink to point at
+// the version recorded as current. Idempotent: skips sites that are already
+// correct. Use case: after restoreBackup strips all symlinks, after manual
+// filesystem fixes, or as a self-heal at startup.
+//
+// Security: only creates symlinks whose target is a real subdirectory of the
+// same site's directory. Never follows or creates anything that escapes
+// SITES_DIR/<slug>/. The version name is validated against the directory
+// listing — we don't trust the DB value as a free-form path.
+export function rebuildCurrentSymlinks(): RebuildResult {
+  const result: RebuildResult = { repaired: [], warnings: [], ok: [] };
+  const sites = db.query("SELECT slug, current_version FROM sites").all() as { slug: string; current_version: string | null }[];
+
+  for (const row of sites) {
+    const { slug, current_version } = row;
+
+    if (!current_version) {
+      result.warnings.push(`Site '${slug}': no current version recorded in database`);
+      continue;
+    }
+
+    const siteDir = join(SITES_DIR, slug);
+    if (!existsSync(siteDir)) {
+      result.warnings.push(`Site '${slug}': site directory missing entirely`);
+      continue;
+    }
+
+    // Verify the named version is a real subdirectory — guards against the
+    // DB ever storing something like "../etc/passwd". Pull the directory
+    // listing and confirm the value is one of its entries.
+    const entries = readdirSync(siteDir, { withFileTypes: true });
+    const versionEntry = entries.find(e => e.isDirectory() && e.name === current_version);
+    if (!versionEntry) {
+      result.warnings.push(`Site '${slug}': version directory '${current_version}' is missing on disk`);
+      continue;
+    }
+
+    const versionDir = join(siteDir, current_version);
+    const currentLink = join(siteDir, "_current");
+
+    // Quick health check first so we don't pointlessly re-create a valid link.
+    const health = checkSiteHealth(slug);
+    if (health.status === "ok") {
+      result.ok.push(slug);
+      continue;
+    }
+
+    // Remove whatever's there (broken symlink, wrong-target symlink, or — in
+    // a malicious-archive corner case — a regular file or directory). lstat
+    // so we don't follow into the target.
+    if (existsSync(currentLink) || (() => { try { lstatSync(currentLink); return true; } catch { return false; } })()) {
+      try {
+        const st = lstatSync(currentLink);
+        if (st.isDirectory() && !st.isSymbolicLink()) {
+          rmSync(currentLink, { recursive: true });
+        } else {
+          unlinkSync(currentLink);
+        }
+      } catch {
+        // Already gone or unreadable; carry on to create fresh symlink.
+      }
+    }
+
+    try {
+      symlinkSync(versionDir, currentLink);
+      result.repaired.push(slug);
+      invalidateSiteCache(slug);
+    } catch (e: any) {
+      result.warnings.push(`Site '${slug}': failed to create _current symlink: ${e?.message || e}`);
+    }
+  }
+
+  return result;
+}

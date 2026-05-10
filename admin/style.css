@@ -453,6 +453,14 @@ input:focus, select:focus {
 
 .badge-active { background: var(--success-bg); color: var(--success); }
 .badge-inactive { background: var(--danger-bg); color: var(--danger); }
+.badge-broken { background: var(--danger-bg); color: var(--danger); margin-left: 6px; cursor: help; }
+
+.site-card-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: flex-start;
+}
 
 .site-actions {
   display: flex;

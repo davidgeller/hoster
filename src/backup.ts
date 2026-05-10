@@ -1,5 +1,5 @@
 import db from "./db";
-import { SITES_DIR } from "./sites";
+import { SITES_DIR, rebuildCurrentSymlinks, type RebuildResult } from "./sites";
 import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync, statSync, unlinkSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { randomBytes, createCipheriv, createDecipheriv, pbkdf2Sync } from "crypto";
@@ -24,6 +24,15 @@ interface Manifest {
   encrypted: boolean;
   all_versions: boolean;
   description: string;
+}
+
+// Returned to the caller of restoreBackup. Carries the parsed manifest plus
+// the result of the post-restore symlink rebuild so the admin can see at a
+// glance whether every site is serving — without having to click each one.
+export interface RestoreResult extends Manifest {
+  repaired: string[];
+  ok: string[];
+  warnings: string[];
 }
 
 function getHosterVersion(): string {
@@ -229,7 +238,11 @@ export async function createBackup(password?: string, allVersions = false): Prom
         });
         await zipSites.exited;
       } else {
-        // Only include _current symlink and current version directory per site
+        // Only include the current version directory per site. We deliberately
+        // do NOT store the _current symlink in the archive — restore rebuilds
+        // it from the DB (which is the source of truth for current_version
+        // during normal operation). Including it would be wasted work because
+        // the zip-slip defense on restore strips all symlinks anyway.
         const siteSlugs = readdirSync(SITES_DIR);
         for (const slug of siteSlugs) {
           const siteDir = join(SITES_DIR, slug);
@@ -238,26 +251,18 @@ export async function createBackup(password?: string, allVersions = false): Prom
           // Find current version from DB data
           const siteRecord = dbData.sites?.find((s: any) => s.slug === slug);
           const currentVersion = siteRecord?.current_version;
+          if (!currentVersion) continue;
 
-          const includes: string[] = [];
+          const versionDir = join(siteDir, currentVersion);
+          if (!existsSync(versionDir)) continue;
 
-          // Add the _current symlink
-          const currentLink = join("sites", slug, "_current");
-          includes.push(currentLink);
-
-          // Add the current version directory
-          if (currentVersion && existsSync(join(siteDir, currentVersion))) {
-            includes.push(join("sites", slug, currentVersion));
-          }
-
-          if (includes.length > 0) {
-            const zipSite = Bun.spawn(["zip", "-r", "-y", zipPath, ...includes], {
-              cwd: dirname(SITES_DIR),
-              stdout: "ignore",
-              stderr: "pipe",
-            });
-            await zipSite.exited;
-          }
+          // -r recursive, no -y here — there's nothing symlinky to preserve.
+          const zipSite = Bun.spawn(["zip", "-r", zipPath, join("sites", slug, currentVersion)], {
+            cwd: dirname(SITES_DIR),
+            stdout: "ignore",
+            stderr: "pipe",
+          });
+          await zipSite.exited;
         }
       }
     }
@@ -354,7 +359,7 @@ function verifyNoEscape(dir: string): void {
   }
 }
 
-export async function restoreBackup(fileBuffer: Buffer, password?: string): Promise<Manifest> {
+export async function restoreBackup(fileBuffer: Buffer, password?: string): Promise<RestoreResult> {
   if (fileBuffer.length > MAX_BACKUP_SIZE) {
     throw new Error("Backup file exceeds maximum size of 500 MB");
   }
@@ -436,7 +441,21 @@ export async function restoreBackup(fileBuffer: Buffer, password?: string): Prom
       }
     }
 
-    return manifest;
+    // Rebuild _current symlinks from the DB. The zip-slip defense above strips
+    // every symlink the archive contained — including the legitimate _current
+    // links that Hoster relies on for serving traffic. Walk the imported DB
+    // rows and (re)create each _current to point at the recorded
+    // current_version. Sites whose version directory is missing or whose DB
+    // row has no current_version are collected as warnings so the admin sees
+    // them without having to click into each site.
+    const rebuild: RebuildResult = rebuildCurrentSymlinks();
+
+    return {
+      ...manifest,
+      repaired: rebuild.repaired,
+      ok: rebuild.ok,
+      warnings: rebuild.warnings,
+    };
   } finally {
     if (existsSync(restoreDir)) rmSync(restoreDir, { recursive: true });
   }

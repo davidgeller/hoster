@@ -13,7 +13,8 @@ Upload a ZIP file through the web admin panel and your site is live at `https://
 - **Version management** — each upload creates a new version; roll back instantly
 - **SPA support** — auto-detects Angular, React, and Vue builds (with deep root directory detection); rewrites `<base href>` for subpath hosting
 - **Custom domains (host aliases)** — point any domain at a specific site so `spryly.com/about` serves the same content as `/spryly/about` on the canonical hostname, with no slug in the URL
-- **Configuration backup** — save and restore your entire hoster setup (settings, sites, versions) to a `.hoster` file with optional AES-256-GCM encryption for device migration
+- **Configuration backup** — save and restore your entire hoster setup (settings, sites, versions) to a `.hoster` file with optional AES-256-GCM encryption for device migration; restore auto-rebuilds active-version symlinks and reports broken sites
+- **Self-healing site state** — `_current` symlinks rebuild at startup, after restore, or on demand from a database-driven repair pass; broken sites surface a red badge in the admin UI
 - **Analytics dashboard** — request logs, visitor stats, countries, top pages, status codes, blocked request intelligence, min/avg/max response times
 - **IP auto-blocking** — automatically block IPs that accumulate too many denied requests, with configurable thresholds and duration
 - **Secure auth** — Argon2id password hashing, TOTP two-factor authentication, session tokens, CSRF protection, rate-limited login
@@ -424,6 +425,10 @@ Hoster can save its entire configuration — settings, sites, and file data — 
 4. Click **Replace Everything** to proceed
 
 Loading a backup replaces all settings, sites, and data. Sessions are cleared, so you'll be redirected to log in with the restored password.
+
+After restore, Hoster automatically walks every restored site and rebuilds its `_current` symlink from the recorded active version. The restore-success summary reports how many symlinks were rebuilt and lists any sites whose version directory is missing as warnings — so you see broken sites immediately instead of discovering them by clicking through later. The same rebuild also runs at server startup (self-heal) and is exposed as a **Repair All Sites** button under Settings → Repair Sites for manual triggering.
+
+Sites whose on-disk state doesn't match the database appear in the admin UI with a red **Broken** badge, with a tooltip showing the specific problem (missing version directory, missing `_current` symlink, `_current` pointing at the wrong version, or no current version recorded).
 
 ### What's Included
 

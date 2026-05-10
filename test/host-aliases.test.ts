@@ -2,11 +2,11 @@
 //
 // HOSTER_HOME is set in test/preload.ts (see bunfig.toml) so this test file
 // runs against an isolated temp directory. Reading process.env.HOSTER_HOME
-// here is safe because preload runs before any test file evaluates.
+// here is safe because preload runs before any test file evaluates. Cleanup
+// of HOSTER_HOME is also handled in preload — don't tear down here, since
+// the temp dir is shared across all test files in the suite.
 
-import { rmSync } from "fs";
 import { afterAll, describe, expect, test } from "bun:test";
-import db from "../src/db";
 import {
   SITES_DIR,
   createBlankSite,
@@ -23,12 +23,6 @@ import {
 import { createServer } from "../src/server";
 
 const TEST_HOME = process.env.HOSTER_HOME!;
-
-afterAll(() => {
-  // Close the DB so SQLite releases its file handles, then remove the temp dir.
-  try { db.close(); } catch (_) {}
-  rmSync(TEST_HOME, { recursive: true, force: true });
-});
 
 describe("normalizeHost", () => {
   test("returns empty for missing input", () => {
