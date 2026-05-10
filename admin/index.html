@@ -396,6 +396,14 @@
             </div>
           </div>
 
+          <div class="card mt-4" style="max-width:480px">
+            <h3>Repair Sites</h3>
+            <p class="text-sm text-muted mb-2">Walk every site in the database and recreate its <code>_current</code> symlink from the recorded active version. Use this if sites are returning 404s after a restore or manual file changes. Safe to run anytime — it's a no-op on healthy sites.</p>
+            <button class="btn btn-primary" id="repair-sites-btn">Repair All Sites</button>
+            <div class="form-success" id="repair-result" style="margin-top:8px"></div>
+            <div class="form-error" id="repair-error"></div>
+          </div>
+
           <!-- Backup Confirmation Modal -->
           <div id="backup-confirm-modal" class="modal" hidden>
             <div class="modal-backdrop"></div>

@@ -831,6 +831,39 @@ async function loadMcpAudit() {
     if (saveBtn) saveBtn.addEventListener("click", handleBackupSave);
     if (loadBtn) loadBtn.addEventListener("click", handleBackupLoad);
 
+    const repairBtn = document.getElementById("repair-sites-btn");
+    if (repairBtn) repairBtn.addEventListener("click", async () => {
+      const resultEl = document.getElementById("repair-result");
+      const errEl = document.getElementById("repair-error");
+      resultEl.textContent = "";
+      errEl.textContent = "";
+      repairBtn.disabled = true;
+      const original = repairBtn.textContent;
+      repairBtn.textContent = "Repairing…";
+      try {
+        const data = await api("/sites/repair", { method: "POST" });
+        const parts = [];
+        if (data.repaired.length > 0) {
+          parts.push(esc(`Rebuilt _current for ${data.repaired.length} site${data.repaired.length !== 1 ? "s" : ""}: ${data.repaired.join(", ")}`));
+        }
+        if (data.ok.length > 0 && data.repaired.length === 0) {
+          parts.push(esc(`All ${data.ok.length} site${data.ok.length !== 1 ? "s are" : " is"} already healthy.`));
+        }
+        if (data.warnings.length > 0) {
+          parts.push('<strong style="color:var(--danger)">Warnings:</strong>');
+          for (const w of data.warnings) parts.push(`• ${esc(w)}`);
+        }
+        resultEl.innerHTML = parts.join("<br>");
+        // Refresh sites list so badges update
+        loadSites();
+      } catch (err) {
+        errEl.textContent = err.message;
+      } finally {
+        repairBtn.disabled = false;
+        repairBtn.textContent = original;
+      }
+    });
+
     const cancelBtn = document.getElementById("backup-confirm-cancel");
     if (cancelBtn) cancelBtn.addEventListener("click", () => {
       document.getElementById("backup-confirm-modal").hidden = true;
@@ -1014,11 +1047,32 @@ async function loadMcpAudit() {
       fillEl.style.width = "100%";
       statusEl.textContent = "Done!";
 
-      document.getElementById("backup-success").textContent =
-        `Configuration restored successfully (${importData.manifest.site_count} sites). Reloading...`;
+      const m = importData.manifest;
+      const successEl = document.getElementById("backup-success");
+      const warnings = m.warnings || [];
+      const repairedCount = (m.repaired || []).length;
 
-      // Session was cleared during import — redirect to login after brief delay
-      setTimeout(() => { window.location.reload(); }, 2000);
+      // Build a multi-line success message: counts on the first line, then
+      // a "repaired" note if symlinks had to be rebuilt, then warnings (one
+      // per site) so the admin sees broken sites immediately instead of
+      // discovering them by clicking around.
+      let lines = [`Restored ${m.site_count} site${m.site_count !== 1 ? "s" : ""}.`];
+      if (repairedCount > 0) {
+        lines.push(`Rebuilt _current symlink for ${repairedCount} site${repairedCount !== 1 ? "s" : ""}.`);
+      }
+      if (warnings.length > 0) {
+        lines.push(`<strong style="color:var(--danger)">${warnings.length} warning${warnings.length !== 1 ? "s" : ""}:</strong>`);
+        for (const w of warnings) lines.push(`• ${esc(w)}`);
+        lines.push("Reloading in 10 seconds...");
+      } else {
+        lines.push("Reloading...");
+      }
+      successEl.innerHTML = lines.join("<br>");
+
+      // Session was cleared during import — give the admin time to read
+      // warnings before the page reloads.
+      const reloadDelay = warnings.length > 0 ? 10000 : 2000;
+      setTimeout(() => { window.location.reload(); }, reloadDelay);
 
     } catch (err) {
       progressEl.hidden = true;
@@ -1333,9 +1387,14 @@ async function loadSites() {
             ${s.mcp_enabled ? (s.mcp_read_only ? " · MCP (read-only)" : s.mcp_auto_commit ? " · MCP (auto-snapshot)" : " · MCP") : ""}
           </div>
         </div>
-        <span class="site-badge ${s.active ? "badge-active" : "badge-inactive"}">
-          ${s.active ? "Active" : "Inactive"}
-        </span>
+        <div class="site-card-badges">
+          <span class="site-badge ${s.active ? "badge-active" : "badge-inactive"}">
+            ${s.active ? "Active" : "Inactive"}
+          </span>
+          ${s.health && s.health !== "ok" ? `
+            <span class="site-badge badge-broken" title="${esc(s.health_detail || s.health)}">Broken</span>
+          ` : ""}
+        </div>
       </div>
       <div class="site-meta">
         <span>${formatBytes(s.size_bytes)}</span>
