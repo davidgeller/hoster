@@ -1320,7 +1320,7 @@ async function loadSites() {
       <div class="site-card-header">
         <div>
           <h2>${esc(s.name)}</h2>
-          <div class="site-slug">/${esc(s.slug)}${s.aliases && s.aliases.length ? ` <span class="text-muted text-sm">(also: ${s.aliases.map(a => "/" + esc(a)).join(", ")})</span>` : ""}</div>
+          <div class="site-slug">/${esc(s.slug)}${s.aliases && s.aliases.length ? ` <span class="text-muted text-sm">(also: ${s.aliases.map(a => "/" + esc(a)).join(", ")})</span>` : ""}${s.host_aliases && s.host_aliases.length ? ` <span class="text-muted text-sm">· host: ${s.host_aliases.map(h => esc(h)).join(", ")}</span>` : ""}</div>
           <div class="site-version-info">
             ${s.current_version ? `v${s.current_version}` : "no version"}
             ${s.root_dir ? ` · root: <code>${esc(s.root_dir)}</code>` : ""}
@@ -1445,9 +1445,14 @@ window.deleteVersionBtn = async function (slug, version) {
 window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpReadOnly, mcpAutoCommit) {
   // Fetch current aliases
   let aliases = [];
+  let hostAliases = [];
   try {
     const data = await api(`/sites/${slug}/aliases`);
     aliases = data.aliases || [];
+  } catch (_) {}
+  try {
+    const data = await api(`/sites/${slug}/host-aliases`);
+    hostAliases = data.host_aliases || [];
   } catch (_) {}
 
   const modal = document.createElement("div");
@@ -1516,6 +1521,26 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
           <button type="button" class="btn btn-sm btn-primary" id="add-alias-btn">Add Alias</button>
         </div>
         <div class="form-error" id="alias-error" style="margin-top:4px"></div>
+
+        <hr style="border:none;border-top:1px solid var(--border);margin:12px 0">
+        <label>
+          Host Aliases
+          <small>Custom domains that map to this site. Requests to <code>example.com/about</code> will serve the same content as <code>/${esc(slug)}/about</code> on this server. Configure your DNS / Cloudflare Tunnel to route the hostname here.</small>
+        </label>
+        <div id="settings-host-aliases-list" style="margin-bottom:8px">
+          ${hostAliases.length ? hostAliases.map(h => `
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px" data-host-alias="${esc(h)}">
+              <code style="flex:1">${esc(h)}</code>
+              <button type="button" class="btn btn-sm btn-danger remove-host-alias-btn">Remove</button>
+            </div>
+          `).join("") : '<div class="text-sm text-muted" id="no-host-aliases-msg">No host aliases configured.</div>'}
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input type="text" id="settings-new-host-alias" placeholder="e.g. example.com" style="flex:1">
+          <button type="button" class="btn btn-sm btn-primary" id="add-host-alias-btn">Add Host</button>
+        </div>
+        <div class="form-error" id="host-alias-error" style="margin-top:4px"></div>
+
         <div class="modal-actions" style="margin-top:16px">
           <button type="button" class="btn btn-ghost close-modal">Cancel</button>
           <button type="submit" class="btn btn-primary">Save</button>
@@ -1577,6 +1602,53 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
   modal.querySelectorAll(".remove-alias-btn").forEach(btn => {
     const alias = btn.closest("[data-alias]").dataset.alias;
     btn.addEventListener("click", () => removeAliasHandler(btn.closest("[data-alias]"), alias));
+  });
+
+  // --- Host aliases ---
+  modal.querySelector("#add-host-alias-btn").addEventListener("click", async () => {
+    const input = document.getElementById("settings-new-host-alias");
+    const host = input.value.trim().toLowerCase();
+    const errEl = document.getElementById("host-alias-error");
+    errEl.textContent = "";
+    if (!host) return;
+    try {
+      await api(`/sites/${slug}/host-aliases`, {
+        method: "POST",
+        body: JSON.stringify({ host }),
+      });
+      input.value = "";
+      const listEl = document.getElementById("settings-host-aliases-list");
+      const noMsg = document.getElementById("no-host-aliases-msg");
+      if (noMsg) noMsg.remove();
+      const div = document.createElement("div");
+      div.style.cssText = "display:flex;align-items:center;gap:8px;margin-bottom:4px";
+      div.dataset.hostAlias = host;
+      div.innerHTML = `<code style="flex:1">${esc(host)}</code><button type="button" class="btn btn-sm btn-danger remove-host-alias-btn">Remove</button>`;
+      div.querySelector(".remove-host-alias-btn").addEventListener("click", () => removeHostAliasHandler(div, host));
+      listEl.appendChild(div);
+    } catch (err) {
+      errEl.textContent = err.message;
+    }
+  });
+
+  async function removeHostAliasHandler(el, host) {
+    const errEl = document.getElementById("host-alias-error");
+    errEl.textContent = "";
+    try {
+      await api(`/sites/${slug}/host-aliases/${encodeURIComponent(host)}`, { method: "DELETE" });
+      el.remove();
+      const listEl = document.getElementById("settings-host-aliases-list");
+      if (!listEl.children.length) {
+        listEl.innerHTML = '<div class="text-sm text-muted" id="no-host-aliases-msg">No host aliases configured.</div>';
+      }
+    } catch (err) {
+      errEl.textContent = err.message;
+    }
+  }
+
+  modal.querySelectorAll(".remove-host-alias-btn").forEach(btn => {
+    const host = btn.closest("[data-host-alias]").dataset.hostAlias;
+    btn.addEventListener("click", () => removeHostAliasHandler(btn.closest("[data-host-alias]"), host));
   });
 
   // --- Site delegates ---

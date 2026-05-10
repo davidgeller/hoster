@@ -11,7 +11,13 @@ import {
   isTotpRateLimited, recordTotpAttempt,
   auditLog, getAuditLog
 } from "./auth";
-import { listSites, getSite, deploySite, createBlankSite, deleteSite, toggleSite, listVersions, switchVersion, deleteVersion, commitVersion, updateSiteSettings, getAliases, addAlias, removeAlias, listSiteFiles, reloadSite } from "./sites";
+import {
+  listSites, getSite, deploySite, createBlankSite, deleteSite, toggleSite,
+  listVersions, switchVersion, deleteVersion, commitVersion, updateSiteSettings,
+  getAliases, addAlias, removeAlias,
+  getHostAliases, addHostAlias, removeHostAlias, listAllHostAliases,
+  listSiteFiles, reloadSite,
+} from "./sites";
 import {
   getOverviewStats, getTopSites, getTopPaths, getTrafficOverTime,
   getTopCountries, getTopBrowsers, getRecentRequests,
@@ -220,7 +226,11 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
 
   // --- Sites CRUD ---
   if (path === "/_admin/api/sites" && req.method === "GET") {
-    const sites = listSites().map(s => ({ ...s, aliases: getAliases(s.slug) }));
+    const sites = listSites().map(s => ({
+      ...s,
+      aliases: getAliases(s.slug),
+      host_aliases: getHostAliases(s.slug),
+    }));
     return json({ sites });
   }
 
@@ -265,7 +275,8 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
       if (!site) return json({ error: "Not found" }, 404);
       const versions = listVersions(slug);
       const aliases = getAliases(slug);
-      return json({ site, versions, aliases });
+      const host_aliases = getHostAliases(slug);
+      return json({ site, versions, aliases, host_aliases });
     }
     if (req.method === "DELETE") {
       const ok = deleteSite(slug);
@@ -359,6 +370,43 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     const ok = removeAlias(alias, slug);
     if (ok) auditLog("alias_removed", `${alias} -> ${slug}`, ip);
     return ok ? json({ ok: true, aliases: getAliases(slug) }) : json({ error: "Alias not found" }, 404);
+  }
+
+  // --- Host aliases (custom domain -> site slug) ---
+  if (path === "/_admin/api/host-aliases" && req.method === "GET") {
+    return json({ host_aliases: listAllHostAliases() });
+  }
+
+  const hostAliasMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/host-aliases$/);
+  if (hostAliasMatch && req.method === "GET") {
+    const slug = hostAliasMatch[1];
+    const site = getSite(slug);
+    if (!site) return json({ error: "Not found" }, 404);
+    return json({ host_aliases: getHostAliases(slug) });
+  }
+  if (hostAliasMatch && req.method === "POST") {
+    const slug = hostAliasMatch[1];
+    const site = getSite(slug);
+    if (!site) return json({ error: "Not found" }, 404);
+    const body = await req.json() as { host?: string };
+    const host = body.host?.trim();
+    if (!host) return json({ error: "Host is required" }, 400);
+    try {
+      const normalized = addHostAlias(host, slug);
+      auditLog("host_alias_added", `${normalized} -> ${slug}`, ip);
+      return json({ ok: true, host_aliases: getHostAliases(slug) });
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
+  }
+
+  // Host segments contain dots, so the param regex is more permissive than slug-only routes.
+  const hostAliasDeleteMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/host-aliases\/([a-z0-9.\-]+)$/);
+  if (hostAliasDeleteMatch && req.method === "DELETE") {
+    const [, slug, host] = hostAliasDeleteMatch;
+    const ok = removeHostAlias(decodeURIComponent(host), slug);
+    if (ok) auditLog("host_alias_removed", `${host} -> ${slug}`, ip);
+    return ok ? json({ ok: true, host_aliases: getHostAliases(slug) }) : json({ error: "Host alias not found" }, 404);
   }
 
   // --- Version management ---

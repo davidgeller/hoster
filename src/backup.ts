@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync
 import { join, dirname, resolve } from "path";
 import { randomBytes, createCipheriv, createDecipheriv, pbkdf2Sync } from "crypto";
 
-const BASE_DIR = dirname(process.execPath);
+const BASE_DIR = process.env.HOSTER_HOME || dirname(process.execPath);
 const DATA_DIR = join(BASE_DIR, "data");
 const BACKUP_STAGING = join(DATA_DIR, "_backup_staging");
 
