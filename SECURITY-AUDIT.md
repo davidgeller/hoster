@@ -1,6 +1,6 @@
 # Hoster Security Audit
 
-**Date:** 2026-03-17
+**Date:** 2026-03-17 (initial), 2026-05-11 (Site Explorer + single-file upload + settings tabs)
 **Scope:** Full platform audit including newly added TOTP 2FA implementation
 **Audited files:** All source in `src/`, `admin/app.js`, `admin/index.html`
 
@@ -10,7 +10,7 @@
 
 The hoster platform demonstrates solid security fundamentals: Argon2id password hashing, cryptographically random session tokens, secure cookie attributes, HTML escaping against XSS, parameterized SQL queries, and path traversal protections on file operations. The newly added TOTP 2FA implementation follows industry standards (RFC 6238) and includes recovery codes, QR provisioning, and rate limiting.
 
-A total of 15 findings were identified during the audit. All have been remediated.
+A total of 15 findings were identified during the initial audit. All have been remediated. A follow-up audit on 2026-05-11 covering the Site Explorer view, single-file upload feature, settings tabs refactor, and refresh-button addition identified 4 additional findings — all remediated and documented at the bottom of this file (S1–S4).
 
 ---
 
@@ -471,3 +471,55 @@ The constant-time compare is unnecessary because the lookup key is already a SHA
 Once Criticals are fixed, the High list can be batched into a single hardening release. Mediums and Lows are quality-of-implementation items that don't block production use.
 
 *April 2026 audit conducted against commit `d3f141f`. The timestamp-format mismatch (A-C1) and `pruneExpired` non-invocation (A-H3) were verified by hand against the code.*
+
+---
+
+## May 2026 Audit — Site Explorer, Single-File Upload, Settings Tabs
+
+**Date:** 2026-05-11
+**Scope:** Changes since `30dad1a` covering:
+- New `Site Explorer` admin view with three-column layout (list / actions / live preview iframe)
+- New single-file upload feature (`POST /_admin/api/sites/:slug/upload-file`) with optional path and replace flag
+- Settings modal refactored into a tabbed interface (General / MCP / Aliases)
+- Refresh button added to Explorer preview pane
+- DigitalOcean deploy script (`deploy-to-do.sh`)
+
+**Audited files:** `src/sites.ts`, `src/admin-api.ts`, `admin/app.js`, `admin/index.html`, `admin/style.css`, `test/upload-file.test.ts`, `.gitignore`, `deploy-to-do.sh`
+
+A total of 4 findings were identified. **All remediated.**
+
+### S1. Iframe sandbox enables admin escalation via hosted-site XSS
+**Severity:** High | **Category:** Cross-Frame Scripting
+**Location:** `admin/app.js` — `renderExplorerPreview()`
+**Issue:** The Site Explorer's preview iframe was rendered with `sandbox="allow-same-origin allow-scripts allow-forms allow-popups"`. Hosted sites are served from the same origin as `/_admin`, so the iframe document shared the admin-page origin. JavaScript inside the iframe could reach `window.parent.csrfToken` (set on the admin page after `/auth-check`) and forge authenticated requests against `/_admin/api/*` using the admin's session cookies. Any author who can upload a single file to any hosted site (including via MCP delegate tokens) could plant a script that, the moment an admin previewed the site, would delete/disable other sites, exfiltrate secrets, or pivot to full admin compromise.
+**Fix:** Dropped `allow-same-origin` from the sandbox attribute. The iframe document now has an opaque origin and same-origin policy blocks all access to parent globals. Scripts, forms, and popups still work, so the preview remains functional for visual inspection. Side effect: cookie/localStorage-based logged-in views won't reflect inside the preview, which is acceptable (and arguably safer) for an admin preview.
+
+### S2. Single-file upload had no size cap (disk DoS)
+**Severity:** Medium | **Category:** Resource Exhaustion
+**Location:** `src/admin-api.ts` — `POST /sites/:slug/upload-file`
+**Issue:** The new upload route accepted arbitrarily large multipart bodies. An authenticated admin (or a hijacked session) could write a multi-GB file in a single POST, filling the host's disk and crashing the service. Bun's `req.formData()` buffers the full body in memory before returning, so this also affects RAM usage.
+**Fix:** Added `MAX_UPLOAD_FILE_SIZE = 100 MB` with two checks: an early reject based on `Content-Length` (returns 413 before any body is buffered) and a post-parse reject based on `file.size`. 100 MB covers typical media (videos, PDFs) while making cheap DoS impractical. Full-site ZIP deploys use a separate code path and are not affected.
+
+### S3. Parent-directory symlink check was post-existence only
+**Severity:** Low | **Category:** Path Traversal (defense-in-depth)
+**Location:** `src/sites.ts` — `uploadFileToSite()`
+**Issue:** The realpath verification only fired when the destination *already existed*. For brand-new files in subdirectories, the function trusted the logical path check (`resolved.startsWith(contentDir + "/")`). If a parent directory inside the site tree were ever a symlink — introduced via a future code path or manual filesystem tampering — a new-file upload could escape the site dir even though the logical path appeared safe. Deploy-time `removeSymlinks()` + `verifyNoEscape()` make this rare in practice; this is defense-in-depth.
+**Fix:** After `mkdirSync(parentDir, { recursive: true })`, the function now realpaths the parent and confirms the resolved real path stays inside the real content directory. Throws "Path escapes site directory" otherwise. New test in `test/upload-file.test.ts` plants a symlink under `_current` pointing outside the site and confirms the upload is rejected and no file lands at the escape target.
+
+### S4. Build artifacts and tooling state not in `.gitignore`
+**Severity:** Low | **Category:** Accidental Disclosure / Repo Hygiene
+**Location:** `.gitignore`
+**Issue:** The pre-existing `.gitignore` covered `hoster-pi.sh` and `hoster-linux-arm64` but did not list the x64 build outputs (`hoster-x64.sh`, `hoster-linux-x64`) introduced by the cross-arch build work, nor local tooling state directories (`.claude/`, `.shots/`). A `git add .` could accidentally commit a 38 MB installer binary or session metadata.
+**Fix:** Extended `.gitignore` to cover all build-artifact patterns and local tooling directories. No previously committed artifacts found.
+
+### Verified Strong (May 2026)
+- Path normalization in `uploadFileToSite` correctly strips leading slashes, rejects `..` segments and null bytes, and rejects empty filenames before any disk access.
+- Multipart parsing wrapped in try/catch with a clean 400 response on malformed input.
+- All user-controlled data in the Site Explorer and upload modal (`site.name`, `site.slug`, aliases, host aliases, version, root_dir) routes through the existing `esc()` HTML-escape helper — no XSS sinks introduced.
+- CSRF protection inherits via the existing pre-route gate in `handleAdminApi` (line 150) — the new upload endpoint is a non-GET request and is automatically covered.
+- Single-file upload preserves the `mcp_auto_commit` rollback semantics so admin writes follow the same snapshot-on-first-mutation contract as MCP edits.
+- Audit log entry written for each upload with slug and destination path (`file_uploaded`).
+- The `deploy-to-do.sh` helper contains only a hostname and SSH user; no embedded secrets, and relies on SSH key auth + a narrow sudoers rule on the droplet.
+- Settings tabs refactor is pure DOM restructuring; tab buttons use `type="button"` so they never trigger form submit, and click handlers are scoped to the modal instance.
+
+*May 2026 audit conducted against the working tree before commit. Fixes verified by `bun test` (56/56 pass) including a new test that exercises the symlinked-parent escape path.*

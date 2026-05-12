@@ -16,7 +16,7 @@ import {
   listVersions, switchVersion, deleteVersion, commitVersion, updateSiteSettings,
   getAliases, addAlias, removeAlias,
   getHostAliases, addHostAlias, removeHostAlias, listAllHostAliases,
-  listSiteFiles, reloadSite,
+  listSiteFiles, reloadSite, uploadFileToSite,
   checkSiteHealth, rebuildCurrentSymlinks,
 } from "./sites";
 import {
@@ -345,6 +345,52 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     const ok = reloadSite(slug);
     if (ok) auditLog("site_reloaded", slug, ip);
     return ok ? json({ ok: true }) : json({ error: "Not found or no active version" }, 404);
+  }
+
+  // --- Upload a single file into a site (admin) ---
+  // multipart fields: file (required), path (optional dest path), replace ("true"/"false")
+  // If `path` is empty or ends with "/", the uploaded file's own name is appended.
+  const uploadFileMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/upload-file$/);
+  if (uploadFileMatch && req.method === "POST") {
+    const slug = uploadFileMatch[1];
+    const site = getSite(slug);
+    if (!site) return json({ error: "Not found" }, 404);
+
+    // Cap single-file uploads to prevent an admin (or hijacked session) from
+    // filling the host disk via one POST. Full-site ZIP deploys use a separate
+    // endpoint and code path.
+    const MAX_UPLOAD_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
+    const declared = parseInt(req.headers.get("content-length") || "0", 10);
+    if (declared && declared > MAX_UPLOAD_FILE_SIZE) {
+      return json({ error: `Upload exceeds ${MAX_UPLOAD_FILE_SIZE / (1024 * 1024)} MB limit` }, 413);
+    }
+
+    let formData: FormData;
+    try { formData = await req.formData(); }
+    catch { return json({ error: "Invalid multipart body" }, 400); }
+
+    const file = formData.get("file");
+    if (!file || !(file instanceof File)) return json({ error: "File is required" }, 400);
+    if (file.size > MAX_UPLOAD_FILE_SIZE) {
+      return json({ error: `File exceeds ${MAX_UPLOAD_FILE_SIZE / (1024 * 1024)} MB limit` }, 413);
+    }
+
+    const rawPath = ((formData.get("path") as string) || "").trim();
+    const replace = (formData.get("replace") as string) === "true";
+
+    // If no path or trailing slash, append the original filename
+    let destPath = rawPath;
+    if (!destPath || destPath.endsWith("/")) {
+      destPath = destPath + (file.name || "upload.bin");
+    }
+
+    try {
+      const result = uploadFileToSite(slug, destPath, await file.arrayBuffer(), { replace });
+      auditLog("file_uploaded", `${slug}:${result.path}${result.replaced ? " (replaced)" : ""}`, ip);
+      return json({ ok: true, ...result });
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
   }
 
   // --- Site aliases ---

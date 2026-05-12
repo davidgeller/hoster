@@ -354,6 +354,7 @@ function navigateTo(view) {
 
   if (view === "dashboard") loadDashboard();
   else if (view === "sites") loadSites();
+  else if (view === "explorer") loadExplorer();
   else if (view === "analytics") loadAnalytics();
   else if (view === "logs") loadLogs();
   else if (view === "settings") loadSettings();
@@ -1406,6 +1407,7 @@ async function loadSites() {
         <button class="btn btn-sm" onclick="showSiteFiles('${esc(s.slug)}', '${esc(s.name)}')">Files</button>
         <button class="btn btn-sm" onclick="showSiteDetail('${esc(s.slug)}')">Versions</button>
         <button class="btn btn-sm" onclick="redeploySite('${esc(s.slug)}', '${esc(s.name)}')">Update</button>
+        <button class="btn btn-sm" onclick="showUploadFile('${esc(s.slug)}', '${esc(s.name)}', loadSites)">Upload File</button>
         <button class="btn btn-sm" data-settings="${esc(s.slug)}">Settings</button>
         <button class="btn btn-sm" onclick="reloadSiteCache('${esc(s.slug)}', this)">Reload</button>
         <button class="btn btn-sm ${s.active ? "btn-danger" : "btn-primary"}" onclick="toggleSiteActive('${esc(s.slug)}', ${!s.active})">
@@ -1424,6 +1426,178 @@ async function loadSites() {
       if (site) showSiteSettings(slug, site.root_dir, site.spa, site.mcp_enabled, site.mcp_read_only, site.mcp_auto_commit);
     });
   });
+}
+
+// --- Site Explorer (experimental three-column layout) ---
+let explorerSites = [];
+let explorerSelectedSlug = null;
+
+async function loadExplorer() {
+  const { sites } = await api("/sites");
+  explorerSites = sites;
+  const countEl = document.getElementById("explorer-count");
+  if (countEl) countEl.textContent = `${sites.length} site${sites.length === 1 ? "" : "s"}`;
+
+  renderExplorerList();
+
+  const searchEl = document.getElementById("explorer-search");
+  if (searchEl && !searchEl.dataset.bound) {
+    searchEl.dataset.bound = "1";
+    searchEl.addEventListener("input", renderExplorerList);
+  }
+
+  // Restore previous selection if still present, else select first
+  const remembered = localStorage.getItem("explorer.selectedSlug");
+  const initial = (remembered && sites.find(s => s.slug === remembered)) ? remembered : (sites[0]?.slug || null);
+  if (initial) selectExplorerSite(initial);
+  else {
+    document.getElementById("explorer-actions").innerHTML = '<div class="explorer-empty">No sites deployed yet.</div>';
+    document.getElementById("explorer-preview").innerHTML = '<div class="explorer-empty">Preview appears here.</div>';
+    document.getElementById("explorer-preview-url").textContent = "No site selected";
+    document.getElementById("explorer-preview-open").hidden = true;
+    document.getElementById("explorer-preview-refresh").hidden = true;
+  }
+}
+
+function renderExplorerList() {
+  const listEl = document.getElementById("explorer-list");
+  if (!listEl) return;
+  const q = (document.getElementById("explorer-search")?.value || "").trim().toLowerCase();
+
+  const filtered = explorerSites.filter(s => {
+    if (!q) return true;
+    return s.slug.toLowerCase().includes(q)
+      || (s.name || "").toLowerCase().includes(q)
+      || (s.aliases || []).some(a => a.toLowerCase().includes(q))
+      || (s.host_aliases || []).some(h => h.toLowerCase().includes(q));
+  });
+
+  if (!filtered.length) {
+    listEl.innerHTML = '<div class="explorer-empty" style="height:auto;padding:30px 16px">No matching sites.</div>';
+    return;
+  }
+
+  listEl.innerHTML = filtered.map(s => {
+    const dotClass = !s.active ? "" : (s.health && s.health !== "ok" ? "broken" : "active");
+    const tags = [];
+    if (s.spa) tags.push("SPA");
+    if (s.mcp_enabled) tags.push(s.mcp_read_only ? "MCP·RO" : "MCP");
+    return `
+      <button type="button" class="explorer-item ${s.slug === explorerSelectedSlug ? "active" : ""}" data-slug="${esc(s.slug)}">
+        <div class="explorer-item-name"><span class="badge-dot ${dotClass}"></span>${esc(s.name)}</div>
+        <div class="explorer-item-slug">/${esc(s.slug)}</div>
+        <div class="explorer-item-meta">${formatBytes(s.size_bytes)} · ${s.file_count} files${tags.length ? " · " + tags.join(" · ") : ""}</div>
+      </button>
+    `;
+  }).join("");
+
+  listEl.querySelectorAll(".explorer-item").forEach(btn => {
+    btn.addEventListener("click", () => selectExplorerSite(btn.dataset.slug));
+  });
+}
+
+function selectExplorerSite(slug) {
+  explorerSelectedSlug = slug;
+  localStorage.setItem("explorer.selectedSlug", slug);
+
+  // Update active state in list
+  document.querySelectorAll(".explorer-item").forEach(el => {
+    el.classList.toggle("active", el.dataset.slug === slug);
+  });
+
+  const site = explorerSites.find(s => s.slug === slug);
+  if (!site) return;
+
+  renderExplorerActions(site);
+  renderExplorerPreview(site);
+}
+
+function renderExplorerActions(site) {
+  const el = document.getElementById("explorer-actions");
+  const aliasLine = (site.aliases && site.aliases.length)
+    ? site.aliases.map(a => `/${esc(a)}`).join(", ")
+    : '<span class="text-muted">none</span>';
+  const hostLine = (site.host_aliases && site.host_aliases.length)
+    ? site.host_aliases.map(h => esc(h)).join(", ")
+    : '<span class="text-muted">none</span>';
+  const mcpLabel = !site.mcp_enabled ? "off"
+    : (site.mcp_read_only ? "read-only" : site.mcp_auto_commit ? "auto-snapshot" : "on");
+
+  el.innerHTML = `
+    <h2>${esc(site.name)}
+      <span class="site-badge ${site.active ? "badge-active" : "badge-inactive"}" style="margin-left:6px;vertical-align:middle">${site.active ? "Active" : "Inactive"}</span>
+      ${site.health && site.health !== "ok" ? '<span class="site-badge badge-broken" style="margin-left:4px">Broken</span>' : ""}
+    </h2>
+    <div class="slug-line">/${esc(site.slug)}</div>
+    <dl class="meta-grid">
+      <dt>Version</dt><dd>${site.current_version ? esc(site.current_version) : '<span class="text-muted">none</span>'}</dd>
+      <dt>Size</dt><dd>${formatBytes(site.size_bytes)} · ${site.file_count} files</dd>
+      <dt>Updated</dt><dd>${timeAgo(site.updated_at)}</dd>
+      <dt>Root</dt><dd>${site.root_dir ? `<code>${esc(site.root_dir)}</code>` : '<span class="text-muted">—</span>'}</dd>
+      <dt>SPA</dt><dd>${site.spa ? "yes" : "no"}</dd>
+      <dt>MCP</dt><dd>${mcpLabel}</dd>
+      <dt>Aliases</dt><dd>${aliasLine}</dd>
+      <dt>Hosts</dt><dd>${hostLine}</dd>
+    </dl>
+    <div class="action-group">
+      <a href="/${esc(site.slug)}/${site.current_version ? "?_v=" + esc(site.current_version) : ""}" target="_blank" rel="noopener" class="btn btn-sm">Visit</a>
+      <button class="btn btn-sm" data-act="files">Files</button>
+      <button class="btn btn-sm" data-act="versions">Versions</button>
+      <button class="btn btn-sm" data-act="update">Update</button>
+      <button class="btn btn-sm" data-act="upload">Upload File</button>
+      <button class="btn btn-sm" data-act="settings">Settings</button>
+      <button class="btn btn-sm" data-act="reload">Reload</button>
+      <button class="btn btn-sm ${site.active ? "btn-danger" : "btn-primary"}" data-act="toggle" style="grid-column:1 / -1">${site.active ? "Disable" : "Enable"}</button>
+      <button class="btn btn-sm btn-danger" data-act="delete" style="grid-column:1 / -1">Delete</button>
+    </div>
+  `;
+
+  const slug = site.slug;
+  el.querySelector('[data-act="files"]').addEventListener("click", () => showSiteFiles(slug, site.name));
+  el.querySelector('[data-act="versions"]').addEventListener("click", () => showSiteDetail(slug));
+  el.querySelector('[data-act="update"]').addEventListener("click", () => redeploySite(slug, site.name));
+  el.querySelector('[data-act="upload"]').addEventListener("click", () => showUploadFile(slug, site.name, () => loadExplorer()));
+  el.querySelector('[data-act="settings"]').addEventListener("click", () =>
+    showSiteSettings(slug, site.root_dir, site.spa, site.mcp_enabled, site.mcp_read_only, site.mcp_auto_commit));
+  el.querySelector('[data-act="reload"]').addEventListener("click", (e) => reloadSiteCache(slug, e.currentTarget));
+  el.querySelector('[data-act="toggle"]').addEventListener("click", async () => {
+    await toggleSiteActive(slug, !site.active);
+    loadExplorer();
+  });
+  el.querySelector('[data-act="delete"]').addEventListener("click", async () => {
+    await confirmDeleteSite(slug);
+    loadExplorer();
+  });
+}
+
+function renderExplorerPreview(site) {
+  const previewEl = document.getElementById("explorer-preview");
+  const urlEl = document.getElementById("explorer-preview-url");
+  const openEl = document.getElementById("explorer-preview-open");
+  const refreshEl = document.getElementById("explorer-preview-refresh");
+
+  const url = `/${site.slug}/${site.current_version ? "?_v=" + site.current_version : ""}`;
+  urlEl.textContent = url;
+  openEl.href = url;
+  openEl.hidden = false;
+  refreshEl.hidden = false;
+
+  // Hosted sites are served from the same origin as /_admin; if the iframe ran
+  // with allow-same-origin, scripts inside could reach window.parent and read
+  // the admin's CSRF token to forge requests. Omitting allow-same-origin gives
+  // the iframe an opaque origin so same-origin policy blocks that path. Scripts,
+  // forms, and popups still work, so the preview remains useful.
+  previewEl.innerHTML = `<iframe src="${esc(url)}" loading="lazy" sandbox="allow-scripts allow-forms allow-popups"></iframe>`;
+
+  refreshEl.onclick = () => {
+    const iframe = previewEl.querySelector("iframe");
+    if (!iframe) return;
+    // Append a cache-buster so the iframe actually re-fetches instead of
+    // pulling from disk cache (matters after an Upload File).
+    const bust = `_r=${Date.now()}`;
+    const base = url.includes("?") ? `${url}&${bust}` : `${url}?${bust}`;
+    iframe.src = base;
+  };
 }
 
 window.showSiteDetail = async function (slug) {
@@ -1525,85 +1699,96 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
     <div class="modal-backdrop"></div>
     <div class="modal-content">
       <h2>Site Settings — ${esc(slug)}</h2>
+      <div class="settings-tabs" role="tablist">
+        <button type="button" class="settings-tab active" role="tab" data-tab="general">General</button>
+        <button type="button" class="settings-tab" role="tab" data-tab="mcp">MCP</button>
+        <button type="button" class="settings-tab" role="tab" data-tab="aliases">Aliases</button>
+      </div>
       <form id="site-settings-form">
-        <label>
-          Root Directory
-          <input type="text" id="settings-root-dir" value="${esc(rootDir || "")}" placeholder="e.g. browser, dist, build (leave empty for top level)">
-          <small>Subdirectory containing index.html. Auto-detected for Angular/React/Vue builds.</small>
-        </label>
-        <label style="display:flex;align-items:center;gap:10px;flex-direction:row">
-          <input type="checkbox" id="settings-spa" ${spa ? "checked" : ""} style="width:auto;margin:0">
-          <span>SPA Mode <small style="display:inline;margin:0">(serve index.html for all unmatched routes)</small></span>
-        </label>
-        <label style="display:flex;align-items:center;gap:10px;flex-direction:row">
-          <input type="checkbox" id="settings-mcp" ${mcpEnabled ? "checked" : ""} style="width:auto;margin:0">
-          <span>MCP Access <small style="display:inline;margin:0">(allow AI tools to access site files via MCP)</small></span>
-        </label>
-        <label style="display:flex;align-items:center;gap:10px;flex-direction:row;margin-left:28px">
-          <input type="checkbox" id="settings-mcp-readonly" ${mcpReadOnly ? "checked" : ""} style="width:auto;margin:0">
-          <span>Read Only <small style="display:inline;margin:0">(block write and delete operations)</small></span>
-        </label>
-        <label style="display:flex;align-items:center;gap:10px;flex-direction:row;margin-left:28px">
-          <input type="checkbox" id="settings-mcp-autocommit" ${mcpAutoCommit ? "checked" : ""} style="width:auto;margin:0">
-          <span>Auto-snapshot before AI edits <small style="display:inline;margin:0">(freeze the current version the first time MCP writes to it, preserving a rollback point)</small></span>
-        </label>
+        <div class="settings-tab-panel active" data-panel="general">
+          <label>
+            Root Directory
+            <input type="text" id="settings-root-dir" value="${esc(rootDir || "")}" placeholder="e.g. browser, dist, build (leave empty for top level)">
+            <small>Subdirectory containing index.html. Auto-detected for Angular/React/Vue builds.</small>
+          </label>
+          <label style="display:flex;align-items:center;gap:10px;flex-direction:row">
+            <input type="checkbox" id="settings-spa" ${spa ? "checked" : ""} style="width:auto;margin:0">
+            <span>SPA Mode <small style="display:inline;margin:0">(serve index.html for all unmatched routes)</small></span>
+          </label>
+        </div>
 
-        <hr style="border:none;border-top:1px solid var(--border);margin:12px 0">
-        <label>
-          Site Delegates
-          <small>Per-site OAuth credentials you can share with collaborators. Each delegate authorizes via the OAuth consent screen using their own password — they can only access this site, never <code>/_admin</code> or other sites.</small>
-        </label>
-        <div id="settings-delegates-list" style="margin-bottom:8px"></div>
-        <div style="display:grid;grid-template-columns:1fr 1fr 110px auto;gap:6px;align-items:center">
-          <input type="text" id="settings-delegate-label" placeholder="Label (e.g. 'Joe')" maxlength="60" pattern="[\\w .@\\-]+">
-          <input type="password" id="settings-delegate-password" placeholder="Password (min 8 chars)" minlength="8">
-          <select id="settings-delegate-expires">
-            <option value="30">30 days</option>
-            <option value="90" selected>90 days</option>
-            <option value="365">1 year</option>
-            <option value="">Never</option>
-          </select>
-          <button type="button" class="btn btn-sm btn-primary" id="add-delegate-btn">Add</button>
-        </div>
-        <div class="form-error" id="delegate-error" style="margin-top:4px"></div>
+        <div class="settings-tab-panel" data-panel="mcp">
+          <label style="display:flex;align-items:center;gap:10px;flex-direction:row">
+            <input type="checkbox" id="settings-mcp" ${mcpEnabled ? "checked" : ""} style="width:auto;margin:0">
+            <span>MCP Access <small style="display:inline;margin:0">(allow AI tools to access site files via MCP)</small></span>
+          </label>
+          <label style="display:flex;align-items:center;gap:10px;flex-direction:row;margin-left:28px">
+            <input type="checkbox" id="settings-mcp-readonly" ${mcpReadOnly ? "checked" : ""} style="width:auto;margin:0">
+            <span>Read Only <small style="display:inline;margin:0">(block write and delete operations)</small></span>
+          </label>
+          <label style="display:flex;align-items:center;gap:10px;flex-direction:row;margin-left:28px">
+            <input type="checkbox" id="settings-mcp-autocommit" ${mcpAutoCommit ? "checked" : ""} style="width:auto;margin:0">
+            <span>Auto-snapshot before AI edits <small style="display:inline;margin:0">(freeze the current version the first time MCP writes to it, preserving a rollback point)</small></span>
+          </label>
 
-        <hr style="border:none;border-top:1px solid var(--border);margin:12px 0">
-        <label>
-          Aliases
-          <small>Alternative URL paths that serve this site's content.</small>
-        </label>
-        <div id="settings-aliases-list" style="margin-bottom:8px">
-          ${aliases.length ? aliases.map(a => `
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px" data-alias="${esc(a)}">
-              <code style="flex:1">/${esc(a)}</code>
-              <button type="button" class="btn btn-sm btn-danger remove-alias-btn">Remove</button>
-            </div>
-          `).join("") : '<div class="text-sm text-muted" id="no-aliases-msg">No aliases configured.</div>'}
+          <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+          <label>
+            Site Delegates
+            <small>Per-site OAuth credentials you can share with collaborators. Each delegate authorizes via the OAuth consent screen using their own password — they can only access this site, never <code>/_admin</code> or other sites.</small>
+          </label>
+          <div id="settings-delegates-list" style="margin-bottom:8px"></div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 110px auto;gap:6px;align-items:center">
+            <input type="text" id="settings-delegate-label" placeholder="Label (e.g. 'Joe')" maxlength="60" pattern="[\\w .@\\-]+">
+            <input type="password" id="settings-delegate-password" placeholder="Password (min 8 chars)" minlength="8">
+            <select id="settings-delegate-expires">
+              <option value="30">30 days</option>
+              <option value="90" selected>90 days</option>
+              <option value="365">1 year</option>
+              <option value="">Never</option>
+            </select>
+            <button type="button" class="btn btn-sm btn-primary" id="add-delegate-btn">Add</button>
+          </div>
+          <div class="form-error" id="delegate-error" style="margin-top:4px"></div>
         </div>
-        <div style="display:flex;gap:8px;align-items:center">
-          <input type="text" id="settings-new-alias" placeholder="e.g. ecg" style="flex:1" pattern="[a-z0-9][a-z0-9-]*[a-z0-9]?">
-          <button type="button" class="btn btn-sm btn-primary" id="add-alias-btn">Add Alias</button>
-        </div>
-        <div class="form-error" id="alias-error" style="margin-top:4px"></div>
 
-        <hr style="border:none;border-top:1px solid var(--border);margin:12px 0">
-        <label>
-          Host Aliases
-          <small>Custom domains that map to this site. Requests to <code>example.com/about</code> will serve the same content as <code>/${esc(slug)}/about</code> on this server. Configure your DNS / Cloudflare Tunnel to route the hostname here.</small>
-        </label>
-        <div id="settings-host-aliases-list" style="margin-bottom:8px">
-          ${hostAliases.length ? hostAliases.map(h => `
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px" data-host-alias="${esc(h)}">
-              <code style="flex:1">${esc(h)}</code>
-              <button type="button" class="btn btn-sm btn-danger remove-host-alias-btn">Remove</button>
-            </div>
-          `).join("") : '<div class="text-sm text-muted" id="no-host-aliases-msg">No host aliases configured.</div>'}
+        <div class="settings-tab-panel" data-panel="aliases">
+          <label>
+            Aliases
+            <small>Alternative URL paths that serve this site's content.</small>
+          </label>
+          <div id="settings-aliases-list" style="margin-bottom:8px">
+            ${aliases.length ? aliases.map(a => `
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px" data-alias="${esc(a)}">
+                <code style="flex:1">/${esc(a)}</code>
+                <button type="button" class="btn btn-sm btn-danger remove-alias-btn">Remove</button>
+              </div>
+            `).join("") : '<div class="text-sm text-muted" id="no-aliases-msg">No aliases configured.</div>'}
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="text" id="settings-new-alias" placeholder="e.g. ecg" style="flex:1" pattern="[a-z0-9][a-z0-9-]*[a-z0-9]?">
+            <button type="button" class="btn btn-sm btn-primary" id="add-alias-btn">Add Alias</button>
+          </div>
+          <div class="form-error" id="alias-error" style="margin-top:4px"></div>
+
+          <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+          <label>
+            Host Aliases
+            <small>Custom domains that map to this site. Requests to <code>example.com/about</code> will serve the same content as <code>/${esc(slug)}/about</code> on this server. Configure your DNS / Cloudflare Tunnel to route the hostname here.</small>
+          </label>
+          <div id="settings-host-aliases-list" style="margin-bottom:8px">
+            ${hostAliases.length ? hostAliases.map(h => `
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px" data-host-alias="${esc(h)}">
+                <code style="flex:1">${esc(h)}</code>
+                <button type="button" class="btn btn-sm btn-danger remove-host-alias-btn">Remove</button>
+              </div>
+            `).join("") : '<div class="text-sm text-muted" id="no-host-aliases-msg">No host aliases configured.</div>'}
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="text" id="settings-new-host-alias" placeholder="e.g. example.com" style="flex:1">
+            <button type="button" class="btn btn-sm btn-primary" id="add-host-alias-btn">Add Host</button>
+          </div>
+          <div class="form-error" id="host-alias-error" style="margin-top:4px"></div>
         </div>
-        <div style="display:flex;gap:8px;align-items:center">
-          <input type="text" id="settings-new-host-alias" placeholder="e.g. example.com" style="flex:1">
-          <button type="button" class="btn btn-sm btn-primary" id="add-host-alias-btn">Add Host</button>
-        </div>
-        <div class="form-error" id="host-alias-error" style="margin-top:4px"></div>
 
         <div class="modal-actions" style="margin-top:16px">
           <button type="button" class="btn btn-ghost close-modal">Cancel</button>
@@ -1617,6 +1802,17 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
   document.body.appendChild(modal);
   modal.querySelector(".modal-backdrop").addEventListener("click", () => modal.remove());
   modal.querySelector(".close-modal").addEventListener("click", () => modal.remove());
+
+  // Tab switching
+  modal.querySelectorAll(".settings-tab").forEach(tab => {
+    tab.addEventListener("click", () => {
+      const target = tab.dataset.tab;
+      modal.querySelectorAll(".settings-tab").forEach(t => t.classList.toggle("active", t === tab));
+      modal.querySelectorAll(".settings-tab-panel").forEach(p => {
+        p.classList.toggle("active", p.dataset.panel === target);
+      });
+    });
+  });
 
   // Add alias
   modal.querySelector("#add-alias-btn").addEventListener("click", async () => {
@@ -1798,6 +1994,95 @@ window.redeploySite = function (slug, name) {
   document.getElementById("upload-slug").value = slug;
   document.getElementById("upload-name").value = name;
   document.getElementById("upload-modal").hidden = false;
+};
+
+window.showUploadFile = function (slug, name, onSuccess) {
+  const modal = document.createElement("div");
+  modal.className = "modal upload-file-modal";
+  modal.innerHTML = `
+    <div class="modal-backdrop"></div>
+    <div class="modal-content">
+      <h2>Upload File — ${esc(name)}</h2>
+      <p class="text-sm text-muted mb-2">Uploads a single file into <code>/${esc(slug)}</code>. The file goes into the site root by default. Provide a path to place it in a subdirectory; missing directories will be created.</p>
+      <form id="upload-file-form">
+        <label>
+          File
+          <div class="file-drop" id="upload-file-drop">
+            <input type="file" id="upload-file-input" required>
+            <p>Drop a file here or <strong>click to browse</strong></p>
+            <p class="text-sm text-muted" id="upload-file-name" style="margin-top:6px"></p>
+          </div>
+        </label>
+        <label>
+          Destination Path <small>(optional — leave empty for root, or end with <code>/</code> to keep the file's name in a folder)</small>
+          <input type="text" id="upload-file-path" placeholder="e.g. images/logo.png  or  images/" autocomplete="off">
+        </label>
+        <label style="display:flex;align-items:center;gap:10px;flex-direction:row">
+          <input type="checkbox" id="upload-file-replace" style="width:auto;margin:0">
+          <span>Replace existing file <small style="display:inline;margin:0">(overwrite if a file already exists at the destination)</small></span>
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost close-modal">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="upload-file-submit">Upload</button>
+        </div>
+        <div class="form-error" id="upload-file-error"></div>
+        <div class="upload-progress" id="upload-file-progress" hidden>
+          <div class="progress-bar"><div class="progress-fill"></div></div>
+          <span>Uploading...</span>
+        </div>
+      </form>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  modal.querySelector(".modal-backdrop").addEventListener("click", () => modal.remove());
+  modal.querySelector(".close-modal").addEventListener("click", () => modal.remove());
+
+  const drop = modal.querySelector("#upload-file-drop");
+  const fileInput = modal.querySelector("#upload-file-input");
+  const fileNameEl = modal.querySelector("#upload-file-name");
+
+  fileInput.addEventListener("change", () => {
+    fileNameEl.textContent = fileInput.files[0] ? fileInput.files[0].name + ` · ${formatBytes(fileInput.files[0].size)}` : "";
+  });
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("dragover"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("dragover"));
+  drop.addEventListener("drop", (e) => {
+    e.preventDefault();
+    drop.classList.remove("dragover");
+    if (e.dataTransfer.files[0]) {
+      fileInput.files = e.dataTransfer.files;
+      fileNameEl.textContent = fileInput.files[0].name + ` · ${formatBytes(fileInput.files[0].size)}`;
+    }
+  });
+
+  modal.querySelector("#upload-file-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const file = fileInput.files[0];
+    const destPath = modal.querySelector("#upload-file-path").value.trim();
+    const replace = modal.querySelector("#upload-file-replace").checked;
+    const errEl = modal.querySelector("#upload-file-error");
+    const submitBtn = modal.querySelector("#upload-file-submit");
+    const progressEl = modal.querySelector("#upload-file-progress");
+    errEl.textContent = "";
+    if (!file) { errEl.textContent = "Pick a file to upload."; return; }
+
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("path", destPath);
+    fd.append("replace", replace ? "true" : "false");
+
+    submitBtn.disabled = true;
+    progressEl.hidden = false;
+    try {
+      const result = await apiForm(`/sites/${slug}/upload-file`, fd);
+      modal.remove();
+      if (typeof onSuccess === "function") onSuccess(result);
+    } catch (err) {
+      errEl.textContent = err.message;
+      submitBtn.disabled = false;
+      progressEl.hidden = true;
+    }
+  });
 };
 
 window.toggleSiteActive = async function (slug, active) {

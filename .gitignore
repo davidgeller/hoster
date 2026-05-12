@@ -9,6 +9,13 @@ error.log
 
 # Built artifacts
 hoster-pi.sh
+hoster-arm64.sh
+hoster-x64.sh
 hoster-linux-arm64
+hoster-linux-x64
 hoster
 *.bak
+
+# Local tooling state
+.claude/
+.shots/

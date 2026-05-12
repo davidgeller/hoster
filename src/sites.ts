@@ -537,6 +537,126 @@ export function updateSiteSettings(
   return result.changes > 0;
 }
 
+// --- Single-file upload (admin) ---
+//
+// Writes one file into the current version's content directory (honoring root_dir).
+// Subdirectories in the relative path are created if missing. If the destination
+// exists, `replace=false` aborts with an error.
+//
+// If the site has mcp_auto_commit enabled and the current version hasn't yet
+// been touched (mcp_modified=0), the existing version is snapshotted first
+// so the pre-upload state is preserved as a rollback point.
+export interface UploadFileResult {
+  path: string;     // relative path inside content dir
+  size: number;
+  replaced: boolean;
+  snapshot_version: string | null;  // version id of the rollback snapshot, if auto-commit fired
+}
+
+export function uploadFileToSite(
+  slug: string,
+  relPath: string,
+  data: ArrayBuffer | Buffer | Uint8Array,
+  options: { replace?: boolean } = {}
+): UploadFileResult {
+  const site = getSite(slug);
+  if (!site) throw new Error("Site not found");
+  if (!site.current_version) throw new Error("Site has no current version");
+
+  if (relPath.includes("\0")) throw new Error("Invalid path");
+
+  // Normalize: strip leading slashes, collapse "./" segments. Reject ".." and absolute paths.
+  let normalized = relPath.replace(/^\/+/, "");
+  const parts = normalized.split("/").filter(p => p && p !== ".");
+  if (parts.some(p => p === ".." || p.includes("\0"))) {
+    throw new Error("Path traversal is not allowed");
+  }
+  normalized = parts.join("/");
+  if (!normalized) throw new Error("Destination filename is required");
+
+  const siteDir = join(SITES_DIR, slug, "_current");
+  if (!existsSync(siteDir)) throw new Error("Site directory not found");
+  const contentDir = site.root_dir ? join(siteDir, site.root_dir) : siteDir;
+  if (!existsSync(contentDir)) throw new Error("Content directory not found");
+
+  const resolved = resolve(contentDir, normalized);
+  // Logical check first: stays under the (possibly-symlinked) content dir.
+  if (!resolved.startsWith(contentDir + "/") && resolved !== contentDir) {
+    throw new Error("Path escapes site directory");
+  }
+  // If the destination already exists, also verify the real path is inside
+  // the real content dir — catches a pre-existing symlink at the destination.
+  const existed = existsSync(resolved);
+  if (existed) {
+    const realContentDir = realpathSync(contentDir);
+    const realResolved = realpathSync(resolved);
+    if (!realResolved.startsWith(realContentDir + "/") && realResolved !== realContentDir) {
+      throw new Error("Path escapes site directory");
+    }
+    if (!options.replace) {
+      throw new Error(`File '${normalized}' already exists. Enable "Replace existing" to overwrite.`);
+    }
+    if (statSync(resolved).isDirectory()) {
+      throw new Error(`'${normalized}' is a directory, not a file`);
+    }
+  }
+
+  // Auto-snapshot before first mutation if configured.
+  let snapshotVersion: string | null = null;
+  if (site.mcp_auto_commit) {
+    const current = getVersion(slug, site.current_version);
+    if (current && !current.mcp_modified) {
+      const frozen = site.current_version;
+      const newVer = commitVersion(slug, null);
+      if (newVer) snapshotVersion = frozen;
+    }
+  }
+
+  const parentDir = dirname(resolved);
+  mkdirSync(parentDir, { recursive: true });
+
+  // Defense-in-depth: after creating subdirs, confirm the parent's real path
+  // still resolves inside the content dir. Deploy-time removeSymlinks() should
+  // guarantee no symlinks exist within site trees, but this guards against a
+  // future code path that introduces one (or manual tampering).
+  const realParentDir = realpathSync(parentDir);
+  const realContentDirCheck = realpathSync(contentDir);
+  if (!realParentDir.startsWith(realContentDirCheck + "/") && realParentDir !== realContentDirCheck) {
+    throw new Error("Path escapes site directory");
+  }
+
+  const bytes = data instanceof ArrayBuffer ? new Uint8Array(data)
+    : data instanceof Uint8Array ? data
+    : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  writeFileSync(resolved, bytes);
+
+  // Mark the (post-snapshot) current version as modified
+  const refreshed = getSite(slug);
+  if (refreshed?.current_version) {
+    markVersionModified(slug, refreshed.current_version);
+  }
+
+  // Recalculate version stats so the sites list reflects the new size/count.
+  const versionDir = join(SITES_DIR, slug, refreshed!.current_version!);
+  const stats = calcDirStats(versionDir);
+  db.run(
+    "UPDATE site_versions SET size_bytes = ?, file_count = ? WHERE site_slug = ? AND version = ?",
+    stats.size, stats.count, slug, refreshed!.current_version!
+  );
+  db.run(
+    "UPDATE sites SET size_bytes = ?, file_count = ?, updated_at = datetime('now') WHERE slug = ?",
+    stats.size, stats.count, slug
+  );
+  invalidateSiteCache(slug);
+
+  return {
+    path: normalized,
+    size: bytes.length,
+    replaced: existed,
+    snapshot_version: snapshotVersion,
+  };
+}
+
 // Cache resolved real paths for site directories (cleared on deploy/switch/delete)
 const realPathCache = new Map<string, { realPath: string; ts: number }>();
 
