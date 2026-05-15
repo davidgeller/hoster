@@ -1,6 +1,7 @@
 import db from "./db";
-import { mkdirSync, rmSync, existsSync, readdirSync, statSync, symlinkSync, readlinkSync, unlinkSync, realpathSync, lstatSync, writeFileSync } from "fs";
+import { mkdirSync, rmSync, existsSync, readdirSync, statSync, symlinkSync, readlinkSync, unlinkSync, realpathSync, lstatSync, writeFileSync, readFileSync } from "fs";
 import { join, resolve } from "path";
+import { getScaffoldFiles, CMS_LIB_VERSION } from "./cms-scaffold";
 
 import { dirname } from "path";
 const BASE_DIR = process.env.HOSTER_HOME || dirname(process.execPath);
@@ -22,6 +23,8 @@ export interface Site {
   mcp_enabled: number;      // 1 = MCP file access enabled
   mcp_read_only: number;    // 1 = MCP can only read, not write/delete
   mcp_auto_commit: number;  // 1 = snapshot current version before first MCP write
+  cms_enabled: number;      // 1 = CMS feature enabled (JSON-driven content)
+  cms_lib_version: string | null;  // version of the CMS lib currently scaffolded on disk
 }
 
 export interface SiteVersion {
@@ -77,6 +80,8 @@ try { db.exec("ALTER TABLE sites ADD COLUMN spa INTEGER DEFAULT 0"); } catch (_)
 try { db.exec("ALTER TABLE sites ADD COLUMN mcp_enabled INTEGER DEFAULT 0"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN mcp_read_only INTEGER DEFAULT 0"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN mcp_auto_commit INTEGER DEFAULT 0"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN cms_enabled INTEGER DEFAULT 0"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN cms_lib_version TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE site_versions ADD COLUMN mcp_modified INTEGER DEFAULT 0"); } catch (_) {}
 
 // --- Site config cache (avoids DB + filesystem hits on every request) ---
@@ -510,7 +515,8 @@ export function toggleSite(slug: string, active: boolean): boolean {
 
 export function updateSiteSettings(
   slug: string, rootDir: string | null, spa: boolean,
-  mcpEnabled?: boolean, mcpReadOnly?: boolean, mcpAutoCommit?: boolean
+  mcpEnabled?: boolean, mcpReadOnly?: boolean, mcpAutoCommit?: boolean,
+  cmsEnabled?: boolean
 ): boolean {
   if (rootDir) {
     if (rootDir.includes("..") || rootDir.startsWith("/") || rootDir.includes("\0")) {
@@ -525,12 +531,14 @@ export function updateSiteSettings(
       mcp_enabled = COALESCE(?, mcp_enabled),
       mcp_read_only = COALESCE(?, mcp_read_only),
       mcp_auto_commit = COALESCE(?, mcp_auto_commit),
+      cms_enabled = COALESCE(?, cms_enabled),
       updated_at = datetime('now')
     WHERE slug = ?`,
     rootDir, spa ? 1 : 0,
     mcpEnabled !== undefined ? (mcpEnabled ? 1 : 0) : null,
     mcpReadOnly !== undefined ? (mcpReadOnly ? 1 : 0) : null,
     mcpAutoCommit !== undefined ? (mcpAutoCommit ? 1 : 0) : null,
+    cmsEnabled !== undefined ? (cmsEnabled ? 1 : 0) : null,
     slug
   );
   invalidateSiteCache(slug);
@@ -925,6 +933,156 @@ export function resolveHostAlias(host: string): string | null {
 export function listAllHostAliases(): { host: string; site_slug: string; created_at: string }[] {
   return db.query("SELECT host, site_slug, created_at FROM host_aliases ORDER BY host")
     .all() as { host: string; site_slug: string; created_at: string }[];
+}
+
+// --- CMS scaffolding ---
+//
+// The CMS feature scaffolds a `.cms/` directory into the site's served content
+// directory. Layout:
+//   .cms/
+//     VERSION                 — installed scaffold version
+//     templates/list.html     — list page (visited at /<slug>/.cms/templates/list.html)
+//     templates/story.html    — single post page
+//     content/index.json      — master index (metadata only)
+//     content/categories.json
+//     content/posts/*.json    — one file per post
+//
+// The JS library and default CSS live globally at `/_cms/cms.js` and
+// `/_cms/cms.css`, sourced from the cms_lib_files table (see cms-lib.ts).
+// Templates reference those absolute paths so the same lib serves every site
+// regardless of routing mode (canonical, host-aliased, or path-prefixed).
+
+const CMS_DIR_NAME = ".cms";
+
+function getCmsDir(site: Site): string {
+  const siteDir = join(SITES_DIR, site.slug, "_current");
+  const contentDir = site.root_dir ? join(siteDir, site.root_dir) : siteDir;
+  return join(contentDir, CMS_DIR_NAME);
+}
+
+export interface CmsStatus {
+  enabled: boolean;
+  scaffolded: boolean;
+  installed_version: string | null;
+  current_scaffold_version: string;
+  post_count: number;
+  draft_count: number;
+  categories: number;
+  list_url: string | null;
+  story_url: string | null;
+}
+
+export function getCmsStatus(slug: string): CmsStatus {
+  const site = getSite(slug);
+  if (!site) {
+    return {
+      enabled: false, scaffolded: false, installed_version: null,
+      current_scaffold_version: CMS_LIB_VERSION,
+      post_count: 0, draft_count: 0, categories: 0,
+      list_url: null, story_url: null,
+    };
+  }
+
+  let installed: string | null = null;
+  let postCount = 0, draftCount = 0, categories = 0;
+
+  if (site.current_version) {
+    const cmsDir = getCmsDir(site);
+    const versionFile = join(cmsDir, "VERSION");
+    if (existsSync(versionFile)) {
+      try { installed = readFileSync(versionFile, "utf-8").trim(); } catch (_) {}
+    }
+    const indexFile = join(cmsDir, "content", "index.json");
+    if (existsSync(indexFile)) {
+      try {
+        const data = JSON.parse(readFileSync(indexFile, "utf-8"));
+        const posts = Array.isArray(data?.posts) ? data.posts : [];
+        postCount = posts.length;
+        draftCount = posts.filter((p: any) => p && p.draft).length;
+      } catch (_) {}
+    }
+    const catFile = join(cmsDir, "content", "categories.json");
+    if (existsSync(catFile)) {
+      try {
+        const data = JSON.parse(readFileSync(catFile, "utf-8"));
+        categories = Array.isArray(data?.categories) ? data.categories.length : 0;
+      } catch (_) {}
+    }
+  }
+
+  const listUrl = `/${slug}/.cms/templates/list.html`;
+  const storyUrl = `/${slug}/.cms/templates/story.html`;
+
+  return {
+    enabled: !!site.cms_enabled,
+    scaffolded: installed !== null,
+    installed_version: installed,
+    current_scaffold_version: CMS_LIB_VERSION,
+    post_count: postCount,
+    draft_count: draftCount,
+    categories,
+    list_url: site.cms_enabled ? listUrl : null,
+    story_url: site.cms_enabled ? storyUrl : null,
+  };
+}
+
+function writeScaffoldFile(cmsDir: string, relPath: string, content: string): void {
+  const dest = join(cmsDir, relPath);
+  // Defense-in-depth: ensure the resolved path stays inside cmsDir.
+  const resolved = resolve(dest);
+  if (!resolved.startsWith(resolve(cmsDir) + "/") && resolved !== resolve(cmsDir)) {
+    throw new Error("Scaffold path escapes cms directory");
+  }
+  mkdirSync(dirname(dest), { recursive: true });
+  writeFileSync(dest, content, "utf-8");
+}
+
+function recalcSiteStats(slug: string): void {
+  const site = getSite(slug);
+  if (!site || !site.current_version) return;
+  const versionDir = join(SITES_DIR, slug, site.current_version);
+  const stats = calcDirStats(versionDir);
+  db.run(
+    "UPDATE site_versions SET size_bytes = ?, file_count = ? WHERE site_slug = ? AND version = ?",
+    stats.size, stats.count, slug, site.current_version
+  );
+  db.run(
+    "UPDATE sites SET size_bytes = ?, file_count = ?, updated_at = datetime('now') WHERE slug = ?",
+    stats.size, stats.count, slug
+  );
+  invalidateSiteCache(slug);
+}
+
+export interface CmsInitResult {
+  scaffolded_files: string[];
+  installed_version: string;
+}
+
+// Lay down the .cms/ directory for a site and flip cms_enabled on.
+// Templates and content are preserved if already present; only the VERSION
+// marker is overwritten so it tracks the scaffold layout the binary knows about.
+export function cmsInit(slug: string): CmsInitResult {
+  const site = getSite(slug);
+  if (!site) throw new Error("Site not found");
+  if (!site.current_version) throw new Error("Site has no current version");
+
+  const cmsDir = getCmsDir(site);
+  const scaffolded: string[] = [];
+  for (const f of getScaffoldFiles()) {
+    const dest = join(cmsDir, f.path);
+    if (existsSync(dest) && f.preserveIfExists) continue;
+    writeScaffoldFile(cmsDir, f.path, f.content);
+    scaffolded.push(f.path);
+  }
+
+  db.run(
+    "UPDATE sites SET cms_enabled = 1, cms_lib_version = ?, updated_at = datetime('now') WHERE slug = ?",
+    CMS_LIB_VERSION, slug
+  );
+  invalidateSiteCache(slug);
+  recalcSiteStats(slug);
+
+  return { scaffolded_files: scaffolded, installed_version: CMS_LIB_VERSION };
 }
 
 export function getHostAliases(siteSlug: string): string[] {

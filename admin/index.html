@@ -332,115 +332,198 @@
           <div class="view-header">
             <h1>Settings</h1>
           </div>
-          <div class="card" style="max-width:480px">
-            <h3>Change Password</h3>
-            <form id="password-form">
-              <label>
-                Current Password
-                <input type="password" id="pw-current" required>
-              </label>
-              <label>
-                New Password
-                <input type="password" id="pw-new" required minlength="8">
-              </label>
-              <label>
-                Confirm New Password
-                <input type="password" id="pw-confirm" required>
-              </label>
-              <button type="submit" class="btn btn-primary">Update Password</button>
-              <div class="form-error" id="pw-error"></div>
-              <div class="form-success" id="pw-success"></div>
-            </form>
+
+          <div class="settings-tabs settings-tabs-page" role="tablist">
+            <button type="button" class="settings-tab active" role="tab" data-settings-tab="access">Access</button>
+            <button type="button" class="settings-tab" role="tab" data-settings-tab="mcp">MCP</button>
+            <button type="button" class="settings-tab" role="tab" data-settings-tab="oauth">OAuth</button>
+            <button type="button" class="settings-tab" role="tab" data-settings-tab="security">Security</button>
+            <button type="button" class="settings-tab" role="tab" data-settings-tab="backup">Backup &amp; Restore</button>
+            <button type="button" class="settings-tab" role="tab" data-settings-tab="cms">CMS Library</button>
           </div>
-          <div class="card mt-4" style="max-width:480px" id="totp-settings-card">
-            <h3>Two-Factor Authentication</h3>
-            <div id="totp-settings"></div>
-          </div>
-          <div class="card mt-4" style="max-width:640px">
-            <h3>MCP Access Tokens</h3>
-            <p class="text-sm text-muted mb-2">Static bearer tokens for CLI tools (Claude Code, Cursor) that don't need an interactive login. Tokens can be scoped to a single site and set to expire.</p>
-            <div id="mcp-token-list"></div>
-          </div>
-          <div class="card mt-4" style="max-width:640px">
-            <h3>OAuth Connections</h3>
-            <p class="text-sm text-muted mb-2">Chat clients (Claude.ai, ChatGPT, etc.) connect via OAuth. Each MCP-enabled site is a separate connector — paste its URL into your chat client's "Add MCP server" dialog and complete the consent flow.</p>
-            <div id="oauth-site-urls"></div>
-            <div id="oauth-grants" style="margin-top:16px"></div>
-            <div id="oauth-clients" style="margin-top:16px"></div>
-          </div>
-          <div class="card mt-4" style="max-width:640px">
-            <h3>MCP Activity Log</h3>
-            <p class="text-sm text-muted mb-2">Recent MCP tool calls across all tokens.</p>
-            <div id="mcp-audit-log"></div>
-          </div>
-          <div class="card mt-4" style="max-width:480px">
-            <h3>Country Restrictions</h3>
-            <p class="text-sm text-muted mb-2">Only allow requests from specific countries. Leave empty to allow all. Uses 2-letter ISO country codes (e.g., US, GB, CA). Admin panel is always accessible.</p>
-            <form id="country-form">
-              <label>
-                Allowed Countries
-                <input type="text" id="allowed-countries" placeholder="US, GB, CA (empty = allow all)">
-              </label>
-              <button type="submit" class="btn btn-primary">Save</button>
-              <div class="form-error" id="country-error"></div>
-              <div class="form-success" id="country-success"></div>
-            </form>
-          </div>
-          <div class="card mt-4" style="max-width:480px">
-            <h3>Configuration Backup</h3>
-            <p class="text-sm text-muted mb-2">Save your entire hoster configuration (settings, sites, versions) to a file for migration or backup. Optionally protect with a password.</p>
-            <div style="margin-bottom:16px">
-              <label>
-                Password (optional)
-                <input type="password" id="backup-password" placeholder="Leave empty for no encryption">
-              </label>
-              <label class="toggle-label" style="margin-bottom:12px">
-                <input type="checkbox" id="backup-all-versions">
-                Include all site versions
-              </label>
-              <button class="btn btn-primary" id="backup-save-btn" style="margin-top:4px">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7,10 12,15 17,10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                Save Configuration
-              </button>
-              <div class="backup-progress" id="backup-save-progress" hidden>
-                <div class="progress-bar"><div class="progress-fill" id="backup-save-fill"></div></div>
-                <span id="backup-save-status">Preparing backup...</span>
-              </div>
+
+          <!-- Access tab: password + 2FA -->
+          <div class="settings-page-panel active" data-settings-panel="access">
+            <div class="card" style="max-width:480px">
+              <h3>Change Password</h3>
+              <form id="password-form">
+                <label>
+                  Current Password
+                  <input type="password" id="pw-current" required>
+                </label>
+                <label>
+                  New Password
+                  <input type="password" id="pw-new" required minlength="8">
+                </label>
+                <label>
+                  Confirm New Password
+                  <input type="password" id="pw-confirm" required>
+                </label>
+                <button type="submit" class="btn btn-primary">Update Password</button>
+                <div class="form-error" id="pw-error"></div>
+                <div class="form-success" id="pw-success"></div>
+              </form>
             </div>
-            <div style="border-top:1px solid var(--border);padding-top:16px">
-              <label>
-                Load from file
-                <div class="file-drop" id="backup-file-drop">
-                  <input type="file" id="backup-file" accept=".hoster">
-                  <p>Drop a <strong>.hoster</strong> file here or click to browse</p>
+            <div class="card mt-4" style="max-width:480px" id="totp-settings-card">
+              <h3>Two-Factor Authentication</h3>
+              <div id="totp-settings"></div>
+            </div>
+          </div>
+
+          <!-- MCP tab: tokens + activity log -->
+          <div class="settings-page-panel" data-settings-panel="mcp" hidden>
+            <div class="card" style="max-width:640px">
+              <h3>MCP Access Tokens</h3>
+              <p class="text-sm text-muted mb-2">Static bearer tokens for CLI tools (Claude Code, Cursor) that don't need an interactive login. Tokens can be scoped to a single site and set to expire.</p>
+              <div id="mcp-token-list"></div>
+            </div>
+            <div class="card mt-4" style="max-width:640px">
+              <h3>MCP Activity Log</h3>
+              <p class="text-sm text-muted mb-2">Recent MCP tool calls across all tokens.</p>
+              <div id="mcp-audit-log"></div>
+            </div>
+          </div>
+
+          <!-- OAuth tab -->
+          <div class="settings-page-panel" data-settings-panel="oauth" hidden>
+            <div class="card" style="max-width:640px">
+              <h3>OAuth Connections</h3>
+              <p class="text-sm text-muted mb-2">Chat clients (Claude.ai, ChatGPT, etc.) connect via OAuth. Each MCP-enabled site is a separate connector — paste its URL into your chat client's "Add MCP server" dialog and complete the consent flow.</p>
+              <div id="oauth-site-urls"></div>
+              <div id="oauth-grants" style="margin-top:16px"></div>
+              <div id="oauth-clients" style="margin-top:16px"></div>
+            </div>
+          </div>
+
+          <!-- Security tab: country restrictions + IP auto-blocking -->
+          <div class="settings-page-panel" data-settings-panel="security" hidden>
+            <div class="card" style="max-width:480px">
+              <h3>Country Restrictions</h3>
+              <p class="text-sm text-muted mb-2">Only allow requests from specific countries. Leave empty to allow all. Uses 2-letter ISO country codes (e.g., US, GB, CA). Admin panel is always accessible.</p>
+              <form id="country-form">
+                <label>
+                  Allowed Countries
+                  <input type="text" id="allowed-countries" placeholder="US, GB, CA (empty = allow all)">
+                </label>
+                <button type="submit" class="btn btn-primary">Save</button>
+                <div class="form-error" id="country-error"></div>
+                <div class="form-success" id="country-success"></div>
+              </form>
+            </div>
+            <div class="card mt-4" style="max-width:480px">
+              <h3>IP Auto-Blocking</h3>
+              <p class="text-sm text-muted mb-2">Automatically block IP addresses that accumulate too many denied requests. Uses the real client IP from Cloudflare headers.</p>
+              <form id="autoblock-form">
+                <label class="toggle-label">
+                  <input type="checkbox" id="autoblock-enabled">
+                  Enable auto-blocking
+                </label>
+                <label>
+                  Block after
+                  <input type="number" id="autoblock-threshold" min="1" max="10000" value="20">
+                  <span class="text-sm text-muted">blocked requests</span>
+                </label>
+                <label>
+                  Within
+                  <input type="number" id="autoblock-window" min="1" max="1440" value="10">
+                  <span class="text-sm text-muted">minutes</span>
+                </label>
+                <label>
+                  Block duration
+                  <input type="number" id="autoblock-duration" min="0" max="8760" value="24">
+                  <span class="text-sm text-muted">hours (0 = permanent)</span>
+                </label>
+                <button type="submit" class="btn btn-primary">Save</button>
+                <div class="form-error" id="autoblock-error"></div>
+                <div class="form-success" id="autoblock-success"></div>
+              </form>
+              <div id="blocked-ips-list" style="margin-top:16px"></div>
+            </div>
+          </div>
+
+          <!-- Backup & Restore tab: backup/restore + repair -->
+          <div class="settings-page-panel" data-settings-panel="backup" hidden>
+            <div class="card" style="max-width:480px">
+              <h3>Configuration Backup</h3>
+              <p class="text-sm text-muted mb-2">Save your entire hoster configuration (settings, sites, versions) to a file for migration or backup. Optionally protect with a password.</p>
+              <div style="margin-bottom:16px">
+                <label>
+                  Password (optional)
+                  <input type="password" id="backup-password" placeholder="Leave empty for no encryption">
+                </label>
+                <label class="toggle-label" style="margin-bottom:12px">
+                  <input type="checkbox" id="backup-all-versions">
+                  Include all site versions
+                </label>
+                <button class="btn btn-primary" id="backup-save-btn" style="margin-top:4px">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7,10 12,15 17,10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  Save Configuration
+                </button>
+                <div class="backup-progress" id="backup-save-progress" hidden>
+                  <div class="progress-bar"><div class="progress-fill" id="backup-save-fill"></div></div>
+                  <span id="backup-save-status">Preparing backup...</span>
                 </div>
-              </label>
-              <label>
-                Password (if encrypted)
-                <input type="password" id="backup-load-password" placeholder="Enter password if backup was encrypted">
-              </label>
-              <button class="btn btn-primary" id="backup-load-btn" disabled style="margin-top:4px">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17,8 12,3 7,8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                Load Configuration
-              </button>
-              <div class="backup-progress" id="backup-load-progress" hidden>
-                <div class="progress-bar"><div class="progress-fill" id="backup-load-fill"></div></div>
-                <span id="backup-load-status">Loading backup...</span>
               </div>
-              <div class="form-error" id="backup-error"></div>
-              <div class="form-success" id="backup-success"></div>
+              <div style="border-top:1px solid var(--border);padding-top:16px">
+                <label>
+                  Load from file
+                  <div class="file-drop" id="backup-file-drop">
+                    <input type="file" id="backup-file" accept=".hoster">
+                    <p>Drop a <strong>.hoster</strong> file here or click to browse</p>
+                  </div>
+                </label>
+                <label>
+                  Password (if encrypted)
+                  <input type="password" id="backup-load-password" placeholder="Enter password if backup was encrypted">
+                </label>
+                <button class="btn btn-primary" id="backup-load-btn" disabled style="margin-top:4px">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17,8 12,3 7,8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                  Load Configuration
+                </button>
+                <div class="backup-progress" id="backup-load-progress" hidden>
+                  <div class="progress-bar"><div class="progress-fill" id="backup-load-fill"></div></div>
+                  <span id="backup-load-status">Loading backup...</span>
+                </div>
+                <div class="form-error" id="backup-error"></div>
+                <div class="form-success" id="backup-success"></div>
+              </div>
+            </div>
+            <div class="card mt-4" style="max-width:480px">
+              <h3>Repair Sites</h3>
+              <p class="text-sm text-muted mb-2">Walk every site in the database and recreate its <code>_current</code> symlink from the recorded active version. Use this if sites are returning 404s after a restore or manual file changes. Safe to run anytime — it's a no-op on healthy sites.</p>
+              <button class="btn btn-primary" id="repair-sites-btn">Repair All Sites</button>
+              <div class="form-success" id="repair-result" style="margin-top:8px"></div>
+              <div class="form-error" id="repair-error"></div>
             </div>
           </div>
 
-          <div class="card mt-4" style="max-width:480px">
-            <h3>Repair Sites</h3>
-            <p class="text-sm text-muted mb-2">Walk every site in the database and recreate its <code>_current</code> symlink from the recorded active version. Use this if sites are returning 404s after a restore or manual file changes. Safe to run anytime — it's a no-op on healthy sites.</p>
-            <button class="btn btn-primary" id="repair-sites-btn">Repair All Sites</button>
-            <div class="form-success" id="repair-result" style="margin-top:8px"></div>
-            <div class="form-error" id="repair-error"></div>
+          <!-- CMS Library tab -->
+          <div class="settings-page-panel" data-settings-panel="cms" hidden>
+            <div class="card" style="max-width:960px">
+              <h3>CMS Library</h3>
+              <p class="text-sm text-muted mb-2">JavaScript and CSS served at <code>/_cms/cms.js</code> and <code>/_cms/cms.css</code> for every CMS-enabled site. The same lib serves every host — canonical, host-aliased, or path-prefixed. Edits take effect on the next request (clients revalidate via ETag).</p>
+              <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+                <label style="display:flex;align-items:center;gap:6px;flex-direction:row;margin:0">
+                  <span>File:</span>
+                  <select id="cms-lib-file" style="width:auto">
+                    <option value="cms.js">cms.js</option>
+                    <option value="cms.css">cms.css</option>
+                  </select>
+                </label>
+                <span class="text-sm text-muted" id="cms-lib-meta"></span>
+              </div>
+              <textarea id="cms-lib-content" style="width:100%;min-height:420px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;white-space:pre;tab-size:2" spellcheck="false"></textarea>
+              <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+                <button class="btn btn-primary" id="cms-lib-save-btn">Save</button>
+                <button class="btn btn-ghost" id="cms-lib-discard-btn">Discard changes</button>
+                <button class="btn btn-ghost" id="cms-lib-reset-btn" style="margin-left:auto">Reset to bundled defaults</button>
+              </div>
+              <div class="form-error" id="cms-lib-error" style="margin-top:4px"></div>
+              <div class="form-success" id="cms-lib-success" style="margin-top:4px"></div>
+            </div>
           </div>
 
-          <!-- Backup Confirmation Modal -->
+          <!-- Backup Confirmation Modal (lives in Settings view but pops over any tab) -->
           <div id="backup-confirm-modal" class="modal" hidden>
             <div class="modal-backdrop"></div>
             <div class="modal-content">
@@ -459,36 +542,6 @@
                 <button class="btn btn-danger" id="backup-confirm-ok">Replace Everything</button>
               </div>
             </div>
-          </div>
-
-          <div class="card mt-4" style="max-width:480px">
-            <h3>IP Auto-Blocking</h3>
-            <p class="text-sm text-muted mb-2">Automatically block IP addresses that accumulate too many denied requests. Uses the real client IP from Cloudflare headers.</p>
-            <form id="autoblock-form">
-              <label class="toggle-label">
-                <input type="checkbox" id="autoblock-enabled">
-                Enable auto-blocking
-              </label>
-              <label>
-                Block after
-                <input type="number" id="autoblock-threshold" min="1" max="10000" value="20">
-                <span class="text-sm text-muted">blocked requests</span>
-              </label>
-              <label>
-                Within
-                <input type="number" id="autoblock-window" min="1" max="1440" value="10">
-                <span class="text-sm text-muted">minutes</span>
-              </label>
-              <label>
-                Block duration
-                <input type="number" id="autoblock-duration" min="0" max="8760" value="24">
-                <span class="text-sm text-muted">hours (0 = permanent)</span>
-              </label>
-              <button type="submit" class="btn btn-primary">Save</button>
-              <div class="form-error" id="autoblock-error"></div>
-              <div class="form-success" id="autoblock-success"></div>
-            </form>
-            <div id="blocked-ips-list" style="margin-top:16px"></div>
           </div>
         </div>
 

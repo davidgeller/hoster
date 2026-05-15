@@ -18,7 +18,11 @@ import {
   getHostAliases, addHostAlias, removeHostAlias, listAllHostAliases,
   listSiteFiles, reloadSite, uploadFileToSite,
   checkSiteHealth, rebuildCurrentSymlinks,
+  getCmsStatus, cmsInit,
 } from "./sites";
+import {
+  listCmsLibFiles, getCmsLibFile, updateCmsLibFile, resetCmsLibFile,
+} from "./cms-lib";
 import {
   getOverviewStats, getTopSites, getTopPaths, getTrafficOverTime,
   getBandwidthOverTime,
@@ -304,10 +308,69 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   const settingsMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/settings$/);
   if (settingsMatch && req.method === "POST") {
     const slug = settingsMatch[1];
-    const body = await req.json() as { root_dir?: string | null; spa?: boolean; mcp_enabled?: boolean; mcp_read_only?: boolean; mcp_auto_commit?: boolean };
+    const body = await req.json() as { root_dir?: string | null; spa?: boolean; mcp_enabled?: boolean; mcp_read_only?: boolean; mcp_auto_commit?: boolean; cms_enabled?: boolean };
     try {
-      const ok = updateSiteSettings(slug, body.root_dir ?? null, body.spa ?? false, body.mcp_enabled, body.mcp_read_only, body.mcp_auto_commit);
+      const ok = updateSiteSettings(slug, body.root_dir ?? null, body.spa ?? false, body.mcp_enabled, body.mcp_read_only, body.mcp_auto_commit, body.cms_enabled);
       return ok ? json({ ok: true }) : json({ error: "Not found" }, 404);
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
+  }
+
+  // --- CMS status / init / upgrade-lib ---
+  const cmsStatusMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/cms\/status$/);
+  if (cmsStatusMatch && req.method === "GET") {
+    const slug = cmsStatusMatch[1];
+    if (!getSite(slug)) return json({ error: "Not found" }, 404);
+    return json(getCmsStatus(slug));
+  }
+  const cmsInitMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/cms\/init$/);
+  if (cmsInitMatch && req.method === "POST") {
+    const slug = cmsInitMatch[1];
+    try {
+      const result = cmsInit(slug);
+      auditLog("cms_initialized", `${slug} (${result.scaffolded_files.length} files)`, ip);
+      return json({ ok: true, ...result, status: getCmsStatus(slug) });
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
+  }
+  // --- Global CMS library (editable JS + CSS shared by every CMS-enabled site) ---
+  if (path === "/_admin/api/cms-lib" && req.method === "GET") {
+    // Strip the content from the list endpoint — it can be large and the index
+    // view doesn't need it. /cms-lib/:path returns content.
+    const files = listCmsLibFiles().map(f => ({
+      path: f.path, version: f.version, etag: f.etag,
+      updated_at: f.updated_at, size: f.size,
+    }));
+    return json({ files });
+  }
+  const cmsLibFileMatch = path.match(/^\/_admin\/api\/cms-lib\/([a-z0-9._-]+)$/);
+  if (cmsLibFileMatch && req.method === "GET") {
+    const file = getCmsLibFile(cmsLibFileMatch[1]);
+    if (!file) return json({ error: "Not found" }, 404);
+    return json(file);
+  }
+  if (cmsLibFileMatch && req.method === "PUT") {
+    const filePath = cmsLibFileMatch[1];
+    const body = await req.json() as { content?: string; version?: string };
+    if (typeof body.content !== "string") {
+      return json({ error: "content is required" }, 400);
+    }
+    try {
+      const file = updateCmsLibFile(filePath, body.content, body.version);
+      auditLog("cms_lib_updated", `${filePath} -> v${file.version} (${file.size} bytes)`, ip);
+      return json(file);
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
+  }
+  if (path === "/_admin/api/cms-lib/reset" && req.method === "POST") {
+    const body = await req.json().catch(() => ({})) as { path?: string };
+    try {
+      const updated = resetCmsLibFile(body.path);
+      auditLog("cms_lib_reset", body.path || "all", ip);
+      return json({ files: updated });
     } catch (e: any) {
       return json({ error: e.message }, 400);
     }

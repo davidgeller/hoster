@@ -8,6 +8,7 @@ import {
 } from "./oauth";
 import { logRequest, extractRequestMeta, shouldTrack, isCountryAllowed, isIpBlocked, checkAndAutoBlock } from "./analytics";
 import { resolveSitePath, resolveAlias, resolveHostAlias, normalizeHost } from "./sites";
+import { serveCmsLibFile } from "./cms-lib";
 
 const SECURITY_HEADERS: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
@@ -167,6 +168,18 @@ export function createServer(port: number) {
       const hostAliasSlug = resolveHostAlias(normalizeHost(req.headers.get("host")));
 
       try {
+        // The global CMS library at `/_cms/<file>` serves every site's blog
+        // templates and MUST be reachable on every host — canonical and
+        // host-aliased — because the templates load it via an absolute URL.
+        // Match it first, before the infra-path 404 below.
+        const cmsLibMatch = path.match(/^\/_cms\/([a-z0-9._-]+)$/);
+        if (cmsLibMatch) {
+          const res = serveCmsLibFile(req, cmsLibMatch[1]);
+          status = res.status;
+          logReq(res);
+          return addSecurityHeaders(res);
+        }
+
         // Paths that opt out of the country/IP gating below: admin UI/API, MCP
         // endpoints (any /_mcp variant), OAuth endpoints, and OAuth/MCP discovery.
         const isInfraPath =
@@ -177,7 +190,8 @@ export function createServer(port: number) {
 
         // Block reserved infra paths on host-aliased hostnames. Admin, OAuth,
         // and MCP must only be reachable via the canonical hostname so an
-        // external custom domain never accidentally exposes them.
+        // external custom domain never accidentally exposes them. The CMS
+        // library carve-out above runs first, so it stays reachable.
         if (hostAliasSlug && isInfraPath) {
           status = 404;
           logReq();

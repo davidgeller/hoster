@@ -1038,6 +1038,21 @@ tr:hover td { background: var(--bg-hover); }
   margin-top: 0;
 }
 
+/* Page-level variant (used on the main Settings view, not in a modal). */
+.settings-tabs-page {
+  margin: 0 0 20px;
+  padding: 0;
+  flex-wrap: wrap;
+}
+
+.settings-page-panel {
+  display: none;
+}
+
+.settings-page-panel.active {
+  display: block;
+}
+
 /* --- File Drop --- */
 .file-drop {
   position: relative;

@@ -3,7 +3,8 @@ import {
   realpathSync, readFileSync, writeFileSync, appendFileSync
 } from "fs";
 import { join, resolve, dirname } from "path";
-import { getSite, listSites, listVersions, getVersion, commitVersion, markVersionModified, SITES_DIR, type Site } from "./sites";
+import { getSite, listSites, listVersions, getVersion, commitVersion, markVersionModified, uploadFileToSite, SITES_DIR, type Site } from "./sites";
+import { fetchRemoteMedia, MAX_BYTES as REMOTE_MAX_BYTES } from "./remote-fetch";
 import db, { sqliteNow } from "./db";
 
 // --- Schema ---
@@ -39,10 +40,12 @@ const MAX_WRITE_SIZE = 10 * 1024 * 1024; // 10 MB per tool call (base64 payload)
 const MAX_BINARY_FILE_SIZE = 100 * 1024 * 1024; // 100 MB total file size
 const MAX_AUDIT_ROWS = 10_000;
 
-// Allowed media formats for write_media_file, mapped to magic-byte validators.
-// Validator returns true if `bytes` starts with a valid signature for the format.
-// For chunked uploads we only validate on the first chunk (append:false); subsequent
-// appends are gated only by the extension allowlist since the header is already on disk.
+// Allowed media formats for write_media_file, mapped to content validators.
+// Validator returns true if `bytes` looks like a valid instance of the format.
+// For chunked uploads we only validate on the first chunk (append:false);
+// subsequent appends are gated only by the extension allowlist since the
+// header is already on disk. SVG bans chunked uploads (see CHUNKABLE) because
+// the script-rejection check needs to see the whole document.
 const MEDIA_FORMATS: Record<string, (b: Buffer) => boolean> = {
   ".jpg":  b => b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
   ".jpeg": b => b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
@@ -58,7 +61,28 @@ const MEDIA_FORMATS: Record<string, (b: Buffer) => boolean> = {
   ),
   // MP4 / ISO BMFF: bytes 4-7 are "ftyp"
   ".mp4":  b => b.length >= 12 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70,
+  // SVG: XML text, not a binary signature. Require an <svg root element near
+  // the top (after any XML declaration, DOCTYPE, comments, or BOM). Reject
+  // active-content vectors — script tags, JS-protocol URLs, and inline event
+  // handlers — so an agent can't import an SVG that runs code when a visitor
+  // views it directly (e.g. via <object>/<embed> or right-click → view image).
+  ".svg":  b => {
+    if (b.length < 5) return false;
+    // Cap at 1 MB for the text scan; that's plenty for any real SVG.
+    const head = b.subarray(0, Math.min(b.length, 1024 * 1024)).toString("utf-8");
+    const text = head.charCodeAt(0) === 0xFEFF ? head.slice(1) : head;
+    if (!/<svg[\s>]/i.test(text)) return false;
+    if (/<script[\s>]/i.test(text)) return false;
+    if (/<foreignObject[\s>]/i.test(text)) return false;
+    if (/\son\w+\s*=/i.test(text)) return false;
+    if (/javascript:/i.test(text)) return false;
+    return true;
+  },
 };
+// Extensions that may be split across multiple write_media_file calls. SVG
+// can't because we need to see the whole document to enforce the script
+// rejection — chunk 2 could otherwise smuggle in a <script> past the gate.
+const CHUNKABLE_MEDIA: Set<string> = new Set([".jpg", ".jpeg", ".png", ".gif", ".mp3", ".mp4"]);
 const MEDIA_EXTENSIONS = Object.keys(MEDIA_FORMATS).join(", ");
 
 function mediaExt(path: string): string | null {
@@ -340,7 +364,7 @@ const TOOLS = [
   },
   {
     name: "write_media_file",
-    description: "Write a media file (image or audio/video) to a site. Allowed formats: JPEG, PNG, GIF, MP3, MP4 — identified by both file extension and magic-byte signature. Content must be base64-encoded. Supports chunked uploads: set `append: false` (or omit) on the first call to create/truncate, then call again with `append: true` for additional chunks. Per-call payload limit is 10 MB of base64 (~7.5 MB raw); total file size limit is 100 MB. For files larger than ~7 MB raw, split into multiple calls. Blocked if site is read-only.",
+    description: "Write a media file (image, vector, or audio/video) to a site. Allowed formats: JPEG, PNG, GIF, SVG, MP3, MP4 — identified by file extension and content validation (magic-byte signature for binary formats; XML structure + script-vector rejection for SVG). Content must be base64-encoded. Supports chunked uploads for binary formats: set `append: false` (or omit) on the first call to create/truncate, then call again with `append: true` for additional chunks. Per-call payload limit is 10 MB of base64 (~7.5 MB raw); total file size limit is 100 MB. SVG must be uploaded in a single call (no `append: true`) so the full document can be checked for embedded scripts. Blocked if site is read-only.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -387,6 +411,20 @@ const TOOLS = [
       required: ["site"],
     },
   },
+  {
+    name: "fetch_remote_media",
+    description: "Import a media file from a public URL into a site. Hoster does the HTTP fetch server-side, so the bytes never round-trip through chat. Use this when building or updating a site that needs images, vectors, audio, or video from CDNs, icon libraries, stock-photo sites, or other public sources. Allowed formats and content validation match write_media_file (.jpg, .jpeg, .png, .gif, .svg, .mp3, .mp4). The destination extension must match the downloaded content — magic-byte check for binary formats, and XML + script-vector rejection for SVG. Source URL must be public http or https (no private/loopback/link-local IPs, no schemes other than http/https, ports 80/443 only). Max 50 MB per file, 30s total timeout, up to 5 redirects each re-validated. Blocked if site is read-only.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        site: { type: "string" as const, description: "Site slug" },
+        url: { type: "string" as const, description: "Public source URL (http or https)" },
+        path: { type: "string" as const, description: "Destination path within the site (e.g. 'media/hero.jpg'). The extension determines the expected format and is checked against the downloaded content's magic bytes." },
+        replace: { type: "boolean" as const, description: "Overwrite an existing file at the destination. Default false — fetch fails with an error if a file already exists there." },
+      },
+      required: ["site", "url", "path"],
+    },
+  },
 ];
 
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean };
@@ -424,11 +462,12 @@ const TOOL_SCOPE: Record<string, "read" | "write" | "commit"> = {
   list_versions: "read",
   write_file: "write",
   write_media_file: "write",
+  fetch_remote_media: "write",
   delete_file: "write",
   commit_version: "commit",
 };
 
-function handleToolCall(name: string, args: any, token: ValidatedToken, touched: Set<string>): ToolResult {
+async function handleToolCall(name: string, args: any, token: ValidatedToken, touched: Set<string>): Promise<ToolResult> {
   try {
     // For site-specific tools, check token scope
     const siteSlug = args.site as string | undefined;
@@ -462,6 +501,7 @@ function handleToolCall(name: string, args: any, token: ValidatedToken, touched:
           name: s.name,
           active: !!s.active,
           read_only: !!s.mcp_read_only,
+          cms_enabled: !!s.cms_enabled,
           file_count: s.file_count,
           size_bytes: s.size_bytes,
         }));
@@ -570,12 +610,23 @@ function handleToolCall(name: string, args: any, token: ValidatedToken, touched:
 
         const append = args.append === true;
 
-        // Verify magic bytes on the first chunk only. Appends can't be re-validated
-        // (header is already on disk) but the extension allowlist above still applies.
+        // Some formats (SVG) must be written in a single call so the full
+        // document is in front of the validator — chunk 2 could otherwise
+        // smuggle a <script> past a clean first chunk.
+        if (append && !CHUNKABLE_MEDIA.has(ext)) {
+          const err = `${ext} files must be uploaded in a single call (append:true is not supported for this format).`;
+          logAudit(token.id, token.label, name, siteSlug, args.path, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+
+        // Validate content on the first chunk. Appends can't be re-validated
+        // (header is already on disk) but the extension allowlist above still
+        // applies. Non-chunkable formats are always validated against the full
+        // payload because of the guard above.
         if (!append) {
           const validate = MEDIA_FORMATS[ext];
           if (!validate(bytes)) {
-            const err = `File content doesn't match ${ext} format (magic-byte signature mismatch). First chunk must contain a valid ${ext} header.`;
+            const err = `File content doesn't match ${ext} format. ${ext === ".svg" ? "Must contain a valid <svg> element and may not include <script>, <foreignObject>, javascript: URLs, or inline event handlers (on*=)." : `First chunk must contain a valid ${ext} header.`}`;
             logAudit(token.id, token.label, name, siteSlug, args.path, false, err);
             return { content: [{ type: "text", text: err }], isError: true };
           }
@@ -677,6 +728,75 @@ function handleToolCall(name: string, args: any, token: ValidatedToken, touched:
         return { content: [{ type: "text", text: `Committed snapshot${label ? ` '${label}'` : ""}; new working version is ${newVer.version}` }] };
       }
 
+      case "fetch_remote_media": {
+        if (!siteSlug) return missingArg("site");
+        if (typeof args.url !== "string") return missingArg("url");
+        if (typeof args.path !== "string") return missingArg("path");
+
+        const site = getSite(siteSlug);
+        if (!site || !site.mcp_enabled) return siteError(siteSlug, token, name);
+        if (site.mcp_read_only) {
+          const err = `Site '${siteSlug}' is read-only`;
+          logAudit(token.id, token.label, name, siteSlug, args.path, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+
+        // Destination extension must be on the media allowlist — this also
+        // determines which magic-byte signature we'll require below.
+        const ext = mediaExt(args.path);
+        if (!ext) {
+          const err = `Destination extension not allowed. Supported: ${MEDIA_EXTENSIONS}`;
+          logAudit(token.id, token.label, name, siteSlug, args.path, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+
+        // Fetch with all the SSRF/size/time defenses in remote-fetch.ts.
+        let fetched;
+        try {
+          fetched = await fetchRemoteMedia(args.url);
+        } catch (e: any) {
+          logAudit(token.id, token.label, name, siteSlug, args.url, false, e.message);
+          return { content: [{ type: "text", text: `Fetch failed: ${e.message}` }], isError: true };
+        }
+
+        // Magic-byte check: the downloaded bytes must match the destination
+        // extension. A mismatch most commonly means the server returned an
+        // HTML error page instead of an image — without this check we'd write
+        // the HTML out as foo.jpg and the agent wouldn't notice.
+        const validate = MEDIA_FORMATS[ext];
+        if (!validate(fetched.bytes)) {
+          const err = `Downloaded content doesn't match ${ext} signature (Content-Type: ${fetched.contentType || "unknown"}, ${fetched.bytes.length} bytes). The URL may serve an error page or a different format than the destination extension suggests.`;
+          logAudit(token.id, token.label, name, siteSlug, args.url, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+
+        // Use the shared upload helper so version stats, mcp_modified, and
+        // auto-commit are handled identically to other write paths.
+        try {
+          const upload = uploadFileToSite(siteSlug, args.path, fetched.bytes, { replace: args.replace === true });
+          touched.add(siteSlug);
+          logAudit(token.id, token.label, name, siteSlug, args.path, true, null);
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                ok: true,
+                path: upload.path,
+                bytes_written: upload.size,
+                source_url: fetched.finalUrl,
+                redirects: fetched.redirects,
+                content_type: fetched.contentType,
+                replaced: upload.replaced,
+                snapshot_version: upload.snapshot_version,
+              }, null, 2),
+            }],
+          };
+        } catch (e: any) {
+          logAudit(token.id, token.label, name, siteSlug, args.path, false, e.message);
+          return { content: [{ type: "text", text: e.message }], isError: true };
+        }
+      }
+
       default:
         return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
     }
@@ -701,7 +821,88 @@ function pathError(token: ValidatedToken, tool: string, slug: string, path: stri
   return { content: [{ type: "text", text: "Invalid path" }], isError: true };
 }
 
-function handleRpc(request: JsonRpcRequest, token: ValidatedToken, touched: Set<string>): JsonRpcResponse | null {
+// Build the MCP `instructions` string returned in the initialize response.
+// MCP clients (Claude.ai, Claude Code, Cursor, etc.) surface this as a soft
+// system prompt, so the agent gets the relevant context for the connected
+// site without the user having to brief it manually.
+//
+// Always covers the basic Hoster file-tool conventions. When the connection
+// is bound to a site that has CMS enabled (or when an unscoped token sees
+// any CMS-enabled sites), also includes the CMS schema + the read-mutate-
+// write index pattern that's easy to get wrong.
+function buildMcpInstructions(token: ValidatedToken): string {
+  const lines: string[] = [];
+
+  if (token.site_slug) {
+    lines.push(`You're connected to Hoster site '${token.site_slug}'. All file tools (read_file, write_file, delete_file, write_media_file, fetch_remote_media, list_files) operate on that site; you don't need to specify it elsewhere unless a tool's schema asks for it.`);
+  } else {
+    lines.push(`You're connected to Hoster with cross-site access. Call list_sites first to see which sites you can manage; each tool takes a 'site' argument.`);
+  }
+  lines.push(`To bring in images, audio, or video from public URLs, use fetch_remote_media — Hoster downloads server-side and writes the file directly. Avoid base64-streaming via write_media_file when you can just pass a URL.`);
+  lines.push(`Use commit_version to checkpoint a snapshot before non-trivial edits — that gives the human admin a clean rollback point.`);
+
+  // Determine CMS-enabled sites visible to this token.
+  const allSites = listSites().filter(s => s.mcp_enabled);
+  const visible = token.site_slug ? allSites.filter(s => s.slug === token.site_slug) : allSites;
+  const cmsSites = visible.filter(s => s.cms_enabled);
+
+  if (cmsSites.length) {
+    lines.push("");
+    if (token.site_slug && cmsSites.length === 1) {
+      lines.push(`## CMS is enabled on '${token.site_slug}'`);
+    } else {
+      lines.push("## Sites with the CMS enabled");
+      lines.push(cmsSites.map(s => `- ${s.slug}`).join("\n"));
+    }
+    lines.push(`
+Content lives as JSON files under \`.cms/content/\` in each CMS-enabled site:
+
+- \`.cms/content/index.json\` — master post list, METADATA ONLY (no bodies)
+- \`.cms/content/posts/<slug>.json\` — one file per post (metadata + body)
+- \`.cms/content/categories.json\` — category definitions
+- \`.cms/templates/\` — page templates; don't touch unless asked
+
+### Post file schema (\`.cms/content/posts/<slug>.json\`)
+
+\`\`\`json
+{
+  "slug": "my-post",
+  "title": "My Post",
+  "excerpt": "Short summary shown in listings.",
+  "publishedAt": "2026-05-12T09:00:00Z",
+  "updatedAt": "2026-05-12T09:00:00Z",
+  "categories": ["announcements"],
+  "tags": ["intro"],
+  "author": "Name",
+  "coverImage": null,
+  "draft": false,
+  "body": { "format": "markdown", "content": "# Heading\\n\\nBody…" },
+  "seo": { "metaDescription": null, "ogImage": null }
+}
+\`\`\`
+
+\`body.format\` is \`"markdown"\` (preferred) or \`"html"\`.
+
+### Index entry schema (one per post inside \`index.json.posts\`)
+
+Same fields as the post file MINUS \`body\` and \`seo\`. The index never contains body content.
+
+### Rules — easy to forget, please don't:
+
+1. **Adding a post**: write the new \`posts/<slug>.json\`, then read \`index.json\`, splice in a matching metadata entry, write \`index.json\` back. A post file without an index entry is invisible to the blog.
+2. **Editing**: rewrite \`posts/<slug>.json\`. If \`title\`, \`excerpt\`, \`categories\`, \`tags\`, \`author\`, \`coverImage\`, \`publishedAt\`, or \`draft\` changed, also update the matching entry in \`index.json\`. Bump \`updatedAt\` to the current ISO 8601 UTC timestamp in BOTH places.
+3. **Deleting**: \`delete_file\` the post JSON, then remove the index entry.
+4. **Drafts**: set \`"draft": true\` in both files. Drafts are hidden from listings by default; appending \`?preview=1\` to any CMS URL reveals them.
+5. **Slugs**: lowercase, hyphenated, alphanumeric. Must match the filename and the \`slug\` field.
+6. **Categories**: if you reference a category that isn't in \`categories.json\`, add it there too (\`{ slug, name, description }\`).
+
+When starting a CMS task, read \`index.json\` first to see what exists.`);
+  }
+
+  return lines.join("\n");
+}
+
+async function handleRpc(request: JsonRpcRequest, token: ValidatedToken, touched: Set<string>): Promise<JsonRpcResponse | null> {
   const { id, method, params } = request;
 
   switch (method) {
@@ -710,6 +911,7 @@ function handleRpc(request: JsonRpcRequest, token: ValidatedToken, touched: Set<
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: {} },
         serverInfo: { name: "hoster", version: "1.0.0" },
+        instructions: buildMcpInstructions(token),
       });
 
     case "notifications/initialized":
@@ -724,7 +926,7 @@ function handleRpc(request: JsonRpcRequest, token: ValidatedToken, touched: Set<
     case "tools/call": {
       const { name, arguments: args } = params || {};
       if (!name) return rpcError(id ?? null, -32602, "Missing tool name");
-      const result = handleToolCall(name, args || {}, token, touched);
+      const result = await handleToolCall(name, args || {}, token, touched);
       return rpcResult(id ?? null, result);
     }
 
@@ -818,15 +1020,20 @@ export async function handleMcp(req: Request, urlSlug: string | null = null): Pr
 
   // Batch requests
   if (Array.isArray(body)) {
-    const responses = body
-      .map((r: JsonRpcRequest) => handleRpc(r, token, touched))
-      .filter((r): r is JsonRpcResponse => r !== null);
+    // Process each in order so audit-log and side-effect ordering matches the
+    // request order. Tools rarely overlap, so the parallelism savings would
+    // be marginal and the predictability is worth more.
+    const responses: JsonRpcResponse[] = [];
+    for (const r of body as JsonRpcRequest[]) {
+      const out = await handleRpc(r, token, touched);
+      if (out) responses.push(out);
+    }
     response = responses.length === 0
       ? new Response(null, { status: 204 })
       : new Response(JSON.stringify(responses), { headers });
   } else {
     // Single request
-    const single = handleRpc(body, token, touched);
+    const single = await handleRpc(body, token, touched);
     response = single === null
       ? new Response(null, { status: 204 })
       : new Response(JSON.stringify(single), { headers });

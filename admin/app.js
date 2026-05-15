@@ -362,6 +362,8 @@ function navigateTo(view) {
 }
 
 async function loadSettings() {
+  bindSettingsTabs();
+
   try {
     const data = await api("/settings/countries");
     document.getElementById("allowed-countries").value = (data.countries || []).join(", ");
@@ -380,6 +382,139 @@ async function loadSettings() {
   loadMcpTokens();
   loadOauthGrants();
   loadMcpAudit();
+  loadCmsLibEditor();
+}
+
+// Settings page tabs — Access / MCP / OAuth / Security / Backup / CMS Library.
+// Bound once; the buttons live in the static view so this is idempotent.
+function bindSettingsTabs() {
+  const tabs = document.querySelectorAll("#view-settings .settings-tab[data-settings-tab]");
+  if (!tabs.length || tabs[0].dataset.bound) return;
+  const panels = document.querySelectorAll("#view-settings .settings-page-panel");
+  tabs.forEach(tab => {
+    tab.dataset.bound = "1";
+    tab.addEventListener("click", () => {
+      const target = tab.dataset.settingsTab;
+      tabs.forEach(t => t.classList.toggle("active", t === tab));
+      panels.forEach(p => {
+        const match = p.dataset.settingsPanel === target;
+        p.classList.toggle("active", match);
+        p.hidden = !match;
+      });
+    });
+  });
+}
+
+// --- CMS Library editor ---
+// Shows the JS + CSS served at /_cms/<file>. Stored in SQLite (cms_lib_files),
+// shared across every CMS-enabled site. Each file has its own version+etag
+// so edits propagate to browsers on the next request without forcing a reload.
+const cmsLibState = {
+  files: {},          // path -> last-loaded file record
+  current: "cms.js",
+  dirty: false,
+};
+
+async function loadCmsLibEditor() {
+  const editor = document.getElementById("cms-lib-content");
+  if (!editor) return;
+  try {
+    const { files } = await api("/cms-lib");
+    cmsLibState.files = {};
+    for (const f of files) cmsLibState.files[f.path] = f;
+    await selectCmsLibFile(cmsLibState.current);
+    bindCmsLibHandlers();
+  } catch (e) {
+    const err = document.getElementById("cms-lib-error");
+    if (err) err.textContent = e.message || "Failed to load CMS library";
+  }
+}
+
+async function selectCmsLibFile(path) {
+  cmsLibState.current = path;
+  document.getElementById("cms-lib-file").value = path;
+  document.getElementById("cms-lib-error").textContent = "";
+  document.getElementById("cms-lib-success").textContent = "";
+  try {
+    const file = await api("/cms-lib/" + encodeURIComponent(path));
+    cmsLibState.files[path] = file;
+    document.getElementById("cms-lib-content").value = file.content;
+    cmsLibState.dirty = false;
+    renderCmsLibMeta(file);
+  } catch (e) {
+    document.getElementById("cms-lib-error").textContent = e.message;
+  }
+}
+
+function renderCmsLibMeta(file) {
+  const meta = document.getElementById("cms-lib-meta");
+  if (!meta) return;
+  const dirty = cmsLibState.dirty ? ' · <span style="color:var(--warning,#b07000)">unsaved changes</span>' : "";
+  meta.innerHTML = `version <code>${esc(file.version)}</code> · ${file.size.toLocaleString()} bytes · updated ${esc(file.updated_at)}${dirty}`;
+}
+
+function bindCmsLibHandlers() {
+  const editor = document.getElementById("cms-lib-content");
+  const fileSelect = document.getElementById("cms-lib-file");
+  if (!editor || editor.dataset.bound) return;
+  editor.dataset.bound = "1";
+
+  editor.addEventListener("input", () => {
+    cmsLibState.dirty = true;
+    const current = cmsLibState.files[cmsLibState.current];
+    if (current) renderCmsLibMeta(current);
+  });
+
+  fileSelect.addEventListener("change", async () => {
+    if (cmsLibState.dirty && !confirm("Discard unsaved changes?")) {
+      fileSelect.value = cmsLibState.current;
+      return;
+    }
+    await selectCmsLibFile(fileSelect.value);
+  });
+
+  document.getElementById("cms-lib-discard-btn").addEventListener("click", async () => {
+    if (!cmsLibState.dirty) return;
+    if (!confirm("Discard unsaved changes?")) return;
+    await selectCmsLibFile(cmsLibState.current);
+  });
+
+  document.getElementById("cms-lib-save-btn").addEventListener("click", async () => {
+    const path = cmsLibState.current;
+    const content = editor.value;
+    const err = document.getElementById("cms-lib-error");
+    const ok = document.getElementById("cms-lib-success");
+    err.textContent = "";
+    ok.textContent = "";
+    try {
+      const file = await api("/cms-lib/" + encodeURIComponent(path), {
+        method: "PUT",
+        body: JSON.stringify({ content }),
+      });
+      cmsLibState.files[path] = file;
+      cmsLibState.dirty = false;
+      renderCmsLibMeta(file);
+      ok.textContent = `Saved ${path} (${file.size.toLocaleString()} bytes)`;
+    } catch (e) {
+      err.textContent = e.message;
+    }
+  });
+
+  document.getElementById("cms-lib-reset-btn").addEventListener("click", async () => {
+    const path = cmsLibState.current;
+    if (!confirm(`Reset ${path} to the bundled default? Any edits to ${path} will be lost.`)) return;
+    const err = document.getElementById("cms-lib-error");
+    const ok = document.getElementById("cms-lib-success");
+    err.textContent = "";
+    ok.textContent = "";
+    try {
+      await api("/cms-lib/reset", { method: "POST", body: JSON.stringify({ path }) });
+      await selectCmsLibFile(path);
+      ok.textContent = `Reset ${path} to bundled default.`;
+    } catch (e) {
+      err.textContent = e.message;
+    }
+  });
 }
 
 async function loadBlockedIps() {
@@ -1423,7 +1558,7 @@ async function loadSites() {
     btn.addEventListener("click", () => {
       const slug = btn.dataset.settings;
       const site = sites.find((s) => s.slug === slug);
-      if (site) showSiteSettings(slug, site.root_dir, site.spa, site.mcp_enabled, site.mcp_read_only, site.mcp_auto_commit);
+      if (site) showSiteSettings(slug, site.root_dir, site.spa, site.mcp_enabled, site.mcp_read_only, site.mcp_auto_commit, site.cms_enabled);
     });
   });
 }
@@ -1558,7 +1693,7 @@ function renderExplorerActions(site) {
   el.querySelector('[data-act="update"]').addEventListener("click", () => redeploySite(slug, site.name));
   el.querySelector('[data-act="upload"]').addEventListener("click", () => showUploadFile(slug, site.name, () => loadExplorer()));
   el.querySelector('[data-act="settings"]').addEventListener("click", () =>
-    showSiteSettings(slug, site.root_dir, site.spa, site.mcp_enabled, site.mcp_read_only, site.mcp_auto_commit));
+    showSiteSettings(slug, site.root_dir, site.spa, site.mcp_enabled, site.mcp_read_only, site.mcp_auto_commit, site.cms_enabled));
   el.querySelector('[data-act="reload"]').addEventListener("click", (e) => reloadSiteCache(slug, e.currentTarget));
   el.querySelector('[data-act="toggle"]').addEventListener("click", async () => {
     await toggleSiteActive(slug, !site.active);
@@ -1680,17 +1815,27 @@ window.deleteVersionBtn = async function (slug, version) {
   } catch (err) { alert(err.message); }
 };
 
-window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpReadOnly, mcpAutoCommit) {
-  // Fetch current aliases
+window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpReadOnly, mcpAutoCommit, cmsEnabled) {
+  // Always re-fetch the site so the modal reflects the current DB state. The
+  // caller's data may be stale: after a prior save, only the originating view
+  // (sites or explorer) gets refreshed, so opening Settings from the other
+  // view would otherwise show pre-save values and look like checkboxes "lost"
+  // their state.
   let aliases = [];
   let hostAliases = [];
   try {
-    const data = await api(`/sites/${slug}/aliases`);
-    aliases = data.aliases || [];
-  } catch (_) {}
-  try {
-    const data = await api(`/sites/${slug}/host-aliases`);
-    hostAliases = data.host_aliases || [];
+    const data = await api(`/sites/${slug}`);
+    if (data && data.site) {
+      const s = data.site;
+      rootDir = s.root_dir;
+      spa = s.spa;
+      mcpEnabled = s.mcp_enabled;
+      mcpReadOnly = s.mcp_read_only;
+      mcpAutoCommit = s.mcp_auto_commit;
+      cmsEnabled = s.cms_enabled;
+    }
+    aliases = (data && data.aliases) || [];
+    hostAliases = (data && data.host_aliases) || [];
   } catch (_) {}
 
   const modal = document.createElement("div");
@@ -1703,6 +1848,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
         <button type="button" class="settings-tab active" role="tab" data-tab="general">General</button>
         <button type="button" class="settings-tab" role="tab" data-tab="mcp">MCP</button>
         <button type="button" class="settings-tab" role="tab" data-tab="aliases">Aliases</button>
+        <button type="button" class="settings-tab" role="tab" data-tab="cms">CMS</button>
       </div>
       <form id="site-settings-form">
         <div class="settings-tab-panel active" data-panel="general">
@@ -1788,6 +1934,20 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
             <button type="button" class="btn btn-sm btn-primary" id="add-host-alias-btn">Add Host</button>
           </div>
           <div class="form-error" id="host-alias-error" style="margin-top:4px"></div>
+        </div>
+
+        <div class="settings-tab-panel" data-panel="cms">
+          <label style="display:flex;align-items:center;gap:10px;flex-direction:row">
+            <input type="checkbox" id="settings-cms" ${cmsEnabled ? "checked" : ""} style="width:auto;margin:0">
+            <span>CMS <small style="display:inline;margin:0">(enable a JSON-driven blog/content system for this site)</small></span>
+          </label>
+          <p class="text-sm text-muted" style="margin-left:28px;margin-top:4px;line-height:1.45">
+            When enabled, a <code>.cms/</code> directory is laid down in this site containing a zero-dependency JS library, two HTML page templates, and sample content. Posts are JSON files — edit them directly or have an AI tool write them via MCP. <strong>No build step.</strong>
+          </p>
+
+          <div id="cms-status-block" style="margin-top:16px;margin-left:28px"></div>
+
+          <div class="form-error" id="cms-error" style="margin-top:4px;margin-left:28px"></div>
         </div>
 
         <div class="modal-actions" style="margin-top:16px">
@@ -1969,6 +2129,105 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
 
   loadDelegates();
 
+  // --- CMS panel ---
+  async function loadCmsStatus() {
+    const block = modal.querySelector("#cms-status-block");
+    if (!block) return;
+    block.innerHTML = '<div class="text-sm text-muted">Loading…</div>';
+    try {
+      const status = await api(`/sites/${slug}/cms/status`);
+      renderCmsStatus(status);
+    } catch (e) {
+      block.innerHTML = `<div class="text-sm" style="color:var(--danger)">${esc(e.message || "Failed to load CMS status")}</div>`;
+    }
+  }
+
+  function renderCmsStatus(status) {
+    const block = modal.querySelector("#cms-status-block");
+    if (!block) return;
+    const enabledCheckbox = modal.querySelector("#settings-cms");
+    const enabledNow = enabledCheckbox && enabledCheckbox.checked;
+
+    if (!enabledNow && !status.scaffolded) {
+      block.innerHTML = `<div class="text-sm text-muted">Check the box above and click <strong>Save</strong> to initialize the CMS for this site.</div>`;
+      return;
+    }
+    if (enabledNow && !status.scaffolded) {
+      block.innerHTML = `
+        <div class="text-sm" style="margin-bottom:10px">CMS will be scaffolded on save. Files written:</div>
+        <ul class="text-sm text-muted" style="margin:0 0 10px 16px;line-height:1.6">
+          <li><code>.cms/lib/cms.js</code>, <code>.cms/lib/cms.css</code></li>
+          <li><code>.cms/templates/list.html</code>, <code>.cms/templates/story.html</code></li>
+          <li><code>.cms/content/index.json</code>, <code>categories.json</code>, <code>posts/welcome.json</code></li>
+        </ul>
+      `;
+      return;
+    }
+
+    const rows = [
+      ["Scaffold version", `<code>${esc(status.installed_version || "—")}</code>`],
+      ["Posts", `${status.post_count}${status.draft_count ? ` <span class="text-muted">(${status.draft_count} draft${status.draft_count === 1 ? "" : "s"})</span>` : ""}`],
+      ["Categories", String(status.categories)],
+    ];
+    const urlList = status.list_url
+      ? `<div style="margin-top:10px"><strong>URLs</strong><div class="text-sm" style="margin-top:4px;line-height:1.7">
+          <div>List: <a href="${esc(status.list_url)}" target="_blank" rel="noopener"><code>${esc(status.list_url)}</code></a></div>
+          <div>Story: <code>${esc(status.story_url)}?slug=…</code></div>
+          <div class="text-muted" style="font-size:0.85em">Add <code>?preview=1</code> to any CMS URL to reveal drafts.</div>
+        </div></div>`
+      : "";
+
+    const reinitBtn = `<button type="button" class="btn btn-sm btn-ghost" id="cms-reinit-btn" title="Re-create any missing scaffold files (existing files are preserved)">Re-initialize</button>`;
+
+    block.innerHTML = `
+      <table class="text-sm" style="border-collapse:collapse;margin-bottom:8px">
+        ${rows.map(([k, v]) => `<tr><td style="padding:2px 12px 2px 0;color:#666;vertical-align:top">${esc(k)}</td><td style="padding:2px 0">${v}</td></tr>`).join("")}
+      </table>
+      ${urlList}
+      <p class="text-sm text-muted" style="margin-top:10px;margin-bottom:0">
+        The JS library and CSS are served globally from <code>/_cms/cms.js</code> and <code>/_cms/cms.css</code>. Edit them once under <a href="#" data-go-settings="1">Settings → CMS Library</a> and every CMS-enabled site picks up the change.
+      </p>
+      <div style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap">
+        ${reinitBtn}
+      </div>
+    `;
+
+    const goSettings = block.querySelector('[data-go-settings]');
+    if (goSettings) goSettings.addEventListener("click", (e) => {
+      e.preventDefault();
+      modal.remove();
+      navigateTo("settings");
+      setTimeout(() => {
+        const card = document.getElementById("cms-lib-content");
+        if (card) card.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 80);
+    });
+    const reinitEl = modal.querySelector("#cms-reinit-btn");
+    if (reinitEl) reinitEl.addEventListener("click", async () => {
+      const errEl = modal.querySelector("#cms-error");
+      errEl.textContent = "";
+      reinitEl.disabled = true;
+      reinitEl.textContent = "Re-initializing…";
+      try {
+        const result = await api(`/sites/${slug}/cms/init`, { method: "POST" });
+        renderCmsStatus(result.status);
+      } catch (e) {
+        errEl.textContent = e.message;
+        reinitEl.disabled = false;
+        reinitEl.textContent = "Re-initialize";
+      }
+    });
+  }
+
+  // Re-render the CMS status block whenever the toggle changes so the user
+  // sees "will be scaffolded on save" vs the active status panel without
+  // having to save first.
+  modal.querySelector("#settings-cms").addEventListener("change", () => loadCmsStatus());
+
+  // Initial load: only fetch when the CMS tab gains focus, but prime once so
+  // it's ready immediately when the tab opens.
+  loadCmsStatus();
+
   // Save settings form
   modal.querySelector("#site-settings-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -1977,13 +2236,26 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
     const newMcp = document.getElementById("settings-mcp").checked;
     const newMcpReadOnly = document.getElementById("settings-mcp-readonly").checked;
     const newMcpAutoCommit = document.getElementById("settings-mcp-autocommit").checked;
+    const newCms = document.getElementById("settings-cms").checked;
     try {
+      // Persist the settings (root_dir, spa, mcp flags, cms_enabled).
       await api(`/sites/${slug}/settings`, {
         method: "POST",
-        body: JSON.stringify({ root_dir: newRoot, spa: newSpa, mcp_enabled: newMcp, mcp_read_only: newMcpReadOnly, mcp_auto_commit: newMcpAutoCommit }),
+        body: JSON.stringify({ root_dir: newRoot, spa: newSpa, mcp_enabled: newMcp, mcp_read_only: newMcpReadOnly, mcp_auto_commit: newMcpAutoCommit, cms_enabled: newCms }),
       });
+      // If CMS was just turned on and isn't scaffolded yet, lay the files down.
+      if (newCms && !cmsEnabled) {
+        try {
+          const status = await api(`/sites/${slug}/cms/status`);
+          if (!status.scaffolded) await api(`/sites/${slug}/cms/init`, { method: "POST" });
+        } catch (_) {}
+      }
       modal.remove();
-      loadSites();
+      // Refresh whichever site listing the user is currently viewing so the
+      // cards reflect new badges/flags. Both list functions hold their own
+      // `sites` closures, so refreshing only one would leave the other stale.
+      if (currentView === "explorer") loadExplorer();
+      else loadSites();
     } catch (err) {
       document.getElementById("settings-error").textContent = err.message;
     }
@@ -1997,38 +2269,48 @@ window.redeploySite = function (slug, name) {
 };
 
 window.showUploadFile = function (slug, name, onSuccess) {
+  // Queue entries are { file, relativePath }. For a plain file pick the
+  // relativePath is just the filename; for a dropped folder we preserve the
+  // path within the dropped tree (e.g. "images/icons/logo.svg"). We store
+  // our own array rather than the input's FileList because FileList is
+  // read-only and doesn't carry the path-within-folder for dropped dirs.
+  const queue = [];
+  const MAX_FILES = 5000;
+
   const modal = document.createElement("div");
   modal.className = "modal upload-file-modal";
   modal.innerHTML = `
     <div class="modal-backdrop"></div>
-    <div class="modal-content">
-      <h2>Upload File — ${esc(name)}</h2>
-      <p class="text-sm text-muted mb-2">Uploads a single file into <code>/${esc(slug)}</code>. The file goes into the site root by default. Provide a path to place it in a subdirectory; missing directories will be created.</p>
+    <div class="modal-content" style="max-width:560px">
+      <h2>Upload Files — ${esc(name)}</h2>
+      <p class="text-sm text-muted mb-2">Drop files <strong>or folders</strong> into <code>/${esc(slug)}</code>. Folder structure is preserved — dropping <code>images/</code> with nested files writes them as <code>images/&lt;subdir&gt;/&lt;file&gt;</code>. The destination field is an optional prefix prepended to each path.</p>
       <form id="upload-file-form">
         <label>
-          File
+          Files
           <div class="file-drop" id="upload-file-drop">
-            <input type="file" id="upload-file-input" required>
-            <p>Drop a file here or <strong>click to browse</strong></p>
-            <p class="text-sm text-muted" id="upload-file-name" style="margin-top:6px"></p>
+            <input type="file" id="upload-file-input" multiple>
+            <input type="file" id="upload-folder-input" webkitdirectory directory hidden>
+            <p>Drop files or folders here, <strong>click to browse files</strong>, or <a href="#" id="upload-folder-pick">choose a folder…</a></p>
+            <p class="text-sm text-muted" id="upload-file-hint" style="margin-top:6px">No files selected.</p>
           </div>
         </label>
+        <div id="upload-file-list" style="display:none;border:1px solid var(--border);border-radius:4px;max-height:220px;overflow:auto;margin-bottom:12px"></div>
         <label>
-          Destination Path <small>(optional — leave empty for root, or end with <code>/</code> to keep the file's name in a folder)</small>
-          <input type="text" id="upload-file-path" placeholder="e.g. images/logo.png  or  images/" autocomplete="off">
+          Destination Path <small>(optional prefix — leave empty for the site root)</small>
+          <input type="text" id="upload-file-path" placeholder="e.g. media/  (prefix prepended to each file's path)" autocomplete="off">
         </label>
         <label style="display:flex;align-items:center;gap:10px;flex-direction:row">
           <input type="checkbox" id="upload-file-replace" style="width:auto;margin:0">
-          <span>Replace existing file <small style="display:inline;margin:0">(overwrite if a file already exists at the destination)</small></span>
+          <span>Replace existing files <small style="display:inline;margin:0">(overwrite if a file already exists at the destination)</small></span>
         </label>
         <div class="modal-actions">
           <button type="button" class="btn btn-ghost close-modal">Cancel</button>
-          <button type="submit" class="btn btn-primary" id="upload-file-submit">Upload</button>
+          <button type="submit" class="btn btn-primary" id="upload-file-submit" disabled>Upload</button>
         </div>
         <div class="form-error" id="upload-file-error"></div>
         <div class="upload-progress" id="upload-file-progress" hidden>
-          <div class="progress-bar"><div class="progress-fill"></div></div>
-          <span>Uploading...</span>
+          <div class="progress-bar"><div class="progress-fill" id="upload-file-fill"></div></div>
+          <span id="upload-file-status">Uploading…</span>
         </div>
       </form>
     </div>
@@ -2039,49 +2321,246 @@ window.showUploadFile = function (slug, name, onSuccess) {
 
   const drop = modal.querySelector("#upload-file-drop");
   const fileInput = modal.querySelector("#upload-file-input");
-  const fileNameEl = modal.querySelector("#upload-file-name");
+  const folderInput = modal.querySelector("#upload-folder-input");
+  const hintEl = modal.querySelector("#upload-file-hint");
+  const listEl = modal.querySelector("#upload-file-list");
+  const submitBtn = modal.querySelector("#upload-file-submit");
+  const pathEl = modal.querySelector("#upload-file-path");
+
+  // Path field placeholder adapts: with a single plain file, "rename to" mode
+  // is allowed (path = full destination filename). Once any folder structure
+  // is involved (multi-file or any relativePath containing a slash), the
+  // path is purely a folder prefix.
+  function hasFolderEntries() {
+    return queue.some(e => e.relativePath.includes("/"));
+  }
+  function refreshPathPlaceholder() {
+    if (queue.length > 1 || hasFolderEntries()) {
+      pathEl.placeholder = "e.g. media/  (prefix prepended to each file's path)";
+    } else if (queue.length === 1) {
+      pathEl.placeholder = "e.g. media/logo.png  or  media/  (rename, or use as folder)";
+    } else {
+      pathEl.placeholder = "e.g. media/  (prefix prepended to each file's path)";
+    }
+  }
+
+  function renderList() {
+    if (!queue.length) {
+      listEl.style.display = "none";
+      listEl.innerHTML = "";
+      hintEl.textContent = "No files selected.";
+      submitBtn.disabled = true;
+      refreshPathPlaceholder();
+      return;
+    }
+    const total = queue.reduce((s, e) => s + e.file.size, 0);
+    const folderNote = hasFolderEntries() ? " · folder structure preserved" : "";
+    hintEl.textContent = `${queue.length} file${queue.length === 1 ? "" : "s"} selected · ${formatBytes(total)} total${folderNote}`;
+    listEl.style.display = "block";
+    listEl.innerHTML = queue.map((e, i) => `
+      <div class="upload-row" data-i="${i}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--border)">
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.relativePath)}">${esc(e.relativePath)}</span>
+        <span class="text-muted text-sm">${formatBytes(e.file.size)}</span>
+        <span class="upload-row-status text-sm text-muted" style="min-width:70px;text-align:right" data-status="${i}">queued</span>
+        <button type="button" class="btn btn-sm btn-ghost" data-remove="${i}" title="Remove from queue" style="padding:2px 8px">×</button>
+      </div>
+    `).join("");
+    const rows = listEl.querySelectorAll(".upload-row");
+    if (rows.length) rows[rows.length - 1].style.borderBottom = "none";
+    listEl.querySelectorAll("[data-remove]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const idx = parseInt(btn.dataset.remove, 10);
+        queue.splice(idx, 1);
+        renderList();
+      });
+    });
+    submitBtn.disabled = false;
+    refreshPathPlaceholder();
+  }
+
+  // Add entries, skipping duplicates by relativePath + size.
+  function addEntries(entries) {
+    let added = 0, skipped = 0;
+    for (const e of entries) {
+      if (queue.length + added >= MAX_FILES) { skipped++; continue; }
+      if (queue.some(q => q.relativePath === e.relativePath && q.file.size === e.file.size)) continue;
+      queue.push(e);
+      added++;
+    }
+    renderList();
+    if (skipped > 0) {
+      const errEl = modal.querySelector("#upload-file-error");
+      errEl.textContent = `Truncated at ${MAX_FILES} files — ${skipped} more were skipped. Upload in batches if needed.`;
+    }
+  }
+
+  // Recursively walk a FileSystemEntry tree, collecting all FileSystemFileEntry
+  // leaves with their full path (relative to the dropped root). Wraps the
+  // callback-based APIs as Promises. webkitGetAsEntry is non-standard but
+  // implemented in every major browser (Chrome, Firefox, Edge, Safari).
+  function readDirectoryEntries(dirReader) {
+    return new Promise((resolve, reject) => {
+      const out = [];
+      const readBatch = () => {
+        dirReader.readEntries(batch => {
+          if (!batch.length) { resolve(out); return; }
+          out.push(...batch);
+          readBatch();  // readEntries returns a partial batch; keep calling until empty
+        }, reject);
+      };
+      readBatch();
+    });
+  }
+  async function walkEntry(entry, pathPrefix) {
+    if (entry.isFile) {
+      const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+      // Strip the leading slash that some browsers add to fullPath.
+      const rel = (pathPrefix ? pathPrefix + "/" : "") + entry.name;
+      return [{ file, relativePath: rel }];
+    }
+    if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const children = await readDirectoryEntries(reader);
+      const nested = await Promise.all(
+        children.map(c => walkEntry(c, (pathPrefix ? pathPrefix + "/" : "") + entry.name))
+      );
+      return nested.flat();
+    }
+    return [];
+  }
+
+  // For a DataTransferItemList drop, prefer the entry-based traversal so
+  // folders are preserved. Fall back to plain file collection if items isn't
+  // available (very old browsers).
+  async function extractDroppedEntries(dataTransfer) {
+    const items = dataTransfer.items;
+    if (items && items.length && typeof items[0].webkitGetAsEntry === "function") {
+      const entries = [];
+      for (const item of items) {
+        const entry = item.webkitGetAsEntry();
+        if (entry) entries.push(entry);
+      }
+      const collected = await Promise.all(entries.map(e => walkEntry(e, "")));
+      return collected.flat();
+    }
+    // Fallback — no folder support.
+    return Array.from(dataTransfer.files || []).map(file => ({ file, relativePath: file.name }));
+  }
 
   fileInput.addEventListener("change", () => {
-    fileNameEl.textContent = fileInput.files[0] ? fileInput.files[0].name + ` · ${formatBytes(fileInput.files[0].size)}` : "";
+    if (fileInput.files && fileInput.files.length) {
+      addEntries(Array.from(fileInput.files).map(file => ({ file, relativePath: file.name })));
+    }
+    fileInput.value = "";  // Allow re-picking the same file.
+  });
+  modal.querySelector("#upload-folder-pick").addEventListener("click", (e) => {
+    e.preventDefault();
+    folderInput.click();
+  });
+  folderInput.addEventListener("change", () => {
+    // The folder picker populates each File's webkitRelativePath, e.g.
+    // "images/icons/logo.svg" — exactly the shape we want.
+    if (folderInput.files && folderInput.files.length) {
+      addEntries(Array.from(folderInput.files).map(file => ({
+        file,
+        relativePath: file.webkitRelativePath || file.name,
+      })));
+    }
+    folderInput.value = "";
   });
   drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("dragover"); });
   drop.addEventListener("dragleave", () => drop.classList.remove("dragover"));
-  drop.addEventListener("drop", (e) => {
+  drop.addEventListener("drop", async (e) => {
     e.preventDefault();
     drop.classList.remove("dragover");
-    if (e.dataTransfer.files[0]) {
-      fileInput.files = e.dataTransfer.files;
-      fileNameEl.textContent = fileInput.files[0].name + ` · ${formatBytes(fileInput.files[0].size)}`;
+    try {
+      const entries = await extractDroppedEntries(e.dataTransfer);
+      if (entries.length) addEntries(entries);
+    } catch (err) {
+      const errEl = modal.querySelector("#upload-file-error");
+      errEl.textContent = "Couldn't read dropped folder: " + (err.message || err);
     }
   });
 
+  // Compute the destination path for a single queue entry.
+  //   - Empty prefix → use the relativePath as-is.
+  //   - Prefix without trailing slash, single plain file, no folder structure
+  //     anywhere → treat prefix as a full destination filename (rename mode).
+  //   - Otherwise → prefix + "/" + relativePath, with prefix normalized.
+  function destinationFor(rawPrefix, entry, treatAsPrefix) {
+    const p = rawPrefix.trim().replace(/^\/+/, "");
+    if (!p) return entry.relativePath;
+    if (treatAsPrefix) {
+      const prefix = p.endsWith("/") ? p : p + "/";
+      return prefix + entry.relativePath;
+    }
+    // Single plain file, prefix without trailing slash → use as full path.
+    return p;
+  }
+
   modal.querySelector("#upload-file-form").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const file = fileInput.files[0];
-    const destPath = modal.querySelector("#upload-file-path").value.trim();
+    if (!queue.length) return;
+
+    const rawPath = pathEl.value;
     const replace = modal.querySelector("#upload-file-replace").checked;
     const errEl = modal.querySelector("#upload-file-error");
-    const submitBtn = modal.querySelector("#upload-file-submit");
     const progressEl = modal.querySelector("#upload-file-progress");
+    const fillEl = modal.querySelector("#upload-file-fill");
+    const statusEl = modal.querySelector("#upload-file-status");
+
     errEl.textContent = "";
-    if (!file) { errEl.textContent = "Pick a file to upload."; return; }
-
-    const fd = new FormData();
-    fd.append("file", file);
-    fd.append("path", destPath);
-    fd.append("replace", replace ? "true" : "false");
-
     submitBtn.disabled = true;
     progressEl.hidden = false;
-    try {
-      const result = await apiForm(`/sites/${slug}/upload-file`, fd);
-      modal.remove();
-      if (typeof onSuccess === "function") onSuccess(result);
-    } catch (err) {
-      errEl.textContent = err.message;
-      submitBtn.disabled = false;
-      progressEl.hidden = true;
+    fillEl.style.width = "0%";
+
+    // "Rename mode" is only available when the user dropped a single plain
+    // file with no folder structure AND typed a prefix that doesn't end in /.
+    const treatAsPrefix = queue.length > 1 || hasFolderEntries() || rawPath.trim().endsWith("/");
+    const total = queue.length;
+    let succeeded = 0;
+    const failures = []; // { name, message }
+
+    // Sequential — keeps order predictable, avoids slamming the server with
+    // parallel large uploads, and lets one failure not abort the rest.
+    for (let i = 0; i < queue.length; i++) {
+      const entry = queue[i];
+      const dest = destinationFor(rawPath, entry, treatAsPrefix);
+      const statusCell = listEl.querySelector(`[data-status="${i}"]`);
+      statusEl.textContent = `Uploading ${i + 1} of ${total}: ${dest}`;
+      if (statusCell) { statusCell.textContent = "uploading…"; statusCell.style.color = ""; }
+
+      const fd = new FormData();
+      fd.append("file", entry.file);
+      fd.append("path", dest);
+      fd.append("replace", replace ? "true" : "false");
+
+      try {
+        await apiForm(`/sites/${slug}/upload-file`, fd);
+        succeeded++;
+        if (statusCell) { statusCell.textContent = "done"; statusCell.style.color = "var(--success,#2a8a2a)"; }
+      } catch (err) {
+        failures.push({ name: entry.relativePath, message: err.message || "Upload failed" });
+        if (statusCell) {
+          statusCell.textContent = "failed";
+          statusCell.style.color = "var(--danger,#c33)";
+          statusCell.title = err.message || "Upload failed";
+        }
+      }
+      fillEl.style.width = `${Math.round(((i + 1) / total) * 100)}%`;
     }
+
+    if (failures.length === 0) {
+      statusEl.textContent = `Uploaded ${succeeded} file${succeeded === 1 ? "" : "s"}.`;
+      modal.remove();
+      if (typeof onSuccess === "function") onSuccess({ count: succeeded });
+      return;
+    }
+    statusEl.textContent = `Uploaded ${succeeded} of ${total} — ${failures.length} failed.`;
+    errEl.innerHTML = failures.map(f =>
+      `<div><code>${esc(f.name)}</code>: ${esc(f.message)}</div>`
+    ).join("");
+    submitBtn.disabled = false;
   });
 };
 

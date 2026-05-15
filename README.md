@@ -47,8 +47,10 @@ In every case the Hoster binary itself is identical — only the front-end TLS l
 - **Secure auth** — Argon2id password hashing, TOTP two-factor authentication, session tokens, CSRF protection, rate-limited login
 - **Light/Dark/Auto themes** — admin panel respects system preference
 - **Single binary** — compiles to a standalone executable with no runtime dependencies
-- **MCP server** — expose site files to AI tools (Claude Code, Cursor, etc.) via the Model Context Protocol, with chunked media uploads (JPEG, PNG, GIF, MP3, MP4) and magic-byte validation
-- **AI-first authoring** — create blank sites that AI tools populate via MCP; auto-snapshot the working version before the first AI edit so every session has a rollback point
+- **MCP server** — expose site files to AI tools (Claude Code, Cursor, etc.) via the Model Context Protocol, with chunked media uploads (JPEG, PNG, GIF, SVG, MP3, MP4), magic-byte / XML-script validation, and server-side `fetch_remote_media` for importing assets from public URLs
+- **AI-first authoring** — create blank sites that AI tools populate via MCP; auto-snapshot the working version before the first AI edit so every session has a rollback point; MCP `initialize` returns a context block that briefs the agent on the bound site (including CMS schema when enabled)
+- **Optional CMS** — per-site, zero-build, JSON-driven blog/content system with a globally editable vanilla-JS library at `/_cms/cms.js` that every CMS-enabled site shares
+- **Bulk uploads** — admin Upload modal accepts multi-file drops and entire folders, preserving directory structure
 - **Tiny footprint** — runs comfortably on a Raspberry Pi with minimal resources
 
 ## How It Works
@@ -267,6 +269,8 @@ With 2FA enabled, login requires both your password and a code from your authent
 
 Click **Update** on a site card, upload a new ZIP. This creates a new version while keeping previous versions available for rollback.
 
+For piecemeal edits to an existing version, use **Upload File** instead — the modal accepts one or more files at once and supports dropping entire folders (directory structure is preserved). Use the **Destination Path** field as an optional prefix to place the dropped files into a subdirectory.
+
 ### SPA (Single Page App) Support
 
 Hoster automatically detects Angular, React, and Vue builds:
@@ -483,23 +487,42 @@ Tokens are short-lived (1 hour access, 30-day rotating refresh) and bound to a s
 
 | Tool | Description |
 |------|-------------|
-| `list_sites` | List all MCP-enabled sites |
+| `list_sites` | List all MCP-enabled sites (now reports `cms_enabled` per site) |
 | `list_files` | List all files in a site's current deployment |
 | `read_file` | Read a file (text or base64 for binary) |
 | `write_file` | Write/overwrite a text file (blocked in read-only mode) |
-| `write_media_file` | Write/overwrite an image or audio/video file (JPEG, PNG, GIF, MP3, MP4) via base64, with magic-byte validation and chunked-upload support up to 100 MB |
+| `write_media_file` | Write/overwrite an image, vector, or audio/video file (JPEG, PNG, GIF, SVG, MP3, MP4) via base64, with format validation and chunked-upload support up to 100 MB |
+| `fetch_remote_media` | Import a media file directly from a public URL (no base64 round-trip). Server fetches the bytes, enforces SSRF defenses, and validates against the destination's expected format |
 | `delete_file` | Delete a file (blocked in read-only mode) |
 | `list_versions` | List all snapshot versions of a site with labels, sizes, and MCP-modified flags |
 | `commit_version` | Freeze the current working state as a labeled snapshot and fork a new mutable copy |
 
 ### Media File Uploads
 
-`write_media_file` accepts base64-encoded image and audio/video content and enforces two layers of validation:
+`write_media_file` accepts base64-encoded image, vector, and audio/video content and enforces two layers of validation:
 
-- **Extension allowlist** — only `.jpg`, `.jpeg`, `.png`, `.gif`, `.mp3`, `.mp4` are accepted
-- **Magic-byte signature** — the first chunk must contain a valid header for the claimed format (e.g. a `.png` path requires a real PNG header on disk)
+- **Extension allowlist** — only `.jpg`, `.jpeg`, `.png`, `.gif`, `.svg`, `.mp3`, `.mp4` are accepted
+- **Content validation**:
+  - Binary formats — first chunk must contain a valid magic-byte header (e.g. a `.png` path requires a real PNG header on disk)
+  - SVG — must contain a valid `<svg>` root element and may not include `<script>`, `<foreignObject>`, `javascript:` URLs, or inline event handlers (`on*=`), so an agent can't drop in a vector that executes code when a visitor views it directly
 
-For files larger than ~7 MB raw, the tool supports **chunked uploads**: the first call with `append: false` creates and validates the file, and subsequent calls with `append: true` extend it. Per-call payload is limited to 10 MB of base64; total file size is limited to 100 MB.
+For binary formats larger than ~7 MB raw, the tool supports **chunked uploads**: the first call with `append: false` creates and validates the file, and subsequent calls with `append: true` extend it. Per-call payload is limited to 10 MB of base64; total file size is limited to 100 MB. SVG must be uploaded in a single call so the full document is in front of the validator.
+
+### Importing Remote Media
+
+`fetch_remote_media` lets an agent ask Hoster to download an image, vector, or media file from a public URL and write it directly into a site. Useful when building or updating a site that needs assets from a CDN, icon library, or stock-photo site — the bytes never round-trip through chat.
+
+The server does the fetch and applies layered SSRF defenses:
+
+- **Scheme**: only `http:` and `https:`
+- **Port**: only 80 and 443
+- **DNS**: every resolved `A`/`AAAA` record must be a public unicast address — rejects RFC1918, loopback (127/8, ::1), CGNAT (100.64/10), link-local (169.254/16, fe80::/10, including cloud metadata IPs), multicast, ULA, and documentation ranges
+- **Redirects**: followed manually with a max of 5 hops, every hop re-validated
+- **Time**: 15 s per request, 30 s total
+- **Size**: 50 MB cap, enforced both via `Content-Length` pre-flight and stream-counting (aborts mid-stream if a server lies)
+- **Format**: the downloaded bytes must match the destination extension's validator — the same magic-byte / SVG-script check as `write_media_file`
+
+The tool returns the destination path, bytes written, final URL after redirects, content type, and whether a file was replaced. Blocked when the site is read-only.
 
 ### Auto-snapshot Before AI Edits
 
@@ -510,6 +533,72 @@ Combine with manual `commit_version` calls mid-session for finer-grained checkpo
 Tokens can be scoped to a single site, set to expire, and revoked at any time. All MCP activity is logged in the **MCP Activity Log** in Settings.
 
 ![MCP Activity Log](assets/mcp.jpg)
+
+## CMS (Optional, Per-Site)
+
+Hoster includes an optional **JSON-driven content system** that any site can opt into. There's no build step: posts are JSON files, the rendering library is vanilla JS, and editing a JSON file = publishing. Designed so AI tools can author content via MCP without any framework knowledge.
+
+### Enabling It
+
+1. Open **Site Settings** on the site you want to add a blog to
+2. Switch to the **CMS** tab and tick **CMS**
+3. Click **Save**
+
+Hoster scaffolds a `.cms/` directory inside the site:
+
+```
+.cms/
+├── VERSION                 — scaffold layout version
+├── templates/
+│   ├── list.html           — listing page (visited at /<slug>/.cms/templates/list.html)
+│   └── story.html          — single-post page (?slug=... + optional ?preview=1)
+└── content/
+    ├── index.json          — master post list (metadata only — no bodies)
+    ├── categories.json     — category definitions
+    └── posts/
+        └── welcome.json    — sample post (metadata + body)
+```
+
+Existing templates and content are preserved on re-init, so you can customize freely.
+
+### The Shared Library
+
+The JS + default CSS live globally at `/_cms/cms.js` and `/_cms/cms.css`, stored in SQLite and shared by every CMS-enabled site. This works on canonical, host-aliased, and path-routed hosts identically.
+
+Edit them once under **Settings → CMS Library** and every CMS-enabled site picks up the change on the next request (clients revalidate via ETag). "Reset to bundled defaults" reverts to whatever shipped with your current Hoster binary.
+
+### Authoring Posts
+
+Post files are flat JSON with a markdown (or HTML) body:
+
+```json
+{
+  "slug": "my-post",
+  "title": "My Post",
+  "excerpt": "Short summary shown in listings.",
+  "publishedAt": "2026-05-12T09:00:00Z",
+  "updatedAt": "2026-05-12T09:00:00Z",
+  "categories": ["announcements"],
+  "tags": ["intro"],
+  "author": "Name",
+  "coverImage": null,
+  "draft": false,
+  "body": { "format": "markdown", "content": "# Heading\n\nBody…" },
+  "seo": { "metaDescription": null, "ogImage": null }
+}
+```
+
+Adding a post is two writes: the new `posts/<slug>.json` plus a matching metadata entry spliced into `index.json` (the index never carries body content).
+
+When MCP connects to a CMS-enabled site, the `initialize` response includes the full schema and the read-mutate-write-index pattern as context — so any agent that opens the connection gets briefed automatically and doesn't need to be told the layout.
+
+### Drafts
+
+Set `"draft": true` in both the post file and its index entry. Drafts are hidden from listings and single-post views by default. Append `?preview=1` to any CMS URL to reveal them; drafts render with a `cms-draft` CSS class and a visible badge.
+
+### Styling
+
+All custom elements render into the light DOM with documented `.cms-*` class names (`.cms-title`, `.cms-meta`, `.cms-body`, `.cms-card`, `.cms-draft`, etc.). Your site's regular CSS targets them directly — no shadow DOM, no overrides needed.
 
 ## Configuration Backup & Restore
 
