@@ -4,6 +4,8 @@ A lightweight, self-hosted web hosting platform that runs as a single Linux bina
 
 Upload a ZIP file through the admin panel and your site is live at `https://yourdomain.com/your-site/` within seconds. Or attach a custom domain so the site lives at its own root.
 
+Hoster also takes **web content management** seriously. Beyond static-file hosting, its MCP command surface gives an AI tool everything it needs to build and maintain a real, complex site end-to-end: create, read, overwrite, rename/move, and delete files; resize and re-encode images server-side; import media straight from a URL; drive an optional zero-build CMS; and snapshot/roll back every change. You can browse and manage all of it from the **Site Explorer** without leaving the admin panel.
+
 ![Dashboard](assets/dashboard.jpg)
 
 ## What you can use it for
@@ -37,6 +39,7 @@ In every case the Hoster binary itself is identical — only the front-end TLS l
 
 - **Zero-config HTTPS** — when paired with Cloudflare or Caddy, certificates and renewal are handled outside Hoster
 - **Web admin panel** — deploy, update, and manage sites from anywhere
+- **Site Explorer** — a three-pane admin view to browse every site, inspect version/size/alias/MCP status at a glance, and live-preview the active deployment without leaving the panel
 - **Version management** — each upload creates a new version; roll back instantly
 - **SPA support** — auto-detects Angular, React, and Vue builds (with deep root directory detection); rewrites `<base href>` for subpath hosting
 - **Custom domains (host aliases)** — point any domain at a specific site so `spryly.com/about` serves the same content as `/spryly/about` on the canonical hostname, with no slug in the URL
@@ -47,7 +50,7 @@ In every case the Hoster binary itself is identical — only the front-end TLS l
 - **Secure auth** — Argon2id password hashing, TOTP two-factor authentication, session tokens, CSRF protection, rate-limited login
 - **Light/Dark/Auto themes** — admin panel respects system preference
 - **Single binary** — compiles to a standalone executable with no runtime dependencies
-- **MCP server** — expose site files to AI tools (Claude Code, Cursor, etc.) via the Model Context Protocol, with chunked media uploads (JPEG, PNG, GIF, SVG, MP3, MP4), magic-byte / XML-script validation, and server-side `fetch_remote_media` for importing assets from public URLs
+- **MCP server** — a full content-management command surface for AI tools (Claude Code, Cursor, etc.) over the Model Context Protocol: read/write/rename/delete files, chunked media uploads (JPEG, PNG, GIF, SVG, MP3, MP4) with magic-byte / XML-script validation, server-side `fetch_remote_media` for importing assets from public URLs, and server-side `resize_image` to scale, re-encode, and recompress images in place
 - **AI-first authoring** — create blank sites that AI tools populate via MCP; auto-snapshot the working version before the first AI edit so every session has a rollback point; MCP `initialize` returns a context block that briefs the agent on the bound site (including CMS schema when enabled)
 - **Optional CMS** — per-site, zero-build, JSON-driven blog/content system with a globally editable vanilla-JS library at `/_cms/cms.js` that every CMS-enabled site shares
 - **Bulk uploads** — admin Upload modal accepts multi-file drops and entire folders, preserving directory structure
@@ -62,6 +65,21 @@ User → [Cloudflare Tunnel | Cloudflare proxy | Caddy | nginx | nothing]
 ```
 
 Sites are served at `yourdomain.com/<slug>/` where each slug maps to an uploaded site. Or attach a custom domain via a Host alias and the site lives at the domain root. The admin panel lives at `/_admin`, OAuth/MCP under `/oauth/*` and `/_mcp/*` on the canonical hostname.
+
+## Site Explorer
+
+The **Site Explorer** is the admin panel's central management view. A filterable list of every site sits alongside a details pane and a live preview of the selected site's active deployment — so you can manage a fleet of sites from one screen.
+
+![Site Explorer](assets/site-explorer.jpg)
+
+For the selected site it surfaces, at a glance:
+
+- **Current version, size, file count, and last-updated time**
+- **Root directory** detection and **SPA** status
+- **MCP** on/off and read-only state
+- **Aliases** (path aliases) and **Host** aliases (custom domains)
+
+Inline actions cover the full lifecycle without leaving the page: **Visit**, **Files**, **Versions**, **Update**, **Upload File**, **Settings**, **Reload**, plus **Disable** and **Delete**. The preview pane refreshes on demand so you can confirm a deploy or an AI edit immediately.
 
 ## Prerequisites
 
@@ -374,7 +392,7 @@ That's it — `https://spryly.com/` now serves the site you mapped, with Cloudfl
 
 ## MCP (Model Context Protocol) Support
 
-Hoster includes a built-in MCP server that lets AI tools like Claude Code, Cursor, Claude.ai, and other MCP-compatible clients read and write files on your hosted sites.
+Hoster includes a built-in MCP server that turns AI tools like Claude Code, Cursor, Claude.ai, and other MCP-compatible clients into full content managers for your hosted sites. Beyond reading and writing files, the tool surface covers renaming/moving files, server-side image resizing and format conversion, importing media from public URLs, driving the optional CMS, and snapshotting versions — enough for an agent to build and maintain a complex, multi-page site without a build step or a local checkout.
 
 Two transports are supported:
 
@@ -493,6 +511,8 @@ Tokens are short-lived (1 hour access, 30-day rotating refresh) and bound to a s
 | `write_file` | Write/overwrite a text file (blocked in read-only mode) |
 | `write_media_file` | Write/overwrite an image, vector, or audio/video file (JPEG, PNG, GIF, SVG, MP3, MP4) via base64, with format validation and chunked-upload support up to 100 MB |
 | `fetch_remote_media` | Import a media file directly from a public URL (no base64 round-trip). Server fetches the bytes, enforces SSRF defenses, and validates against the destination's expected format |
+| `resize_image` | Resize, re-encode, and/or recompress a PNG or JPEG already in the site, writing the result back (blocked in read-only mode) |
+| `rename_file` | Rename or move a file within a site, across folders, creating destination directories as needed (blocked in read-only mode) |
 | `delete_file` | Delete a file (blocked in read-only mode) |
 | `list_versions` | List all snapshot versions of a site with labels, sizes, and MCP-modified flags |
 | `commit_version` | Freeze the current working state as a labeled snapshot and fork a new mutable copy |
@@ -523,6 +543,20 @@ The server does the fetch and applies layered SSRF defenses:
 - **Format**: the downloaded bytes must match the destination extension's validator — the same magic-byte / SVG-script check as `write_media_file`
 
 The tool returns the destination path, bytes written, final URL after redirects, content type, and whether a file was replaced. Blocked when the site is read-only.
+
+### Resizing & Re-encoding Images
+
+`resize_image` lets an agent shrink and convert raster images **server-side**, so a freshly imported 4 MB hero PNG doesn't ship to visitors at full size. It works on `.png`, `.jpg`, and `.jpeg` sources and can do any combination of:
+
+- **Scale down** — pass `width` and/or `height` (treated as max bounds, aspect ratio preserved, never upscaled) or `scale` (a `0–1` fraction)
+- **Convert format** — set `output` to a path with a different extension; PNG→JPEG flattens transparency onto a `background` color (default white), JPEG→PNG is lossless
+- **Recompress** — for JPEG output, lower `quality` (`1–100`, default 80) for a smaller, lossier file; PNG output is always lossless
+
+Omit `output` to overwrite the source in place. The result is size-checked against the 100 MB limit and the tool returns the original vs. output byte counts and final dimensions. Image processing uses the pure-JS [jimp](https://github.com/jimp-dev/jimp) library, so it runs inside the single cross-compiled binary with no native dependencies.
+
+### Renaming & Moving Files
+
+`rename_file` renames or moves a file within a site in one call — including across folders (e.g. `draft.html` → `archive/draft.html`), creating destination directories as needed. It refuses to clobber an existing file unless `replace: true`, and only operates on files, not directories. Both source and destination paths are validated against the same path-traversal guard as every other file tool.
 
 ### Auto-snapshot Before AI Edits
 

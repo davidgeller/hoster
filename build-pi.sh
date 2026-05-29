@@ -42,9 +42,11 @@ STAGING=$(mktemp -d)
 cp "${BIN_NAME}" "$STAGING/hoster"
 cp -r admin "$STAGING/"
 
-# Create tar.gz payload
+# Create tar.gz payload. COPYFILE_DISABLE=1 stops macOS tar from embedding
+# AppleDouble (._*) resource-fork files and xattrs, which otherwise litter the
+# install dir and spew "LIBARCHIVE.xattr" warnings when extracted on Linux.
 PAYLOAD=$(mktemp)
-tar cz -C "$STAGING" . > "$PAYLOAD"
+COPYFILE_DISABLE=1 tar cz -C "$STAGING" . > "$PAYLOAD"
 
 # Combine installer script + payload into single file
 OUTPUT="hoster-${ARCH_LABEL}.sh"

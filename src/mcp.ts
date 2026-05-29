@@ -1,8 +1,9 @@
 import {
   existsSync, readdirSync, statSync, mkdirSync, unlinkSync,
-  realpathSync, readFileSync, writeFileSync, appendFileSync
+  realpathSync, readFileSync, writeFileSync, appendFileSync, renameSync
 } from "fs";
 import { join, resolve, dirname } from "path";
+import { Jimp, JimpMime } from "jimp";
 import { getSite, listSites, listVersions, getVersion, commitVersion, markVersionModified, uploadFileToSite, SITES_DIR, type Site } from "./sites";
 import { fetchRemoteMedia, MAX_BYTES as REMOTE_MAX_BYTES } from "./remote-fetch";
 import db, { sqliteNow } from "./db";
@@ -90,6 +91,30 @@ function mediaExt(path: string): string | null {
   if (dot < 0) return null;
   const ext = path.substring(dot).toLowerCase();
   return MEDIA_FORMATS[ext] ? ext : null;
+}
+
+// Raster formats resize_image can decode (source) and encode (destination).
+// PNG keeps an alpha channel; JPEG is flattened onto a background when a
+// transparent source is converted to it. GIF/SVG/video are out of scope —
+// resampling those needs different handling than a single still frame.
+const RESIZABLE_FORMATS: Set<string> = new Set([".png", ".jpg", ".jpeg"]);
+
+function rasterExt(path: string): string | null {
+  const dot = path.lastIndexOf(".");
+  if (dot < 0) return null;
+  const ext = path.substring(dot).toLowerCase();
+  return RESIZABLE_FORMATS.has(ext) ? ext : null;
+}
+
+// Parse a CSS hex color (#RGB, #RRGGBB, #RRGGBBAA) into Jimp's 0xRRGGBBAA
+// integer. Returns null on malformed input. Used to flatten transparency when
+// converting a PNG to JPEG.
+function parseHexColor(s: string): number | null {
+  let h = s.trim().replace(/^#/, "");
+  if (h.length === 3) h = h.split("").map(c => c + c).join("");
+  if (h.length === 6) h += "ff";
+  if (h.length !== 8 || !/^[0-9a-fA-F]{8}$/.test(h)) return null;
+  return parseInt(h, 16) >>> 0;
 }
 
 // --- Token Management ---
@@ -425,6 +450,38 @@ const TOOLS = [
       required: ["site", "url", "path"],
     },
   },
+  {
+    name: "rename_file",
+    description: "Rename or move a file within a site. Works across folders (e.g. 'draft.html' → 'archive/draft.html'), creating destination directories as needed. Fails if the destination already exists unless `replace` is true. Source must be an existing file, not a directory. Blocked if site is read-only.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        site: { type: "string" as const, description: "Site slug" },
+        from: { type: "string" as const, description: "Current file path relative to site root" },
+        to: { type: "string" as const, description: "New file path relative to site root. May be in a different folder (moves the file)." },
+        replace: { type: "boolean" as const, description: "Overwrite an existing file at the destination. Default false — rename fails if a file already exists there." },
+      },
+      required: ["site", "from", "to"],
+    },
+  },
+  {
+    name: "resize_image",
+    description: "Resize and/or re-encode a PNG or JPEG image already in the site, writing the result back. Use this to shrink large images. Three things you can do, in any combination: (1) Scale down — give `width` and/or `height` (max bounds, aspect ratio preserved, never upscales) or `scale` (0–1 fraction). This is the main way to shrink a PNG. (2) Convert format — set `output` to a path with a different extension; PNG→JPEG flattens transparency onto `background` (default white), JPEG→PNG is lossless. (3) Recompress JPEG — for JPEG output, lower `quality` (1–100, default 80) for smaller, lossier files. PNG output is always lossless (transparency preserved); `quality` does not apply to it. If `output` is omitted the source is overwritten in place. Blocked if site is read-only.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        site: { type: "string" as const, description: "Site slug" },
+        path: { type: "string" as const, description: "Source image path relative to site root. Must be an existing .png, .jpg, or .jpeg file." },
+        output: { type: "string" as const, description: "Destination path (.png, .jpg, or .jpeg). Extension selects the output format. Omit to overwrite the source in place." },
+        width: { type: "number" as const, description: "Maximum output width in pixels. Aspect ratio is preserved; the image is never enlarged." },
+        height: { type: "number" as const, description: "Maximum output height in pixels. Aspect ratio is preserved; the image is never enlarged." },
+        scale: { type: "number" as const, description: "Scale factor between 0 and 1 (e.g. 0.5 = half size). Ignored if width or height is given." },
+        quality: { type: "number" as const, description: "JPEG output quality 1–100 (lower = smaller/lossier, default 80). Has no effect on PNG output, which is always lossless." },
+        background: { type: "string" as const, description: "Fill color (CSS hex like '#ffffff') used to flatten transparency when converting a transparent PNG to JPEG. Default white." },
+      },
+      required: ["site", "path"],
+    },
+  },
 ];
 
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean };
@@ -464,6 +521,8 @@ const TOOL_SCOPE: Record<string, "read" | "write" | "commit"> = {
   write_media_file: "write",
   fetch_remote_media: "write",
   delete_file: "write",
+  rename_file: "write",
+  resize_image: "write",
   commit_version: "commit",
 };
 
@@ -691,6 +750,194 @@ async function handleToolCall(name: string, args: any, token: ValidatedToken, to
         return { content: [{ type: "text", text: `Deleted ${args.path}` }] };
       }
 
+      case "rename_file": {
+        if (!siteSlug) return missingArg("site");
+        if (typeof args.from !== "string") return missingArg("from");
+        if (typeof args.to !== "string") return missingArg("to");
+
+        const rnSite = getSite(siteSlug);
+        if (rnSite?.mcp_read_only) {
+          const err = `Site '${siteSlug}' is read-only`;
+          logAudit(token.id, token.label, name, siteSlug, args.from, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+
+        const contentDir = getContentDir(siteSlug);
+        if (!contentDir) return siteError(siteSlug, token, name);
+        const fromResolved = safePath(contentDir, args.from);
+        if (!fromResolved) return pathError(token, name, siteSlug, args.from);
+        const toResolved = safePath(contentDir, args.to);
+        if (!toResolved) return pathError(token, name, siteSlug, args.to);
+
+        if (!existsSync(fromResolved)) {
+          logAudit(token.id, token.label, name, siteSlug, args.from, false, "Source not found");
+          return { content: [{ type: "text", text: `Source file '${args.from}' not found` }], isError: true };
+        }
+        if (statSync(fromResolved).isDirectory()) {
+          logAudit(token.id, token.label, name, siteSlug, args.from, false, "Is a directory");
+          return { content: [{ type: "text", text: "Cannot rename a directory, only files" }], isError: true };
+        }
+        if (fromResolved === toResolved) {
+          logAudit(token.id, token.label, name, siteSlug, args.to, false, "Same path");
+          return { content: [{ type: "text", text: "Source and destination are the same path" }], isError: true };
+        }
+        if (existsSync(toResolved)) {
+          if (statSync(toResolved).isDirectory()) {
+            logAudit(token.id, token.label, name, siteSlug, args.to, false, "Destination is a directory");
+            return { content: [{ type: "text", text: `Destination '${args.to}' is a directory` }], isError: true };
+          }
+          if (args.replace !== true) {
+            const err = `Destination '${args.to}' already exists. Set replace: true to overwrite.`;
+            logAudit(token.id, token.label, name, siteSlug, args.to, false, err);
+            return { content: [{ type: "text", text: err }], isError: true };
+          }
+        }
+
+        autoCommitIfNeeded(siteSlug, token);
+        mkdirSync(dirname(toResolved), { recursive: true });
+        renameSync(fromResolved, toResolved);
+        markCurrentModified(siteSlug);
+        logAudit(token.id, token.label, name, siteSlug, `${args.from} -> ${args.to}`, true, null);
+        return { content: [{ type: "text", text: `Renamed ${args.from} -> ${args.to}` }] };
+      }
+
+      case "resize_image": {
+        if (!siteSlug) return missingArg("site");
+        if (typeof args.path !== "string") return missingArg("path");
+
+        const rsSite = getSite(siteSlug);
+        if (rsSite?.mcp_read_only) {
+          const err = `Site '${siteSlug}' is read-only`;
+          logAudit(token.id, token.label, name, siteSlug, args.path, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+
+        if (!rasterExt(args.path)) {
+          const err = "Source must be a .png, .jpg, or .jpeg file";
+          logAudit(token.id, token.label, name, siteSlug, args.path, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+
+        const outPath = typeof args.output === "string" && args.output ? args.output : args.path;
+        const outExt = rasterExt(outPath);
+        if (!outExt) {
+          const err = "Output must be a .png, .jpg, or .jpeg file";
+          logAudit(token.id, token.label, name, siteSlug, outPath, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+
+        const contentDir = getContentDir(siteSlug);
+        if (!contentDir) return siteError(siteSlug, token, name);
+        const srcResolved = safePath(contentDir, args.path);
+        if (!srcResolved) return pathError(token, name, siteSlug, args.path);
+        const dstResolved = safePath(contentDir, outPath);
+        if (!dstResolved) return pathError(token, name, siteSlug, outPath);
+
+        if (!existsSync(srcResolved) || statSync(srcResolved).isDirectory()) {
+          logAudit(token.id, token.label, name, siteSlug, args.path, false, "Source not found");
+          return { content: [{ type: "text", text: `Source image '${args.path}' not found` }], isError: true };
+        }
+
+        // Validate numeric inputs before handing them to jimp.
+        const toDim = (v: any, label: string): number | null | string => {
+          if (v === undefined || v === null) return null;
+          if (typeof v !== "number" || !Number.isFinite(v) || v <= 0 || !Number.isInteger(v)) return `\`${label}\` must be a positive integer`;
+          return v;
+        };
+        const width = toDim(args.width, "width");
+        if (typeof width === "string") { logAudit(token.id, token.label, name, siteSlug, args.path, false, width); return { content: [{ type: "text", text: width }], isError: true }; }
+        const height = toDim(args.height, "height");
+        if (typeof height === "string") { logAudit(token.id, token.label, name, siteSlug, args.path, false, height); return { content: [{ type: "text", text: height }], isError: true }; }
+        if (args.scale !== undefined && args.scale !== null && (typeof args.scale !== "number" || !(args.scale > 0 && args.scale <= 1))) {
+          const err = "`scale` must be a number greater than 0 and at most 1";
+          logAudit(token.id, token.label, name, siteSlug, args.path, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+        let quality = 80;
+        if (args.quality !== undefined && args.quality !== null) {
+          if (typeof args.quality !== "number" || !Number.isInteger(args.quality) || args.quality < 1 || args.quality > 100) {
+            const err = "`quality` must be an integer between 1 and 100";
+            logAudit(token.id, token.label, name, siteSlug, args.path, false, err);
+            return { content: [{ type: "text", text: err }], isError: true };
+          }
+          quality = args.quality;
+        }
+        const bgInt = parseHexColor(typeof args.background === "string" && args.background ? args.background : "#ffffff");
+        if (bgInt === null) {
+          const err = "`background` must be a hex color like '#ffffff'";
+          logAudit(token.id, token.label, name, siteSlug, args.path, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+
+        const inputBytes = readFileSync(srcResolved);
+        const originalSize = inputBytes.length;
+        const isJpegOut = outExt === ".jpg" || outExt === ".jpeg";
+
+        let outBuf: Buffer;
+        let outMeta: { width?: number; height?: number } = {};
+        try {
+          const img = await Jimp.read(inputBytes);
+          const ow = img.width, oh = img.height;
+
+          // Resize, preserving aspect ratio and never enlarging the source.
+          if (width !== null || height !== null) {
+            const tw = width !== null ? Math.min(width, ow) : null;
+            const th = height !== null ? Math.min(height, oh) : null;
+            if (tw !== null && th !== null) {
+              img.scaleToFit({ w: tw, h: th });
+            } else if (tw !== null && tw < ow) {
+              img.resize({ w: tw });
+            } else if (th !== null && th < oh) {
+              img.resize({ h: th });
+            }
+          } else if (typeof args.scale === "number" && args.scale < 1) {
+            img.scale(args.scale);
+          }
+
+          if (isJpegOut) {
+            // JPEG has no alpha; composite over a solid background to flatten
+            // any transparency, then encode at the requested quality.
+            const bg = new Jimp({ width: img.width, height: img.height, color: bgInt });
+            bg.composite(img, 0, 0);
+            outBuf = await bg.getBuffer(JimpMime.jpeg, { quality });
+          } else {
+            // PNG keeps its alpha channel. jimp has no lossy PNG knob, so size
+            // reduction here comes from scaling; output is lossless deflate.
+            outBuf = await img.getBuffer(JimpMime.png);
+          }
+          outMeta = { width: img.width, height: img.height };
+        } catch (e: any) {
+          const err = `Image processing failed: ${e?.message || "unknown error"}`;
+          logAudit(token.id, token.label, name, siteSlug, args.path, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+
+        if (outBuf!.length > MAX_BINARY_FILE_SIZE) {
+          const err = `Output (${outBuf!.length} bytes) exceeds ${MAX_BINARY_FILE_SIZE / (1024 * 1024)} MB limit`;
+          logAudit(token.id, token.label, name, siteSlug, outPath, false, err);
+          return { content: [{ type: "text", text: err }], isError: true };
+        }
+
+        autoCommitIfNeeded(siteSlug, token);
+        mkdirSync(dirname(dstResolved), { recursive: true });
+        writeFileSync(dstResolved, outBuf!);
+        markCurrentModified(siteSlug);
+        logAudit(token.id, token.label, name, siteSlug, outPath, true, null);
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              ok: true,
+              source: args.path,
+              output: outPath,
+              original_bytes: originalSize,
+              output_bytes: outBuf!.length,
+              dimensions: outMeta.width ? `${outMeta.width}x${outMeta.height}` : undefined,
+            }, null, 2),
+          }],
+        };
+      }
+
       case "list_versions": {
         if (!siteSlug) return missingArg("site");
         const site = getSite(siteSlug);
@@ -834,11 +1081,12 @@ function buildMcpInstructions(token: ValidatedToken): string {
   const lines: string[] = [];
 
   if (token.site_slug) {
-    lines.push(`You're connected to Hoster site '${token.site_slug}'. All file tools (read_file, write_file, delete_file, write_media_file, fetch_remote_media, list_files) operate on that site; you don't need to specify it elsewhere unless a tool's schema asks for it.`);
+    lines.push(`You're connected to Hoster site '${token.site_slug}'. All file tools (read_file, write_file, delete_file, rename_file, write_media_file, fetch_remote_media, resize_image, list_files) operate on that site; you don't need to specify it elsewhere unless a tool's schema asks for it.`);
   } else {
     lines.push(`You're connected to Hoster with cross-site access. Call list_sites first to see which sites you can manage; each tool takes a 'site' argument.`);
   }
   lines.push(`To bring in images, audio, or video from public URLs, use fetch_remote_media — Hoster downloads server-side and writes the file directly. Avoid base64-streaming via write_media_file when you can just pass a URL.`);
+  lines.push(`To shrink large images use resize_image (scale down, convert PNG↔JPEG, or recompress JPEG/PNG). Use rename_file to rename or move a file in place rather than read+write+delete.`);
   lines.push(`Use commit_version to checkpoint a snapshot before non-trivial edits — that gives the human admin a clean rollback point.`);
 
   // Determine CMS-enabled sites visible to this token.

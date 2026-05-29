@@ -19,3 +19,6 @@ hoster
 # Local tooling state
 .claude/
 .shots/
+
+# Local deploy config (contains server host/user — keep private)
+deploy.sh

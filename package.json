@@ -1,7 +1,7 @@
 {
   "name": "hoster",
-  "version": "1.2.0",
-  "description": "Lightweight web hosting platform for Raspberry Pi",
+  "version": "1.3.0",
+  "description": "Lightweight self-hosted web hosting and content-management platform (single Linux binary)",
   "type": "module",
   "scripts": {
     "dev": "bun run --watch src/index.ts",
@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@types/qrcode": "^1.5.6",
+    "jimp": "^1.6.1",
     "otpauth": "^9.5.0",
     "qrcode": "^1.5.4"
   }
