@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Migrating Hoster to Windows Server 2022</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --panel-2: #f0f3f8;
+    --ink: #1b1f27;
+    --muted: #5b6573;
+    --line: #e2e6ec;
+    --accent: #1a6fe0;
+    --green: #1a7f37;
+    --amber: #9a6700;
+    --red: #cf222e;
+    --code-bg: #f2f4f7;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 48px 24px 96px; }
+  header.hero {
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    padding: 32px 32px 28px;
+    margin-bottom: 32px;
+  }
+  .eyebrow { color: var(--accent); font-weight: 600; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; margin: 0 0 8px; }
+  h1 { margin: 0 0 14px; font-size: 30px; line-height: 1.2; }
+  .lede { color: var(--muted); margin: 0; font-size: 16px; }
+  .lede strong { color: var(--ink); }
+  h2 {
+    margin: 44px 0 16px; font-size: 22px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  h3 { margin: 28px 0 10px; font-size: 17px; }
+  p { margin: 12px 0; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    font-family: "SF Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+    font-size: .88em;
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 1.5px 6px;
+    color: #b1361a;
+  }
+  table { border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 15px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
+  tr:last-child td { border-bottom: none; }
+  table.grid { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+
+  .callout { border-radius: 10px; padding: 16px 18px; margin: 18px 0; border: 1px solid var(--line); background: var(--panel); }
+  .callout .tag { font-weight: 700; font-size: 13px; letter-spacing: .03em; text-transform: uppercase; display: block; margin-bottom: 6px; }
+  .callout.crit { border-left: 4px solid var(--red); }
+  .callout.crit .tag { color: var(--red); }
+  .callout.warn { border-left: 4px solid var(--amber); }
+  .callout.warn .tag { color: var(--amber); }
+  .callout.info { border-left: 4px solid var(--accent); }
+  .callout.info .tag { color: var(--accent); }
+  .callout p { margin: 6px 0; }
+  .callout ul { margin: 8px 0 2px; padding-left: 20px; }
+
+  ol.phases { list-style: none; counter-reset: phase; padding: 0; margin: 20px 0; }
+  ol.phases > li {
+    counter-increment: phase;
+    position: relative;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    border-radius: 10px;
+    padding: 18px 20px 14px 64px;
+    margin: 14px 0;
+  }
+  ol.phases > li::before {
+    content: counter(phase);
+    position: absolute; left: 16px; top: 16px;
+    width: 32px; height: 32px;
+    display: grid; place-items: center;
+    background: var(--accent); color: #ffffff;
+    font-weight: 700; border-radius: 50%;
+  }
+  ol.phases > li.p0::before { content: "0"; background: var(--muted); color: #ffffff; }
+  ol.phases h3 { margin: 2px 0 8px; }
+  .checks { list-style: none; padding: 0; margin: 6px 0 0; }
+  .checks li { position: relative; padding: 5px 0 5px 28px; color: var(--ink); }
+  .checks li::before {
+    content: ""; position: absolute; left: 0; top: 9px;
+    width: 15px; height: 15px; border: 1.5px solid var(--line);
+    border-radius: 4px; background: var(--code-bg);
+  }
+  .why-list { padding-left: 22px; }
+  .why-list li { margin: 8px 0; }
+
+  footer { margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+  footer a { color: var(--muted); text-decoration: underline; }
+  .sources { margin: 10px 0 0; padding-left: 20px; }
+  .sources li { margin: 4px 0; }
+
+  @media print {
+    body { background: #fff; color: #111; }
+    .wrap { max-width: none; }
+    header.hero, table.grid, .callout, ol.phases > li { background: #fff; border-color: #ccc; }
+    a { color: #1a56c4; }
+    code { background: #f3f4f6; border-color: #ddd; color: #111; }
+    h2 { border-color: #ccc; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <p class="eyebrow">Deployment Runbook</p>
+    <h1>Migrating Hoster to Windows Server 2022</h1>
+    <p class="lede">
+      <strong>Approach:</strong> run the <em>unchanged</em> <code>bun-linux-x64</code> binary inside
+      <strong>WSL2</strong> (a lightweight Linux VM). No native-Windows build &mdash; the same
+      <code>hoster-x64.sh</code> artifact you ship to the Hostinger VPS runs as-is.
+    </p>
+  </header>
+
+  <h2>Why WSL2 and not native Windows</h2>
+  <p>Hoster has three POSIX dependencies that are broken or privileged on native Windows:</p>
+  <ol class="why-list">
+    <li><strong>Runtime symlinks</strong> &mdash; <code>_current</code> &rarr; active version dir, created on every
+        upload and rebuilt on self-heal (<code>src/sites.ts:228</code>, <code>symlinkSync</code>). Core to serving.</li>
+    <li><strong>Shelled-out POSIX tools at runtime</strong> &mdash; backup/restore calls <code>zip</code>,
+        <code>unzip</code>, and <code>cp -r</code> directly (<code>src/backup.ts:247,340,415,460</code>). Not present on stock Windows.</li>
+    <li><strong>systemd</strong> &mdash; the installer drops <code>hoster.service</code> (<code>deploy/install.sh:42</code>).</li>
+  </ol>
+  <p>WSL2 gives a real Linux kernel + systemd, so none of this needs porting.</p>
+
+  <h3>Verified against the live code</h3>
+  <table class="grid">
+    <thead><tr><th>Assumption</th><th>Verified at</th></tr></thead>
+    <tbody>
+      <tr><td>Runtime POSIX symlinks (<code>_current</code>)</td><td><code>src/sites.ts:228</code> &mdash; <code>symlinkSync</code></td></tr>
+      <tr><td>Shells out to <code>zip</code>/<code>unzip</code>/<code>cp</code> at runtime</td><td><code>src/backup.ts:247, 340, 415, 460</code></td></tr>
+      <tr><td>Installer extracts to <code>$HOME/hoster</code>, writes <code>hoster.service</code></td><td><code>deploy/install.sh:8, 42</code></td></tr>
+      <tr><td>Verifies via <code>/_admin/api/version</code></td><td><code>src/server.ts:202</code></td></tr>
+      <tr><td>Build &rarr; <code>hoster-x64.sh</code></td><td><code>build-pi.sh:52</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout crit">
+    <span class="tag">Critical gotcha &mdash; keep data on ext4</span>
+    <p>Hoster's data MUST live on the WSL2 ext4 filesystem (the distro's home, e.g. <code>~/hoster</code>).
+    SQLite WAL locking and symlinks across the Windows drive boundary (<code>/mnt/c</code>) are slow and
+    semi-broken. The installer extracts to <code>$HOME/hoster</code> inside the distro, which is correct
+    &mdash; don't relocate it to a Windows path.</p>
+  </div>
+
+  <h2>Server 2022 caveats <small style="color:var(--muted);font-weight:400;font-size:15px;">(not yet handled by <code>setup-windows.ps1</code>)</small></h2>
+  <p>WSL2 is fully supported on Server 2022 (since the June 2022 update, KB&nbsp;5014678+), including Server Core.
+     But the script was written with a desktop assumption and has one flaw for a headless server.</p>
+
+  <div class="callout crit">
+    <span class="tag">Headless auto-start &mdash; the logon task won't fire</span>
+    <p><code>setup-windows.ps1</code> registers an <code>-AtLogOn</code> scheduled task. A headless server that
+    nobody signs into never fires that trigger, so Hoster won't come back after a reboot. Replace it with one of:</p>
+    <ul>
+      <li><strong>Task Scheduler at startup, "Run whether user is logged on or not,"</strong> running <em>as the
+          specific user that owns the WSL distro</em> (stored credentials). WSL distros are registered
+          per-Windows-user, so do NOT run the task as <code>SYSTEM</code> &mdash; it won't see the distro.</li>
+      <li><strong>NSSM</strong> wrapping <code>wsl -d Ubuntu -u root -- systemctl is-active hoster</code> as a real
+          auto-start Windows service, again under the distro-owning user.</li>
+    </ul>
+    <p><code>.wslconfig [boot] command=</code> only runs a command <em>after</em> WSL boots &mdash; it does not boot
+    the VM at Windows startup, so you still need the Windows-side trigger above.</p>
+  </div>
+
+  <div class="callout warn">
+    <span class="tag">Use a normal admin user</span>
+    <p>The built-in <code>Administrator</code> account cannot run WSL2. Create a normal user with administrator
+    privileges and do the install / run the service under that account.</p>
+  </div>
+
+  <div class="callout warn">
+    <span class="tag">Server Core (no Desktop Experience)</span>
+    <p><code>wsl --install</code> works but prints two errors that are safe to ignore. Make sure the machine is
+    patched to at least KB&nbsp;5014678 (June 2022 cumulative) for WSL2 support.</p>
+  </div>
+
+  <h2>Runbook</h2>
+  <ol class="phases">
+    <li class="p0">
+      <h3>Prep &mdash; before touching the server</h3>
+      <ul class="checks">
+        <li>On a machine with Bun: <code>ARCH=x64 bash build-pi.sh</code> &rarr; produces <code>hoster-x64.sh</code>.</li>
+        <li>Take a fresh backup from prod (admin &rarr; Backup, or copy <code>~/hoster/data/hoster.db</code> + <code>~/hoster/sites/</code>).</li>
+        <li>Note current version: <code>curl -s http://&lt;prod&gt;/_admin/api/version</code>.</li>
+      </ul>
+    </li>
+    <li>
+      <h3>Stand up WSL2 on the server</h3>
+      <ul class="checks">
+        <li>Patch Windows Server 2022 fully (Check for Updates; verify KB&nbsp;5014678+).</li>
+        <li>Sign in as a <em>normal</em> admin user (not built-in Administrator).</li>
+        <li>Elevated PowerShell: <code>wsl --install</code> (reboots may be required).</li>
+        <li>After reboot, finish the Ubuntu user creation prompt.</li>
+        <li>Confirm WSL2: <code>wsl -l -v</code> shows the distro at VERSION 2.</li>
+      </ul>
+    </li>
+    <li>
+      <h3>Install Hoster</h3>
+      <ul class="checks">
+        <li>Copy <code>hoster-x64.sh</code> to the server.</li>
+        <li>Run <code>powershell -ExecutionPolicy Bypass -File deploy\setup-windows.ps1</code> (optionally <code>-LanExpose</code>, <code>-Port &lt;n&gt;</code>).</li>
+        <li>This enables systemd in WSL, runs the installer into ext4 <code>$HOME/hoster</code>, and installs+starts the service.</li>
+      </ul>
+    </li>
+    <li>
+      <h3>Migrate data</h3>
+      <ul class="checks">
+        <li>Stop the new service: <code>wsl -d Ubuntu -- sudo systemctl stop hoster</code>.</li>
+        <li>Copy prod <code>hoster.db</code> and <code>sites/</code> into <code>~/hoster/data/</code> and <code>~/hoster/sites/</code> inside ext4 (via <code>\\wsl$\Ubuntu\home\&lt;user&gt;\hoster</code> or scp into WSL).</li>
+        <li>Restart: <code>wsl -d Ubuntu -- sudo systemctl restart hoster</code>.</li>
+        <li>Startup self-heal rebuilds <code>_current</code> symlinks from the DB automatically.</li>
+      </ul>
+    </li>
+    <li>
+      <h3>Fix headless auto-start <small style="color:var(--muted);font-weight:400;">(see caveat above)</small></h3>
+      <ul class="checks">
+        <li>Replace the <code>-AtLogOn</code> <code>HosterWSL</code> task with a startup task that runs whether logged on or not, under the distro-owning user &mdash; OR install NSSM.</li>
+        <li>Reboot the server with nobody logged in; confirm Hoster comes back up.</li>
+      </ul>
+    </li>
+    <li>
+      <h3>Verify &amp; cut over</h3>
+      <ul class="checks">
+        <li><code>curl -s http://localhost:3500/_admin/api/version</code> returns the expected version.</li>
+        <li>Spot-check a few sites and the admin panel.</li>
+        <li>If Cloudflare-fronted: Hoster relies on <code>cf-connecting-ip</code> / <code>cf-ipcountry</code> headers for analytics &mdash; make sure the proxy forwards equivalents.</li>
+        <li>Repoint DNS / tunnel to the new host only after the above passes.</li>
+      </ul>
+    </li>
+  </ol>
+
+  <div class="callout info">
+    <span class="tag">Rollback</span>
+    <p>The old VPS stays untouched until DNS cutover. To roll back, repoint DNS/tunnel back to it.
+    Keep the Phase-0 backup off-box.</p>
+  </div>
+
+  <footer>
+    <strong>Sources</strong>
+    <ul class="sources">
+      <li><a href="https://techcommunity.microsoft.com/blog/itopstalkblog/wsl2-now-available-on-windows-server-2022/3447570">WSL2 on Windows Server 2022 (Microsoft)</a></li>
+      <li><a href="https://learn.microsoft.com/en-us/windows/wsl/install-on-server">Install WSL on Windows Server (Microsoft Learn)</a></li>
+      <li><a href="https://lucyllewy.com/wsl2-on-server-2022/">WSL2 on Server 2022 Core without Desktop Experience</a></li>
+      <li><a href="https://github.com/microsoft/WSL/issues/7365">Start WSL2 at boot without login (microsoft/WSL #7365)</a></li>
+      <li><a href="https://github.com/microsoft/WSL/discussions/14261">Using WSL2 in production on Windows Server (microsoft/WSL #14261)</a></li>
+    </ul>
+  </footer>
+
+</div>
+</body>
+</html>
