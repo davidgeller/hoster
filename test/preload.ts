@@ -33,3 +33,4 @@ import "../src/mcp";
 import "../src/oauth";
 import "../src/analytics";
 import "../src/auth";
+import "../src/webauthn";

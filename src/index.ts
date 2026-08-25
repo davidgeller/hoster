@@ -1,6 +1,7 @@
 import { dirname } from "path";
 import { createServer } from "./server";
 import { cleanExpiredSessions, cleanExpiredPending2fa } from "./auth";
+import { cleanExpiredChallenges } from "./webauthn";
 import { pruneExpired as pruneExpiredOauth } from "./oauth";
 import { rebuildCurrentSymlinks } from "./sites";
 
@@ -36,13 +37,14 @@ const server = createServer(PORT);
 console.log(`  Server running at http://localhost:${server.port}`);
 
 // --- Periodic cleanup ---
-// Runs hourly: expires sessions, pending 2FA tokens, OAuth codes, dead OAuth
+// Runs hourly: expires sessions, pending 2FA tokens, WebAuthn challenges, OAuth codes, dead OAuth
 // tokens, and unused DCR registrations. Keeps the DB from accumulating dead
 // state and lets time-based revocations actually take effect.
 function runPeriodicCleanup() {
   try {
     cleanExpiredSessions();
     cleanExpiredPending2fa();
+    cleanExpiredChallenges();
     pruneExpiredOauth();
   } catch (e: any) {
     console.error("Periodic cleanup error:", e?.message || e);

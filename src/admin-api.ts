@@ -9,11 +9,15 @@ import {
   createPending2faToken, consumePending2faToken,
   cleanExpiredPending2fa,
   isTotpRateLimited, recordTotpAttempt,
-  auditLog, getAuditLog
+  recordLoginAttempt,
+  auditLog, getAuditLog,
+  getSessionUser, destroySessionsForUser, verifyUserPassword,
+  getUserSiteSlugs, listAdminUsers, createAdminUser, updateAdminUser, deleteAdminUser,
 } from "./auth";
 import {
   listSites, getSite, deploySite, createBlankSite, deleteSite, toggleSite,
   listVersions, switchVersion, deleteVersion, commitVersion, updateSiteSettings,
+  setSitePinned, renameSite, zipCurrentVersion,
   getAliases, addAlias, removeAlias,
   getHostAliases, addHostAlias, removeHostAlias, listAllHostAliases,
   listSiteFiles, reloadSite, uploadFileToSite,
@@ -37,6 +41,11 @@ import {
   listSiteDelegates, createSiteDelegate, deleteSiteDelegate,
 } from "./oauth";
 import { createBackup, previewBackup, restoreBackup } from "./backup";
+import {
+  getRpContext, beginRegistration, finishRegistration,
+  beginLogin as beginPasskeyLogin, finishLogin as finishPasskeyLogin,
+  listCredentials, deleteCredential, hasCredentialsForRp,
+} from "./webauthn";
 
 function json(data: any, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data), {
@@ -49,12 +58,13 @@ function unauthorized(): Response {
   return json({ error: "Unauthorized" }, 401);
 }
 
-function sessionResponse(ip: string): Response {
-  // Rotate sessions on every successful login: any previously-issued cookie
-  // (stolen, leaked, or just stale) is invalidated. Hoster is single-admin so
-  // there are no other principals whose sessions we'd preserve.
-  destroyAllSessions();
-  const { sessionToken, csrfToken } = createSession(ip);
+function sessionResponse(ip: string, userId: number | null = null): Response {
+  // Rotate sessions on every successful login: invalidate any previously-issued
+  // cookie for THIS principal (stolen, leaked, or just stale). We scope to the
+  // logging-in principal so authenticating as one user doesn't evict the
+  // super-admin or other site users who are concurrently logged in.
+  destroySessionsForUser(userId);
+  const { sessionToken, csrfToken } = createSession(ip, userId);
   return json({ ok: true, csrf_token: csrfToken }, 200, { "Set-Cookie": sessionCookie(sessionToken) });
 }
 
@@ -82,8 +92,22 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   if (path === "/_admin/api/login" && req.method === "POST") {
     if (!isSetup()) return json({ error: "Not configured — set up password first" }, 400);
     if (isRateLimited(ip)) return json({ error: "Too many attempts. Try again later." }, 429);
-    const body = await req.json() as { password?: string };
+    const body = await req.json() as { username?: string; password?: string };
     if (!body.password) return json({ error: "Password required" }, 400);
+
+    const username = (body.username || "").trim();
+    if (username) {
+      // Site-scoped user login. No TOTP for site users in this version.
+      const userId = await verifyUserPassword(username, body.password, ip);
+      if (userId == null) {
+        auditLog("login_failed", `user:${username.toLowerCase()}`, ip);
+        return json({ error: "Invalid credentials" }, 401);
+      }
+      auditLog("login", `user:${username.toLowerCase()}`, ip);
+      return sessionResponse(ip, userId);
+    }
+
+    // Blank username → platform super-admin (password + optional TOTP).
     const valid = await verifyPassword(body.password, ip);
     if (!valid) {
       auditLog("login_failed", null, ip);
@@ -129,6 +153,42 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     return json({ error: "Invalid code" }, 401);
   }
 
+  // --- Passkey login (standalone, no password) ---
+  //
+  // A passkey is possession + user verification in one step, so it stands in
+  // for the whole password+TOTP flow rather than bolting onto it. Only the
+  // platform super-admin has passkeys; site-scoped users still use passwords.
+  if (path === "/_admin/api/login/passkey/options" && req.method === "POST") {
+    if (!isSetup()) return json({ error: "Not configured — set up password first" }, 400);
+    if (isRateLimited(ip)) return json({ error: "Too many attempts. Try again later." }, 429);
+    const rp = getRpContext(req);
+    if (!rp) return json({ error: "Passkeys require HTTPS (or localhost)" }, 400);
+    try {
+      return json(await beginPasskeyLogin(rp, ip));
+    } catch (e: any) {
+      return json({ error: e?.message || "Could not start passkey sign-in" }, 400);
+    }
+  }
+
+  if (path === "/_admin/api/login/passkey/verify" && req.method === "POST") {
+    if (!isSetup()) return json({ error: "Not configured — set up password first" }, 400);
+    if (isRateLimited(ip)) return json({ error: "Too many attempts. Try again later." }, 429);
+    const rp = getRpContext(req);
+    if (!rp) return json({ error: "Passkeys require HTTPS (or localhost)" }, 400);
+    const body = await req.json() as { response?: any };
+    if (!body.response) return json({ error: "Passkey response required" }, 400);
+    try {
+      const credential = await finishPasskeyLogin(rp, ip, body.response);
+      recordLoginAttempt(ip, true);
+      auditLog("login_passkey", credential.label, ip);
+      return sessionResponse(ip, null);
+    } catch (e: any) {
+      recordLoginAttempt(ip, false);
+      auditLog("login_passkey_failed", e?.message || null, ip);
+      return json({ error: e?.message || "Passkey sign-in failed" }, 401);
+    }
+  }
+
   // --- Logout ---
   if (path === "/_admin/api/logout" && req.method === "POST") {
     const token = getSessionToken(req);
@@ -141,7 +201,24 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     const token = getSessionToken(req);
     const authed = validateSession(token, ip);
     const csrf = authed ? getCsrfToken(token) : null;
-    return json({ authenticated: authed, setup: isSetup(), totp_enabled: isTotpEnabled(), csrf_token: csrf });
+    const principal = authed ? getSessionUser(token) : null;
+    const isSuper = !principal || principal.isSuperAdmin;
+    let username: string | null = null;
+    if (authed && principal && !principal.isSuperAdmin) {
+      const u = listAdminUsers().find(u => u.id === principal.userId);
+      username = u?.username ?? null;
+    }
+    // Passkeys are hostname-scoped, so both flags are answered for the host
+    // this request arrived on: `passkey_supported` is whether WebAuthn can run
+    // here at all (HTTPS/localhost), `passkey_enabled` whether one is enrolled.
+    const rp = getRpContext(req);
+    return json({
+      authenticated: authed, setup: isSetup(), totp_enabled: isTotpEnabled(), csrf_token: csrf,
+      is_super_admin: authed ? isSuper : false, username,
+      passkey_supported: rp !== null,
+      passkey_enabled: rp !== null && hasCredentialsForRp(rp.rpId, null),
+      rp_id: rp?.rpId ?? null,
+    });
   }
 
   // All remaining admin API routes require auth
@@ -154,6 +231,53 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   if (req.method !== "GET" && !validateCsrf(req, sessionToken)) {
     return json({ error: "Invalid CSRF token" }, 403);
   }
+
+  // --- Authorization: resolve the principal and gate access ---
+  // Super-admin (user_id NULL) sees everything. Site-scoped users may only
+  // touch their assigned sites and are blocked from platform-wide surfaces.
+  const principal = getSessionUser(sessionToken);
+  const isSuper = !principal || principal.isSuperAdmin;
+  const allowedSlugs: Set<string> | null = isSuper ? null : new Set(getUserSiteSlugs(principal!.userId!));
+  const canSite = (slug: string) => isSuper || allowedSlugs!.has(slug);
+  const forbidden = () => json({ error: "Forbidden" }, 403);
+
+  if (!isSuper) {
+    // 1) Platform-only surfaces — super-admin required.
+    const isPlatformPath =
+      path.startsWith("/_admin/api/settings/") ||
+      path.startsWith("/_admin/api/totp/") ||
+      path.startsWith("/_admin/api/webauthn/") ||
+      path === "/_admin/api/change-password" ||
+      path.startsWith("/_admin/api/mcp/") ||
+      path.startsWith("/_admin/api/oauth/") ||
+      path === "/_admin/api/audit" ||
+      path === "/_admin/api/cleanup" ||
+      path.startsWith("/_admin/api/config/") ||
+      path === "/_admin/api/cms-lib" || path.startsWith("/_admin/api/cms-lib/") ||
+      path === "/_admin/api/host-aliases" ||
+      path === "/_admin/api/users" || path.startsWith("/_admin/api/users/") ||
+      path === "/_admin/api/sites/repair" ||
+      path === "/_admin/api/sites/blank" ||
+      (path === "/_admin/api/sites" && req.method === "POST");
+    if (isPlatformPath) return forbidden();
+
+    // Creating/deleting whole sites is a provisioning action — super-admin only.
+    const siteRootDelete = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)$/);
+    if (siteRootDelete && req.method === "DELETE") return forbidden();
+
+    // 2) Per-site surfaces — must own the slug. The reserved words blank/repair
+    // are handled by the platform list above; everything else is a real slug.
+    const siteScoped = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)(?:\/|$)/);
+    if (siteScoped) {
+      const slug = siteScoped[1];
+      if (slug !== "blank" && slug !== "repair" && !canSite(slug)) return forbidden();
+    }
+    const analyticsSite = path.match(/^\/_admin\/api\/analytics\/site\/([a-z0-9-]+)$/);
+    if (analyticsSite && !canSite(analyticsSite[1])) return forbidden();
+  }
+
+  // Slugs to scope global analytics to, or null for the full (super-admin) view.
+  const scopeSlugs: string[] | null = isSuper ? null : Array.from(allowedSlugs!);
 
   // --- Change password ---
   if (path === "/_admin/api/change-password" && req.method === "POST") {
@@ -230,18 +354,79 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     return json({ recovery_codes: recoveryCodes });
   }
 
+  // --- Passkey management ---
+  //
+  // Enrolling or removing a passkey re-checks the password, matching the bar
+  // set by TOTP disable / recovery-code regeneration: a hijacked session must
+  // not be able to mint itself a durable second way in.
+  if (path === "/_admin/api/webauthn/credentials" && req.method === "GET") {
+    const rp = getRpContext(req);
+    return json({
+      supported: rp !== null,
+      rp_id: rp?.rpId ?? null,
+      credentials: listCredentials(null).map(c => ({
+        id: c.id,
+        label: c.label,
+        rp_id: c.rp_id,
+        created_at: c.created_at,
+        last_used: c.last_used,
+        current_host: rp !== null && c.rp_id === rp.rpId,
+      })),
+    });
+  }
+
+  if (path === "/_admin/api/webauthn/register/options" && req.method === "POST") {
+    const rp = getRpContext(req);
+    if (!rp) return json({ error: "Passkeys require HTTPS (or localhost)" }, 400);
+    const body = await req.json() as { password?: string };
+    if (!body.password) return json({ error: "Password required to add a passkey" }, 400);
+    if (!(await verifyPassword(body.password, ip))) return json({ error: "Invalid password" }, 401);
+    try {
+      return json(await beginRegistration(rp, ip, null));
+    } catch (e: any) {
+      return json({ error: e?.message || "Could not start passkey registration" }, 400);
+    }
+  }
+
+  if (path === "/_admin/api/webauthn/register/verify" && req.method === "POST") {
+    const rp = getRpContext(req);
+    if (!rp) return json({ error: "Passkeys require HTTPS (or localhost)" }, 400);
+    const body = await req.json() as { response?: any; label?: string };
+    if (!body.response) return json({ error: "Passkey response required" }, 400);
+    try {
+      const credential = await finishRegistration(rp, ip, body.response, body.label, null);
+      auditLog("passkey_added", `${credential.label} (${credential.rp_id})`, ip);
+      return json({ ok: true, credential: { id: credential.id, label: credential.label, rp_id: credential.rp_id } });
+    } catch (e: any) {
+      return json({ error: e?.message || "Passkey registration failed" }, 400);
+    }
+  }
+
+  const passkeyDelete = path.match(/^\/_admin\/api\/webauthn\/credentials\/(\d+)$/);
+  if (passkeyDelete && req.method === "DELETE") {
+    const body = await req.json().catch(() => ({})) as { password?: string };
+    if (!body.password) return json({ error: "Password required to remove a passkey" }, 400);
+    if (!(await verifyPassword(body.password, ip))) return json({ error: "Invalid password" }, 401);
+    const removed = deleteCredential(parseInt(passkeyDelete[1]), null);
+    if (!removed) return json({ error: "Passkey not found" }, 404);
+    auditLog("passkey_removed", `id:${passkeyDelete[1]}`, ip);
+    return json({ ok: true });
+  }
+
   // --- Sites CRUD ---
   if (path === "/_admin/api/sites" && req.method === "GET") {
-    const sites = listSites().map(s => {
-      const health = checkSiteHealth(s.slug);
-      return {
-        ...s,
-        aliases: getAliases(s.slug),
-        host_aliases: getHostAliases(s.slug),
-        health: health.status,
-        health_detail: health.status === "ok" ? null : health.detail,
-      };
-    });
+    const sites = listSites()
+      .filter(s => isSuper || allowedSlugs!.has(s.slug))
+      .map(s => {
+        const health = checkSiteHealth(s.slug);
+        return {
+          ...s,
+          aliases: getAliases(s.slug),
+          host_aliases: getHostAliases(s.slug),
+          health: health.status,
+          health_detail: health.status === "ok" ? null : health.detail,
+        };
+      });
     return json({ sites });
   }
 
@@ -304,12 +489,29 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     return ok ? json({ ok: true }) : json({ error: "Not found" }, 404);
   }
 
-  // --- Site settings (root_dir, SPA) ---
+  // --- Pin/unpin (sorts to top of site listings, shared across admins) ---
+  const pinMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/(pin|unpin)$/);
+  if (pinMatch && req.method === "POST") {
+    const [, slug, action] = pinMatch;
+    const ok = setSitePinned(slug, action === "pin");
+    if (ok) auditLog(action === "pin" ? "site_pinned" : "site_unpinned", slug, ip);
+    return ok ? json({ ok: true }) : json({ error: "Not found" }, 404);
+  }
+
+  // --- Site settings (root_dir, SPA, MCP, CMS, display name) ---
   const settingsMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/settings$/);
   if (settingsMatch && req.method === "POST") {
     const slug = settingsMatch[1];
-    const body = await req.json() as { root_dir?: string | null; spa?: boolean; mcp_enabled?: boolean; mcp_read_only?: boolean; mcp_auto_commit?: boolean; cms_enabled?: boolean };
+    const body = await req.json() as { name?: string; root_dir?: string | null; spa?: boolean; mcp_enabled?: boolean; mcp_read_only?: boolean; mcp_auto_commit?: boolean; cms_enabled?: boolean };
     try {
+      // Rename the display name if a (changed) name was provided.
+      if (typeof body.name === "string" && body.name.trim()) {
+        const site = getSite(slug);
+        if (site && body.name.trim() !== site.name) {
+          renameSite(slug, body.name);
+          auditLog("site_renamed", `${slug} -> ${body.name.trim()}`, ip);
+        }
+      }
       const ok = updateSiteSettings(slug, body.root_dir ?? null, body.spa ?? false, body.mcp_enabled, body.mcp_read_only, body.mcp_auto_commit, body.cms_enabled);
       return ok ? json({ ok: true }) : json({ error: "Not found" }, 404);
     } catch (e: any) {
@@ -399,6 +601,30 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     if (!site) return json({ error: "Not found" }, 404);
     const files = listSiteFiles(slug);
     return json({ files, version: site.current_version, root_dir: site.root_dir });
+  }
+
+  // --- Download the current version as a ZIP (only the active version) ---
+  const downloadMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/download$/);
+  if (downloadMatch && req.method === "GET") {
+    const slug = downloadMatch[1];
+    const site = getSite(slug);
+    if (!site) return json({ error: "Not found" }, 404);
+    if (!site.current_version) return json({ error: "Site has no current version" }, 400);
+    try {
+      const result = await zipCurrentVersion(slug);
+      if (!result) return json({ error: "Nothing to download" }, 404);
+      auditLog("site_downloaded", `${slug} (${site.current_version})`, ip);
+      return new Response(result.buffer, {
+        status: 200,
+        headers: {
+          "Content-Type": "application/zip",
+          "Content-Disposition": `attachment; filename="${result.filename}"`,
+          "Content-Length": String(result.buffer.length),
+        },
+      });
+    } catch (e: any) {
+      return json({ error: e.message }, 500);
+    }
   }
 
   // --- Site reload (clear caches, recalculate from disk) ---
@@ -545,51 +771,58 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   }
 
   // --- Analytics ---
+  // Site-scoped users see only their sites' data (scopeSlugs); super-admin (null) sees all.
   if (path === "/_admin/api/analytics/overview") {
     const hours = clampInt(new URL(req.url).searchParams.get("hours"), 24, 1, 8760);
-    return json(getOverviewStats(hours));
+    return json(getOverviewStats(hours, scopeSlugs));
   }
 
   if (path === "/_admin/api/analytics/top-sites") {
     const hours = clampInt(new URL(req.url).searchParams.get("hours"), 24, 1, 8760);
-    return json(getTopSites(hours));
+    return json(getTopSites(hours, 10, scopeSlugs));
   }
 
   if (path === "/_admin/api/analytics/top-paths") {
     const url = new URL(req.url);
     const hours = clampInt(url.searchParams.get("hours"), 24, 1, 8760);
     const site = url.searchParams.get("site") || null;
+    // A scoped user may only query a site they own; without a site they get nothing
+    // (top-paths can't aggregate across multiple sites).
+    if (!isSuper) {
+      if (site && !canSite(site)) return forbidden();
+      if (!site) return json([]);
+    }
     return json(getTopPaths(site, hours));
   }
 
   if (path === "/_admin/api/analytics/traffic") {
     const hours = clampInt(new URL(req.url).searchParams.get("hours"), 24, 1, 8760);
-    return json(getTrafficOverTime(hours));
+    return json(getTrafficOverTime(hours, scopeSlugs));
   }
 
   if (path === "/_admin/api/analytics/bandwidth") {
     const hours = clampInt(new URL(req.url).searchParams.get("hours"), 24, 1, 8760);
-    return json(getBandwidthOverTime(hours));
+    return json(getBandwidthOverTime(hours, scopeSlugs));
   }
 
   if (path === "/_admin/api/analytics/countries") {
     const hours = clampInt(new URL(req.url).searchParams.get("hours"), 24, 1, 8760);
-    return json(getTopCountries(hours));
+    return json(getTopCountries(hours, 15, scopeSlugs));
   }
 
   if (path === "/_admin/api/analytics/browsers") {
     const hours = clampInt(new URL(req.url).searchParams.get("hours"), 24, 1, 8760);
-    return json(getTopBrowsers(hours));
+    return json(getTopBrowsers(hours, 10, scopeSlugs));
   }
 
   if (path === "/_admin/api/analytics/status-codes") {
     const hours = clampInt(new URL(req.url).searchParams.get("hours"), 24, 1, 8760);
-    return json(getStatusCodeBreakdown(hours));
+    return json(getStatusCodeBreakdown(hours, scopeSlugs));
   }
 
   if (path === "/_admin/api/analytics/blocked") {
     const hours = clampInt(new URL(req.url).searchParams.get("hours"), 24, 1, 8760);
-    return json(getBlockedRequests(hours));
+    return json(getBlockedRequests(hours, 10, scopeSlugs));
   }
 
   if (path === "/_admin/api/analytics/recent") {
@@ -601,7 +834,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
       site: url.searchParams.get("site") || undefined,
       search: url.searchParams.get("search") || undefined,
     };
-    return json(getRecentRequests(limit, filters));
+    return json(getRecentRequests(limit, filters, scopeSlugs));
   }
 
   const siteStatsMatch = path.match(/^\/_admin\/api\/analytics\/site\/([a-z0-9-]+)$/);
@@ -721,6 +954,42 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   if (path === "/_admin/api/audit" && req.method === "GET") {
     const limit = clampInt(new URL(req.url).searchParams.get("limit"), 50, 1, 500);
     return json({ entries: getAuditLog(limit) });
+  }
+
+  // --- Site-scoped admin user management (super-admin only; gated above) ---
+  if (path === "/_admin/api/users" && req.method === "GET") {
+    return json({ users: listAdminUsers() });
+  }
+  if (path === "/_admin/api/users" && req.method === "POST") {
+    const body = await req.json() as { username?: string; password?: string; sites?: string[] };
+    try {
+      const id = await createAdminUser(body.username || "", body.password || "", body.sites || []);
+      auditLog("admin_user_created", `${(body.username || "").toLowerCase()} (${(body.sites || []).length} sites)`, ip);
+      return json({ ok: true, id, users: listAdminUsers() });
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
+  }
+  const userMatch = path.match(/^\/_admin\/api\/users\/(\d+)$/);
+  if (userMatch && req.method === "PUT") {
+    const id = parseInt(userMatch[1]);
+    const body = await req.json() as { password?: string; sites?: string[] };
+    try {
+      const opts: { password?: string; sites?: string[] } = {};
+      if (typeof body.password === "string" && body.password.length) opts.password = body.password;
+      if (Array.isArray(body.sites)) opts.sites = body.sites;
+      const ok = await updateAdminUser(id, opts);
+      if (ok) auditLog("admin_user_updated", `user ${id}`, ip);
+      return ok ? json({ ok: true, users: listAdminUsers() }) : json({ error: "User not found" }, 404);
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
+  }
+  if (userMatch && req.method === "DELETE") {
+    const id = parseInt(userMatch[1]);
+    const ok = deleteAdminUser(id);
+    if (ok) auditLog("admin_user_deleted", `user ${id}`, ip);
+    return ok ? json({ ok: true, users: listAdminUsers() }) : json({ error: "User not found" }, 404);
   }
 
   // --- Session cleanup ---

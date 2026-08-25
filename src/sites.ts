@@ -1,6 +1,7 @@
 import db from "./db";
 import { mkdirSync, rmSync, existsSync, readdirSync, statSync, symlinkSync, readlinkSync, unlinkSync, realpathSync, lstatSync, writeFileSync, readFileSync } from "fs";
 import { join, resolve } from "path";
+import { tmpdir } from "os";
 import { getScaffoldFiles, CMS_LIB_VERSION } from "./cms-scaffold";
 
 import { dirname } from "path";
@@ -25,6 +26,7 @@ export interface Site {
   mcp_auto_commit: number;  // 1 = snapshot current version before first MCP write
   cms_enabled: number;      // 1 = CMS feature enabled (JSON-driven content)
   cms_lib_version: string | null;  // version of the CMS lib currently scaffolded on disk
+  pinned_at: string | null; // when the site was pinned to the top of listings (NULL = not pinned)
 }
 
 export interface SiteVersion {
@@ -82,6 +84,7 @@ try { db.exec("ALTER TABLE sites ADD COLUMN mcp_read_only INTEGER DEFAULT 0"); }
 try { db.exec("ALTER TABLE sites ADD COLUMN mcp_auto_commit INTEGER DEFAULT 0"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN cms_enabled INTEGER DEFAULT 0"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN cms_lib_version TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN pinned_at TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE site_versions ADD COLUMN mcp_modified INTEGER DEFAULT 0"); } catch (_) {}
 
 // --- Site config cache (avoids DB + filesystem hits on every request) ---
@@ -97,7 +100,10 @@ export function invalidateSiteCache(slug?: string): void {
 }
 
 export function listSites(): Site[] {
-  return db.query("SELECT * FROM sites ORDER BY name").all() as Site[];
+  // Pinned sites first (most-recently pinned on top), then everything else by name.
+  return db.query(
+    "SELECT * FROM sites ORDER BY (pinned_at IS NULL), pinned_at DESC, name"
+  ).all() as Site[];
 }
 
 export function getSite(slug: string): Site | null {
@@ -511,6 +517,63 @@ export function toggleSite(slug: string, active: boolean): boolean {
   const result = db.run("UPDATE sites SET active = ? WHERE slug = ?", active ? 1 : 0, slug);
   invalidateSiteCache(slug);
   return result.changes > 0;
+}
+
+// Pin/unpin a site so it sorts to the top of listings (listSites). Shared across
+// all admins — the flag lives on the site record, not per-user.
+export function setSitePinned(slug: string, pinned: boolean): boolean {
+  const result = pinned
+    ? db.run("UPDATE sites SET pinned_at = datetime('now') WHERE slug = ?", slug)
+    : db.run("UPDATE sites SET pinned_at = NULL WHERE slug = ?", slug);
+  invalidateSiteCache(slug);
+  return result.changes > 0;
+}
+
+// Rename a site's display name. The slug (URL path, MCP identity, custom domains)
+// is intentionally left untouched — only the human-facing label changes.
+export function renameSite(slug: string, name: string): boolean {
+  const trimmed = (name || "").trim();
+  if (!trimmed) throw new Error("Name is required");
+  if (trimmed.length > 200) throw new Error("Name exceeds 200 characters");
+  const result = db.run(
+    "UPDATE sites SET name = ?, updated_at = datetime('now') WHERE slug = ?",
+    trimmed, slug
+  );
+  invalidateSiteCache(slug);
+  return result.changes > 0;
+}
+
+// Zip the site's CURRENT version directory (only that one version) into a
+// temporary archive and return its bytes plus a friendly filename. The caller
+// is responsible for sending the buffer; the temp file is removed before return.
+// Returns null if the site or its current version directory is missing.
+export async function zipCurrentVersion(slug: string): Promise<{ buffer: Buffer; filename: string } | null> {
+  const site = getSite(slug);
+  if (!site || !site.current_version) return null;
+
+  const versionDir = join(SITES_DIR, slug, site.current_version);
+  if (!existsSync(versionDir)) return null;
+
+  // Write the archive outside the site tree so it can't be picked up as a
+  // version dir or recursively included. Zip the version dir's *contents*
+  // (cwd = versionDir, target ".") so it extracts without a wrapper folder.
+  const zipPath = join(tmpdir(), `hoster-export-${slug}-${site.current_version}.zip`);
+  if (existsSync(zipPath)) rmSync(zipPath, { force: true });
+
+  const proc = Bun.spawnSync(["zip", "-r", "-q", "-y", zipPath, "."], {
+    cwd: versionDir,
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  if (proc.exitCode !== 0) {
+    const err = proc.stderr ? new TextDecoder().decode(proc.stderr) : "unknown error";
+    try { rmSync(zipPath, { force: true }); } catch (_) {}
+    throw new Error(`Failed to create archive: ${err.trim()}`);
+  }
+
+  const buffer = Buffer.from(readFileSync(zipPath));
+  try { rmSync(zipPath, { force: true }); } catch (_) {}
+  return { buffer, filename: `${slug}-${site.current_version}.zip` };
 }
 
 export function updateSiteSettings(

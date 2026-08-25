@@ -106,12 +106,23 @@ function exportDatabase(): Record<string, any[]> {
   // Blocked IPs
   tables.blocked_ips = db.prepare("SELECT * FROM blocked_ips").all();
 
+  // Site-scoped admin users and their site assignments
+  tables.admin_users = db.prepare("SELECT * FROM admin_users").all();
+  tables.admin_user_sites = db.prepare("SELECT * FROM admin_user_sites").all();
+
+  // Registered passkeys. Public keys only — nothing here is a secret, but
+  // losing them on restore would lock the admin out of passwordless login.
+  tables.webauthn_credentials = db.prepare("SELECT * FROM webauthn_credentials").all();
+
   return tables;
 }
 
 function importDatabase(tables: Record<string, any[]>) {
   const tx = db.transaction(() => {
     // Clear existing data in import order (respecting foreign keys)
+    db.exec("DELETE FROM admin_user_sites");
+    db.exec("DELETE FROM webauthn_credentials");
+    db.exec("DELETE FROM admin_users");
     db.exec("DELETE FROM site_aliases");
     db.exec("DELETE FROM site_versions");
     db.exec("DELETE FROM mcp_tokens");
@@ -123,6 +134,7 @@ function importDatabase(tables: Record<string, any[]>) {
     db.exec("DELETE FROM pending_2fa");
     db.exec("DELETE FROM login_attempts");
     db.exec("DELETE FROM totp_attempts");
+    db.exec("DELETE FROM webauthn_challenges");
 
     // Import config
     if (tables.config) {
@@ -132,7 +144,7 @@ function importDatabase(tables: Record<string, any[]>) {
 
     // Import sites
     if (tables.sites) {
-      const cols = ["slug", "name", "created_at", "updated_at", "size_bytes", "file_count", "active", "current_version", "root_dir", "spa", "mcp_enabled", "mcp_read_only"];
+      const cols = ["slug", "name", "created_at", "updated_at", "size_bytes", "file_count", "active", "current_version", "root_dir", "spa", "mcp_enabled", "mcp_read_only", "mcp_auto_commit", "cms_enabled", "cms_lib_version", "pinned_at"];
       const placeholders = cols.map(() => "?").join(", ");
       const stmt = db.prepare(`INSERT INTO sites (${cols.join(", ")}) VALUES (${placeholders})`);
       for (const row of tables.sites) {
@@ -173,6 +185,35 @@ function importDatabase(tables: Record<string, any[]>) {
       const stmt = db.prepare("INSERT INTO blocked_ips (ip, reason, blocked_at, expires_at) VALUES (?, ?, ?, ?)");
       for (const row of tables.blocked_ips) {
         stmt.run(row.ip, row.reason, row.blocked_at, row.expires_at);
+      }
+    }
+
+    // Import admin users (after sites, since admin_user_sites references both)
+    if (tables.admin_users) {
+      const cols = ["id", "username", "password_hash", "created_at", "last_login"];
+      const placeholders = cols.map(() => "?").join(", ");
+      const stmt = db.prepare(`INSERT INTO admin_users (${cols.join(", ")}) VALUES (${placeholders})`);
+      for (const row of tables.admin_users) {
+        stmt.run(...cols.map(c => row[c] ?? null));
+      }
+    }
+    if (tables.admin_user_sites) {
+      const stmt = db.prepare("INSERT INTO admin_user_sites (user_id, site_slug) VALUES (?, ?)");
+      for (const row of tables.admin_user_sites) {
+        // Skip rows whose site no longer exists in the imported set.
+        const exists = db.query("SELECT 1 FROM sites WHERE slug = ?").get(row.site_slug);
+        if (exists) stmt.run(row.user_id, row.site_slug);
+      }
+    }
+
+    // Import passkeys. Backups predating passkey support simply have no such
+    // table and leave the (already cleared) credential list empty.
+    if (tables.webauthn_credentials) {
+      const cols = ["id", "user_id", "credential_id", "public_key", "counter", "transports", "rp_id", "label", "created_at", "last_used"];
+      const placeholders = cols.map(() => "?").join(", ");
+      const stmt = db.prepare(`INSERT INTO webauthn_credentials (${cols.join(", ")}) VALUES (${placeholders})`);
+      for (const row of tables.webauthn_credentials) {
+        stmt.run(...cols.map(c => row[c] ?? null));
       }
     }
   });

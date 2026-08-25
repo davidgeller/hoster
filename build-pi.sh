@@ -20,6 +20,43 @@ case "$ARCH" in
   *) echo "Unknown ARCH '$ARCH'. Use arm64 or x64." >&2; exit 1 ;;
 esac
 
+# Pre-flight: compile for THIS machine and actually boot it.
+#
+# The shipped binary is cross-compiled for Linux and cannot be run here, so
+# "it compiled" says nothing about whether it starts. Module-initialization
+# order differs between `bun run` and `bun build --compile`, and a bundled
+# dependency that throws at import time takes the service down on the server
+# while every local check stays green. Compiling natively and booting it is
+# the cheapest way to catch that before it reaches production.
+echo "=== Pre-flight: boot-testing a native build ==="
+PREFLIGHT_DIR=$(mktemp -d)
+mkdir -p "$PREFLIGHT_DIR/sites" "$PREFLIGHT_DIR/admin"
+PREFLIGHT_PORT=39517
+bun build --compile src/main.ts --outfile "$PREFLIGHT_DIR/hoster" > /dev/null
+HOSTER_HOME="$PREFLIGHT_DIR" PORT=$PREFLIGHT_PORT "$PREFLIGHT_DIR/hoster" > "$PREFLIGHT_DIR/boot.log" 2>&1 &
+PREFLIGHT_PID=$!
+PREFLIGHT_OK=""
+for _ in $(seq 1 20); do
+  if curl -fsS "http://127.0.0.1:$PREFLIGHT_PORT/_admin/api/version" > /dev/null 2>&1; then
+    PREFLIGHT_OK=1
+    break
+  fi
+  sleep 0.5
+done
+kill $PREFLIGHT_PID 2>/dev/null || true
+wait $PREFLIGHT_PID 2>/dev/null || true
+if [ -z "$PREFLIGHT_OK" ]; then
+  echo ""
+  echo "BUILD ABORTED — the compiled binary did not start:" >&2
+  echo "" >&2
+  cat "$PREFLIGHT_DIR/boot.log" >&2
+  rm -rf "$PREFLIGHT_DIR"
+  exit 1
+fi
+rm -rf "$PREFLIGHT_DIR"
+echo "Pre-flight OK — binary boots and serves."
+echo ""
+
 # Generate build version: date + incrementing build number
 BUILD_VERSION=$(date +"%Y.%m.%d")-$(date +"%H%M%S")
 echo "=== Building Hoster v${BUILD_VERSION} for linux-${ARCH_LABEL} ==="
@@ -31,7 +68,7 @@ sed -i.bak "s/__BUILD_VERSION__/${BUILD_VERSION}/g" admin/index.html
 # Compile standalone binary
 echo "Compiling..."
 BIN_NAME="hoster-linux-${ARCH_LABEL}"
-bun build --compile --target=${BUN_TARGET} src/index.ts --outfile "${BIN_NAME}"
+bun build --compile --target=${BUN_TARGET} src/main.ts --outfile "${BIN_NAME}"
 
 # Restore source files
 mv src/index.ts.bak src/index.ts
