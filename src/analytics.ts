@@ -156,9 +156,20 @@ export function isCountryAllowed(country: string | null): boolean {
 
 // --- Dashboard queries ---
 
-export function getOverviewStats(hours: number = 24) {
+// Build an "AND site_slug IN (?,?...)" clause for scoping analytics to a set of
+// sites (site-scoped admin users). Returns the SQL fragment and its params.
+//   - slugs null/undefined → no scoping (super-admin: all sites)
+//   - slugs []             → matches nothing (a scoped user with no sites yet)
+function slugScope(slugs?: string[] | null): { clause: string; params: string[] } {
+  if (slugs == null) return { clause: "", params: [] };
+  if (slugs.length === 0) return { clause: " AND 1=0", params: [] };
+  return { clause: ` AND site_slug IN (${slugs.map(() => "?").join(",")})`, params: slugs };
+}
+
+export function getOverviewStats(hours: number = 24, slugs?: string[] | null) {
   // SQL-side cutoff so created_at (in datetime('now') format) compares correctly.
   const cutoff = `-${hours} hours`;
+  const scope = slugScope(slugs);
 
   const requestStats = db.query(`
     SELECT
@@ -169,23 +180,31 @@ export function getOverviewStats(hours: number = 24) {
       ROUND(MAX(response_time_ms), 1) as max_response_ms,
       COALESCE(SUM(request_bytes), 0) as total_request_bytes,
       COALESCE(SUM(response_bytes), 0) as total_response_bytes
-    FROM requests WHERE created_at > datetime('now', ?)
-  `).get(cutoff) as any;
+    FROM requests WHERE created_at > datetime('now', ?)${scope.clause}
+  `).get(cutoff, ...scope.params) as any;
 
-  // Active sites from the sites table, not requests
-  const siteCount = db.query("SELECT COUNT(*) as count FROM sites WHERE active = 1").get() as any;
+  // Active sites from the sites table, not requests. Scoped to the user's sites
+  // when slugs is provided.
+  const siteCount = slugs == null
+    ? (db.query("SELECT COUNT(*) as count FROM sites WHERE active = 1").get() as any)
+    : (slugs.length === 0
+        ? { count: 0 }
+        : (db.query(
+            `SELECT COUNT(*) as count FROM sites WHERE active = 1 AND slug IN (${slugs.map(() => "?").join(",")})`
+          ).get(...slugs) as any));
 
   return { ...requestStats, active_sites: siteCount.count };
 }
 
-export function getTopSites(hours: number = 24, limit: number = 10) {
+export function getTopSites(hours: number = 24, limit: number = 10, slugs?: string[] | null) {
   // SQL-side cutoff so created_at (in datetime('now') format) compares correctly.
   const cutoff = `-${hours} hours`;
+  const scope = slugScope(slugs);
   return db.query(`
     SELECT site_slug, COUNT(*) as hits, COUNT(DISTINCT ip) as visitors
-    FROM requests WHERE created_at > datetime('now', ?) AND site_slug IS NOT NULL
+    FROM requests WHERE created_at > datetime('now', ?) AND site_slug IS NOT NULL${scope.clause}
     GROUP BY site_slug ORDER BY hits DESC LIMIT ?
-  `).all(cutoff, limit);
+  `).all(cutoff, ...scope.params, limit);
 }
 
 export function getTopPaths(siteSlug: string | null, hours: number = 24, limit: number = 20) {
@@ -205,9 +224,10 @@ export function getTopPaths(siteSlug: string | null, hours: number = 24, limit: 
   `).all(cutoff, limit);
 }
 
-export function getTrafficOverTime(hours: number = 24) {
+export function getTrafficOverTime(hours: number = 24, slugs?: string[] | null) {
   // SQL-side cutoff so created_at (in datetime('now') format) compares correctly.
   const cutoff = `-${hours} hours`;
+  const scope = slugScope(slugs);
 
   // Adaptive bucket sizing: finer granularity for shorter time ranges
   let bucketExpr: string;
@@ -230,14 +250,15 @@ export function getTrafficOverTime(hours: number = 24) {
       ${bucketExpr} as bucket,
       COUNT(*) as hits,
       COUNT(DISTINCT ip) as visitors
-    FROM requests WHERE created_at > datetime('now', ?)
+    FROM requests WHERE created_at > datetime('now', ?)${scope.clause}
     GROUP BY bucket ORDER BY bucket
-  `).all(cutoff);
+  `).all(cutoff, ...scope.params);
 }
 
-export function getBandwidthOverTime(hours: number = 24) {
+export function getBandwidthOverTime(hours: number = 24, slugs?: string[] | null) {
   // Mirrors getTrafficOverTime() bucketing so the chart axes line up.
   const cutoff = `-${hours} hours`;
+  const scope = slugScope(slugs);
 
   let bucketExpr: string;
   if (hours <= 1) {
@@ -255,29 +276,31 @@ export function getBandwidthOverTime(hours: number = 24) {
       ${bucketExpr} as bucket,
       COALESCE(SUM(request_bytes), 0) as request_bytes,
       COALESCE(SUM(response_bytes), 0) as response_bytes
-    FROM requests WHERE created_at > datetime('now', ?)
+    FROM requests WHERE created_at > datetime('now', ?)${scope.clause}
     GROUP BY bucket ORDER BY bucket
-  `).all(cutoff);
+  `).all(cutoff, ...scope.params);
 }
 
-export function getTopCountries(hours: number = 24, limit: number = 15) {
+export function getTopCountries(hours: number = 24, limit: number = 15, slugs?: string[] | null) {
   // SQL-side cutoff so created_at (in datetime('now') format) compares correctly.
   const cutoff = `-${hours} hours`;
+  const scope = slugScope(slugs);
   return db.query(`
     SELECT country, COUNT(*) as hits, COUNT(DISTINCT ip) as visitors
-    FROM requests WHERE created_at > datetime('now', ?) AND country IS NOT NULL
+    FROM requests WHERE created_at > datetime('now', ?) AND country IS NOT NULL${scope.clause}
     GROUP BY country ORDER BY hits DESC LIMIT ?
-  `).all(cutoff, limit);
+  `).all(cutoff, ...scope.params, limit);
 }
 
-export function getTopBrowsers(hours: number = 24, limit: number = 10) {
+export function getTopBrowsers(hours: number = 24, limit: number = 10, slugs?: string[] | null) {
   // SQL-side cutoff so created_at (in datetime('now') format) compares correctly.
   const cutoff = `-${hours} hours`;
+  const scope = slugScope(slugs);
   return db.query(`
     SELECT browser, COUNT(*) as hits
-    FROM requests WHERE created_at > datetime('now', ?) AND browser IS NOT NULL
+    FROM requests WHERE created_at > datetime('now', ?) AND browser IS NOT NULL${scope.clause}
     GROUP BY browser ORDER BY hits DESC LIMIT ?
-  `).all(cutoff, limit);
+  `).all(cutoff, ...scope.params, limit);
 }
 
 export function getRecentRequests(limit: number = 50, filters: {
@@ -285,9 +308,12 @@ export function getRecentRequests(limit: number = 50, filters: {
   country?: string;
   site?: string;
   search?: string;
-} = {}) {
+} = {}, slugs?: string[] | null) {
   let where = "1=1";
   const params: any[] = [];
+
+  const scope = slugScope(slugs);
+  if (scope.clause) { where += scope.clause; params.push(...scope.params); }
 
   if (filters.status === "blocked") { where += " AND status = 403"; }
   else if (filters.status === "4xx") { where += " AND status >= 400 AND status < 500"; }
@@ -309,9 +335,10 @@ export function getRecentRequests(limit: number = 50, filters: {
   `).all(...params, limit);
 }
 
-export function getStatusCodeBreakdown(hours: number = 24) {
+export function getStatusCodeBreakdown(hours: number = 24, slugs?: string[] | null) {
   // SQL-side cutoff so created_at (in datetime('now') format) compares correctly.
   const cutoff = `-${hours} hours`;
+  const scope = slugScope(slugs);
   return db.query(`
     SELECT
       CASE
@@ -322,36 +349,37 @@ export function getStatusCodeBreakdown(hours: number = 24) {
         ELSE 'other'
       END as status_group,
       COUNT(*) as count
-    FROM requests WHERE created_at > datetime('now', ?)
+    FROM requests WHERE created_at > datetime('now', ?)${scope.clause}
     GROUP BY status_group ORDER BY status_group
-  `).all(cutoff);
+  `).all(cutoff, ...scope.params);
 }
 
-export function getBlockedRequests(hours: number = 24, limit: number = 10) {
+export function getBlockedRequests(hours: number = 24, limit: number = 10, slugs?: string[] | null) {
   // SQL-side cutoff so created_at (in datetime('now') format) compares correctly.
   const cutoff = `-${hours} hours`;
+  const scope = slugScope(slugs);
 
   const totalBlocked = db.query(`
-    SELECT COUNT(*) as count FROM requests WHERE created_at > datetime('now', ?) AND status = 403
-  `).get(cutoff) as any;
+    SELECT COUNT(*) as count FROM requests WHERE created_at > datetime('now', ?) AND status = 403${scope.clause}
+  `).get(cutoff, ...scope.params) as any;
 
   const blockedCountries = db.query(`
     SELECT country, COUNT(*) as hits, COUNT(DISTINCT ip) as ips
-    FROM requests WHERE created_at > datetime('now', ?) AND status = 403 AND country IS NOT NULL
+    FROM requests WHERE created_at > datetime('now', ?) AND status = 403 AND country IS NOT NULL${scope.clause}
     GROUP BY country ORDER BY hits DESC LIMIT ?
-  `).all(cutoff, limit);
+  `).all(cutoff, ...scope.params, limit);
 
   const blockedPaths = db.query(`
     SELECT path, COUNT(*) as hits, COUNT(DISTINCT ip) as ips
-    FROM requests WHERE created_at > datetime('now', ?) AND status = 403
+    FROM requests WHERE created_at > datetime('now', ?) AND status = 403${scope.clause}
     GROUP BY path ORDER BY hits DESC LIMIT ?
-  `).all(cutoff, limit);
+  `).all(cutoff, ...scope.params, limit);
 
   const blockedIps = db.query(`
     SELECT ip, country, COUNT(*) as hits
-    FROM requests WHERE created_at > datetime('now', ?) AND status = 403
+    FROM requests WHERE created_at > datetime('now', ?) AND status = 403${scope.clause}
     GROUP BY ip ORDER BY hits DESC LIMIT ?
-  `).all(cutoff, limit);
+  `).all(cutoff, ...scope.params, limit);
 
   return { total: totalBlocked.count, countries: blockedCountries, paths: blockedPaths, ips: blockedIps };
 }

@@ -4,6 +4,43 @@
 
 const API = "/_admin/api";
 
+// Principal scoping: super-admin (blank-username login) sees everything; a
+// site-scoped user sees only their sites and no platform Settings.
+let isSuperAdmin = true;
+let currentUsername = null;
+
+// Refresh the principal from the server and apply UI scoping. Called on initial
+// load and after every successful login (the SPA doesn't reload on login).
+async function refreshAuthScoping() {
+  try {
+    const auth = await api("/auth-check");
+    if (auth.csrf_token) csrfToken = auth.csrf_token;
+    isSuperAdmin = auth.is_super_admin !== false;
+    currentUsername = auth.username || null;
+  } catch (_) {
+    isSuperAdmin = true;
+    currentUsername = null;
+  }
+  applyAuthScoping();
+}
+
+// Toggle UI surfaces that only the platform super-admin may use.
+function applyAuthScoping() {
+  const settingsLink = document.querySelector('[data-view="settings"]');
+  if (settingsLink) {
+    const li = settingsLink.closest("li");
+    if (li) li.hidden = !isSuperAdmin;
+  }
+  document.body.classList.toggle("scoped-user", !isSuperAdmin);
+  // Provisioning controls (deploy / create blank site) — super-admin only.
+  ["upload-btn", "blank-site-btn"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.hidden = !isSuperAdmin;
+  });
+  const who = document.getElementById("current-user-label");
+  if (who) who.textContent = currentUsername ? `Signed in as ${currentUsername}` : "";
+}
+
 // Country code to name resolver (uses browser's built-in Intl API)
 const countryNames = new Intl.DisplayNames(["en"], { type: "region" });
 function countryName(code) {
@@ -72,6 +109,9 @@ async function apiForm(path, formData) {
 let currentView = "dashboard";
 let pendingTotpToken = null;
 let csrfToken = null;
+// Whether the login screen should offer the passkey button: a passkey is
+// enrolled for *this* hostname and the browser implements WebAuthn.
+let passkeyLoginAvailable = false;
 
 // --- Init ---
 document.addEventListener("DOMContentLoaded", async () => {
@@ -80,11 +120,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   try {
     const auth = await api("/auth-check");
     if (auth.csrf_token) csrfToken = auth.csrf_token;
+    passkeyLoginAvailable = !!auth.passkey_enabled && passkeySupportedByBrowser();
+    applyPasskeyLoginVisibility();
     if (!auth.setup) {
       showScreen("setup-screen");
     } else if (!auth.authenticated) {
       showScreen("login-screen");
     } else {
+      isSuperAdmin = auth.is_super_admin !== false;
+      currentUsername = auth.username || null;
+      applyAuthScoping();
       showScreen("main-screen");
       navigateTo("dashboard");
     }
@@ -110,6 +155,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // --- Login Form ---
   document.getElementById("login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
+    const username = document.getElementById("login-username")?.value.trim() || "";
     const pw = document.getElementById("login-password").value;
     const errEl = document.getElementById("login-error");
     errEl.textContent = "";
@@ -117,7 +163,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const res = await fetch(API + "/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: pw }),
+        body: JSON.stringify({ username, password: pw }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Login failed");
@@ -131,6 +177,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
 
       if (data.csrf_token) csrfToken = data.csrf_token;
+      await refreshAuthScoping();
       showScreen("main-screen");
       navigateTo("dashboard");
     } catch (err) { errEl.textContent = err.message; }
@@ -148,9 +195,37 @@ document.addEventListener("DOMContentLoaded", async () => {
         body: JSON.stringify({ pending_token: pendingTotpToken, code }),
       });
       pendingTotpToken = null;
+      await refreshAuthScoping();
       showScreen("main-screen");
       navigateTo("dashboard");
     } catch (err) { errEl.textContent = err.message; }
+  });
+
+  // --- Passkey Sign-In ---
+  document.getElementById("login-passkey-btn").addEventListener("click", async () => {
+    const btn = document.getElementById("login-passkey-btn");
+    const errEl = document.getElementById("login-passkey-error");
+    errEl.textContent = "";
+    btn.disabled = true;
+    try {
+      const options = await api("/login/passkey/options", { method: "POST", body: "{}" });
+      const assertion = await navigator.credentials.get({
+        publicKey: decodeRequestOptions(options),
+      });
+      if (!assertion) throw new Error("No passkey selected");
+      await api("/login/passkey/verify", {
+        method: "POST",
+        body: JSON.stringify({ response: encodeAssertion(assertion) }),
+      });
+      await refreshAuthScoping();
+      showScreen("main-screen");
+      navigateTo("dashboard");
+    } catch (err) {
+      // NotAllowedError is the user dismissing the OS prompt — not worth an error.
+      errEl.textContent = err.name === "NotAllowedError" ? "" : err.message;
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   document.getElementById("totp-back-btn").addEventListener("click", () => {
@@ -345,6 +420,8 @@ function showScreen(id) {
 }
 
 function navigateTo(view) {
+  // Site-scoped users have no access to the platform Settings screen.
+  if (view === "settings" && !isSuperAdmin) view = "dashboard";
   currentView = view;
   document.querySelectorAll(".view").forEach((v) => (v.hidden = true));
   document.getElementById("view-" + view).hidden = false;
@@ -379,10 +456,140 @@ async function loadSettings() {
 
   loadBlockedIps();
   loadTotpSettings();
+  loadPasskeySettings();
   loadMcpTokens();
   loadOauthGrants();
   loadMcpAudit();
   loadCmsLibEditor();
+  loadUsers();
+}
+
+// --- Site admin users (super-admin only) ---
+// Lists scoped user accounts and lets the super-admin create them, reassign
+// their sites, reset passwords, and delete them. Lives in Settings → Access.
+let usersAllSites = [];
+
+async function loadUsers() {
+  const card = document.getElementById("users-card");
+  if (!card) return;
+  try {
+    const [{ users }, { sites }] = await Promise.all([
+      api("/users"),
+      api("/sites"),
+    ]);
+    usersAllSites = sites || [];
+    renderUserSitePicker("user-new-sites", new Set());
+    renderUsersList(users || []);
+  } catch (e) {
+    const errEl = document.getElementById("users-error");
+    if (errEl) errEl.textContent = e.message;
+  }
+  bindUserAddForm();
+}
+
+// Render a set of site checkboxes into a container. `selected` is a Set of slugs.
+function renderUserSitePicker(containerId, selected) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  if (!usersAllSites.length) {
+    el.innerHTML = '<span class="text-sm text-muted">No sites yet.</span>';
+    return;
+  }
+  el.innerHTML = usersAllSites.map(s => `
+    <label style="display:inline-flex;align-items:center;gap:4px;font-weight:normal">
+      <input type="checkbox" value="${esc(s.slug)}" ${selected.has(s.slug) ? "checked" : ""} style="width:auto;margin:0">
+      <span class="text-sm">${esc(s.name)} <span class="text-muted">/${esc(s.slug)}</span></span>
+    </label>
+  `).join("");
+}
+
+function pickedSlugs(containerId) {
+  const el = document.getElementById(containerId);
+  if (!el) return [];
+  return Array.from(el.querySelectorAll('input[type="checkbox"]:checked')).map(i => i.value);
+}
+
+function renderUsersList(users) {
+  const el = document.getElementById("users-list");
+  if (!el) return;
+  if (!users.length) {
+    el.innerHTML = '<div class="text-sm text-muted">No site users yet.</div>';
+    return;
+  }
+  el.innerHTML = users.map(u => `
+    <div class="user-row" data-user-id="${u.id}" style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:6px">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <strong>${esc(u.username)}</strong>
+        <span class="text-sm text-muted">${u.sites.length} site${u.sites.length === 1 ? "" : "s"}${u.last_login ? " · last login " + timeAgo(u.last_login) : ""}</span>
+        <span style="flex:1"></span>
+        <button type="button" class="btn btn-sm" data-act="reset">Reset password</button>
+        <button type="button" class="btn btn-sm btn-danger" data-act="delete">Delete</button>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px" data-sites></div>
+      <div style="margin-top:6px">
+        <button type="button" class="btn btn-sm btn-primary" data-act="save-sites">Save sites</button>
+        <span class="form-error" data-err style="margin-left:8px"></span>
+      </div>
+    </div>
+  `).join("");
+
+  users.forEach(u => {
+    const row = el.querySelector(`[data-user-id="${u.id}"]`);
+    if (!row) return;
+    const sitesBox = row.querySelector("[data-sites]");
+    sitesBox.innerHTML = usersAllSites.map(s => `
+      <label style="display:inline-flex;align-items:center;gap:4px;font-weight:normal">
+        <input type="checkbox" value="${esc(s.slug)}" ${u.sites.includes(s.slug) ? "checked" : ""} style="width:auto;margin:0">
+        <span class="text-sm">${esc(s.name)} <span class="text-muted">/${esc(s.slug)}</span></span>
+      </label>
+    `).join("") || '<span class="text-sm text-muted">No sites available.</span>';
+    const errEl = row.querySelector("[data-err]");
+
+    row.querySelector('[data-act="save-sites"]').addEventListener("click", async () => {
+      errEl.textContent = "";
+      const slugs = Array.from(sitesBox.querySelectorAll('input:checked')).map(i => i.value);
+      try {
+        await api(`/users/${u.id}`, { method: "PUT", body: JSON.stringify({ sites: slugs }) });
+        loadUsers();
+      } catch (e) { errEl.textContent = e.message; }
+    });
+    row.querySelector('[data-act="reset"]').addEventListener("click", async () => {
+      errEl.textContent = "";
+      const pw = prompt(`New password for "${u.username}" (min 8 chars):`);
+      if (!pw) return;
+      try {
+        await api(`/users/${u.id}`, { method: "PUT", body: JSON.stringify({ password: pw }) });
+        errEl.textContent = "Password updated.";
+      } catch (e) { errEl.textContent = e.message; }
+    });
+    row.querySelector('[data-act="delete"]').addEventListener("click", async () => {
+      if (!confirm(`Delete user "${u.username}"? They will lose admin access immediately.`)) return;
+      try {
+        await api(`/users/${u.id}`, { method: "DELETE" });
+        loadUsers();
+      } catch (e) { errEl.textContent = e.message; }
+    });
+  });
+}
+
+function bindUserAddForm() {
+  const form = document.getElementById("user-add-form");
+  if (!form || form.dataset.bound) return;
+  form.dataset.bound = "1";
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const errEl = document.getElementById("users-error");
+    errEl.textContent = "";
+    const username = document.getElementById("user-new-username").value.trim();
+    const password = document.getElementById("user-new-password").value;
+    const sites = pickedSlugs("user-new-sites");
+    try {
+      await api("/users", { method: "POST", body: JSON.stringify({ username, password, sites }) });
+      document.getElementById("user-new-username").value = "";
+      document.getElementById("user-new-password").value = "";
+      loadUsers();
+    } catch (e) { errEl.textContent = e.message; }
+  });
 }
 
 // Settings page tabs — Access / MCP / OAuth / Security / Backup / CMS Library.
@@ -547,6 +754,196 @@ async function unblockIp(id) {
     await api(`/settings/blocked-ips/${id}`, { method: "DELETE" });
     loadBlockedIps();
   } catch (err) { console.error(err); }
+}
+
+/* ============================================
+   Passkeys (WebAuthn)
+   ============================================
+
+   Hand-rolled encoding rather than @simplewebauthn/browser: the admin panel
+   ships as three static files with no bundler, and the wire format is only a
+   handful of base64url conversions.
+
+   A passkey is bound to the hostname it was created on, so the settings list
+   is grouped by host and the login button only appears where a credential for
+   that exact host exists. */
+
+function passkeySupportedByBrowser() {
+  return typeof window.PublicKeyCredential !== "undefined" &&
+    !!(navigator.credentials && navigator.credentials.create);
+}
+
+function applyPasskeyLoginVisibility() {
+  const block = document.getElementById("login-passkey-block");
+  if (block) block.hidden = !passkeyLoginAvailable;
+}
+
+function b64uToBuf(value) {
+  const b64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+  const bin = atob(padded);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
+function bufToB64u(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// The server speaks the JSON WebAuthn dialect (base64url strings); the browser
+// API wants ArrayBuffers. These four functions are the translation layer.
+function decodeCreationOptions(options) {
+  return {
+    ...options,
+    challenge: b64uToBuf(options.challenge),
+    user: { ...options.user, id: b64uToBuf(options.user.id) },
+    excludeCredentials: (options.excludeCredentials || []).map(c => ({
+      ...c, id: b64uToBuf(c.id),
+    })),
+  };
+}
+
+function decodeRequestOptions(options) {
+  return {
+    ...options,
+    challenge: b64uToBuf(options.challenge),
+    allowCredentials: (options.allowCredentials || []).map(c => ({
+      ...c, id: b64uToBuf(c.id),
+    })),
+  };
+}
+
+function encodeAttestation(credential) {
+  const r = credential.response;
+  return {
+    id: credential.id,
+    rawId: bufToB64u(credential.rawId),
+    type: credential.type,
+    clientExtensionResults: credential.getClientExtensionResults(),
+    authenticatorAttachment: credential.authenticatorAttachment || undefined,
+    response: {
+      clientDataJSON: bufToB64u(r.clientDataJSON),
+      attestationObject: bufToB64u(r.attestationObject),
+      transports: typeof r.getTransports === "function" ? r.getTransports() : [],
+    },
+  };
+}
+
+function encodeAssertion(credential) {
+  const r = credential.response;
+  return {
+    id: credential.id,
+    rawId: bufToB64u(credential.rawId),
+    type: credential.type,
+    clientExtensionResults: credential.getClientExtensionResults(),
+    authenticatorAttachment: credential.authenticatorAttachment || undefined,
+    response: {
+      clientDataJSON: bufToB64u(r.clientDataJSON),
+      authenticatorData: bufToB64u(r.authenticatorData),
+      signature: bufToB64u(r.signature),
+      userHandle: r.userHandle ? bufToB64u(r.userHandle) : undefined,
+    },
+  };
+}
+
+async function loadPasskeySettings() {
+  const container = document.getElementById("passkey-settings");
+  if (!container) return;
+
+  if (!passkeySupportedByBrowser()) {
+    container.innerHTML = '<p class="text-sm text-muted">This browser does not support passkeys.</p>';
+    return;
+  }
+
+  let data;
+  try {
+    data = await api("/webauthn/credentials");
+  } catch (err) {
+    container.innerHTML = `<div class="form-error">${esc(err.message)}</div>`;
+    return;
+  }
+
+  const list = data.credentials.length
+    ? `<ul class="ranked-list">${data.credentials.map(c => `
+        <li class="ranked-item">
+          <div style="flex:1;min-width:0">
+            <span class="label">${esc(c.label)}</span>
+            <span class="text-sm text-muted">${esc(c.rp_id)}${c.current_host ? " · this address" : ""} · added ${timeAgo(c.created_at)}${c.last_used ? " · last used " + timeAgo(c.last_used) : " · never used"}</span>
+          </div>
+          <button class="btn btn-sm btn-danger" data-passkey-remove="${c.id}">Remove</button>
+        </li>`).join("")}
+      </ul>`
+    : '<p class="text-sm text-muted">No passkeys registered yet.</p>';
+
+  // Registration needs a WebAuthn-capable origin. Say so plainly rather than
+  // offering a button that can only fail — this is the LAN-over-HTTP case.
+  const addForm = data.supported
+    ? `<form id="passkey-add-form" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px">
+         <input type="text" id="passkey-label" placeholder="Name (e.g. MacBook Touch ID)" maxlength="60" autocomplete="off" style="flex:1;min-width:160px">
+         <input type="password" id="passkey-password" placeholder="Your password" autocomplete="current-password" required style="flex:1;min-width:160px">
+         <button type="submit" class="btn btn-sm btn-primary">Add Passkey</button>
+       </form>
+       <p class="text-sm text-muted" style="margin-top:6px">Will be registered for <strong>${esc(data.rp_id)}</strong>.</p>`
+    : '<p class="text-sm text-muted" style="margin-top:12px">Passkeys can only be added over HTTPS (or on localhost). Reach this panel through your domain to register one.</p>';
+
+  container.innerHTML = list + addForm + '<div class="form-error" id="passkey-error" style="margin-top:8px"></div>';
+
+  container.querySelectorAll("[data-passkey-remove]").forEach(btn => {
+    btn.addEventListener("click", () => removePasskey(parseInt(btn.dataset.passkeyRemove)));
+  });
+
+  const form = document.getElementById("passkey-add-form");
+  if (form) form.addEventListener("submit", addPasskey);
+}
+
+async function addPasskey(e) {
+  e.preventDefault();
+  const errEl = document.getElementById("passkey-error");
+  const label = document.getElementById("passkey-label").value;
+  const passwordEl = document.getElementById("passkey-password");
+  errEl.textContent = "";
+  try {
+    const options = await api("/webauthn/register/options", {
+      method: "POST",
+      body: JSON.stringify({ password: passwordEl.value }),
+    });
+    passwordEl.value = "";
+    const credential = await navigator.credentials.create({
+      publicKey: decodeCreationOptions(options),
+    });
+    if (!credential) throw new Error("Registration cancelled");
+    await api("/webauthn/register/verify", {
+      method: "POST",
+      body: JSON.stringify({ response: encodeAttestation(credential), label }),
+    });
+    passkeyLoginAvailable = passkeySupportedByBrowser();
+    applyPasskeyLoginVisibility();
+    loadPasskeySettings();
+  } catch (err) {
+    if (err.name === "InvalidStateError") {
+      errEl.textContent = "That device already has a passkey for this address.";
+    } else if (err.name !== "NotAllowedError") {
+      errEl.textContent = err.message;
+    }
+  }
+}
+
+async function removePasskey(id) {
+  const errEl = document.getElementById("passkey-error");
+  const password = prompt("Enter your password to remove this passkey:");
+  if (!password) return;
+  errEl.textContent = "";
+  try {
+    await api(`/webauthn/credentials/${id}`, {
+      method: "DELETE",
+      body: JSON.stringify({ password }),
+    });
+    loadPasskeySettings();
+  } catch (err) { errEl.textContent = err.message; }
 }
 
 async function loadTotpSettings() {
@@ -1514,7 +1911,7 @@ async function loadSites() {
     <div class="site-card" data-slug="${esc(s.slug)}">
       <div class="site-card-header">
         <div>
-          <h2>${esc(s.name)}</h2>
+          <h2>${s.pinned_at ? '📌 ' : ''}${esc(s.name)}</h2>
           <div class="site-slug">/${esc(s.slug)}${s.aliases && s.aliases.length ? ` <span class="text-muted text-sm">(also: ${s.aliases.map(a => "/" + esc(a)).join(", ")})</span>` : ""}${s.host_aliases && s.host_aliases.length ? ` <span class="text-muted text-sm">· host: ${s.host_aliases.map(h => esc(h)).join(", ")}</span>` : ""}</div>
           <div class="site-version-info">
             ${s.current_version ? `v${s.current_version}` : "no version"}
@@ -1545,10 +1942,11 @@ async function loadSites() {
         <button class="btn btn-sm" onclick="showUploadFile('${esc(s.slug)}', '${esc(s.name)}', loadSites)">Upload File</button>
         <button class="btn btn-sm" data-settings="${esc(s.slug)}">Settings</button>
         <button class="btn btn-sm" onclick="reloadSiteCache('${esc(s.slug)}', this)">Reload</button>
+        <button class="btn btn-sm" onclick="toggleSitePinned('${esc(s.slug)}', ${s.pinned_at ? "false" : "true"}).then(()=>loadSites())">${s.pinned_at ? "Unpin" : "Pin"}</button>
         <button class="btn btn-sm ${s.active ? "btn-danger" : "btn-primary"}" onclick="toggleSiteActive('${esc(s.slug)}', ${!s.active})">
           ${s.active ? "Disable" : "Enable"}
         </button>
-        <button class="btn btn-sm btn-danger" onclick="confirmDeleteSite('${esc(s.slug)}')">Delete</button>
+        ${isSuperAdmin ? `<button class="btn btn-sm btn-danger" onclick="confirmDeleteSite('${esc(s.slug)}')">Delete</button>` : ""}
       </div>
     </div>
   `).join("");
@@ -1619,7 +2017,7 @@ function renderExplorerList() {
     if (s.mcp_enabled) tags.push(s.mcp_read_only ? "MCP·RO" : "MCP");
     return `
       <button type="button" class="explorer-item ${s.slug === explorerSelectedSlug ? "active" : ""}" data-slug="${esc(s.slug)}">
-        <div class="explorer-item-name"><span class="badge-dot ${dotClass}"></span>${esc(s.name)}</div>
+        <div class="explorer-item-name"><span class="badge-dot ${dotClass}"></span>${s.pinned_at ? '<span title="Pinned">📌</span> ' : ""}${esc(s.name)}</div>
         <div class="explorer-item-slug">/${esc(s.slug)}</div>
         <div class="explorer-item-meta">${formatBytes(s.size_bytes)} · ${s.file_count} files${tags.length ? " · " + tags.join(" · ") : ""}</div>
       </button>
@@ -1682,8 +2080,9 @@ function renderExplorerActions(site) {
       <button class="btn btn-sm" data-act="upload">Upload File</button>
       <button class="btn btn-sm" data-act="settings">Settings</button>
       <button class="btn btn-sm" data-act="reload">Reload</button>
+      <button class="btn btn-sm" data-act="pin">${site.pinned_at ? "Unpin" : "Pin"}</button>
       <button class="btn btn-sm ${site.active ? "btn-danger" : "btn-primary"}" data-act="toggle" style="grid-column:1 / -1">${site.active ? "Disable" : "Enable"}</button>
-      <button class="btn btn-sm btn-danger" data-act="delete" style="grid-column:1 / -1">Delete</button>
+      ${isSuperAdmin ? '<button class="btn btn-sm btn-danger" data-act="delete" style="grid-column:1 / -1">Delete</button>' : ""}
     </div>
   `;
 
@@ -1695,15 +2094,25 @@ function renderExplorerActions(site) {
   el.querySelector('[data-act="settings"]').addEventListener("click", () =>
     showSiteSettings(slug, site.root_dir, site.spa, site.mcp_enabled, site.mcp_read_only, site.mcp_auto_commit, site.cms_enabled));
   el.querySelector('[data-act="reload"]').addEventListener("click", (e) => reloadSiteCache(slug, e.currentTarget));
+  el.querySelector('[data-act="pin"]').addEventListener("click", async () => {
+    await toggleSitePinned(slug, !site.pinned_at);
+    loadExplorer();
+  });
   el.querySelector('[data-act="toggle"]').addEventListener("click", async () => {
     await toggleSiteActive(slug, !site.active);
     loadExplorer();
   });
-  el.querySelector('[data-act="delete"]').addEventListener("click", async () => {
+  const delBtn = el.querySelector('[data-act="delete"]');
+  if (delBtn) delBtn.addEventListener("click", async () => {
     await confirmDeleteSite(slug);
     loadExplorer();
   });
 }
+
+// Pin or unpin a site (sorts it to the top of listings, shared across admins).
+window.toggleSitePinned = async function (slug, pinned) {
+  await api(`/sites/${slug}/${pinned ? "pin" : "unpin"}`, { method: "POST" });
+};
 
 function renderExplorerPreview(site) {
   const previewEl = document.getElementById("explorer-preview");
@@ -1823,6 +2232,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
   // their state.
   let aliases = [];
   let hostAliases = [];
+  let siteName = slug;
   try {
     const data = await api(`/sites/${slug}`);
     if (data && data.site) {
@@ -1833,6 +2243,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
       mcpReadOnly = s.mcp_read_only;
       mcpAutoCommit = s.mcp_auto_commit;
       cmsEnabled = s.cms_enabled;
+      siteName = s.name || slug;
     }
     aliases = (data && data.aliases) || [];
     hostAliases = (data && data.host_aliases) || [];
@@ -1853,6 +2264,11 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
       <form id="site-settings-form">
         <div class="settings-tab-panel active" data-panel="general">
           <label>
+            Display Name
+            <input type="text" id="settings-name" value="${esc(siteName || "")}" maxlength="200" placeholder="Friendly name shown in the admin">
+            <small>The site's label in the admin. The slug (URL <code>/${esc(slug)}/</code> and MCP identity) is unchanged.</small>
+          </label>
+          <label>
             Root Directory
             <input type="text" id="settings-root-dir" value="${esc(rootDir || "")}" placeholder="e.g. browser, dist, build (leave empty for top level)">
             <small>Subdirectory containing index.html. Auto-detected for Angular/React/Vue builds.</small>
@@ -1861,6 +2277,13 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
             <input type="checkbox" id="settings-spa" ${spa ? "checked" : ""} style="width:auto;margin:0">
             <span>SPA Mode <small style="display:inline;margin:0">(serve index.html for all unmatched routes)</small></span>
           </label>
+
+          <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+          <label>
+            Export
+            <small>Download the site's <strong>current version</strong> as a ZIP. Other versions are not included.</small>
+          </label>
+          <button type="button" class="btn btn-sm" id="settings-download-btn">Download current version (.zip)</button>
         </div>
 
         <div class="settings-tab-panel" data-panel="mcp">
@@ -1962,6 +2385,19 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
   document.body.appendChild(modal);
   modal.querySelector(".modal-backdrop").addEventListener("click", () => modal.remove());
   modal.querySelector(".close-modal").addEventListener("click", () => modal.remove());
+
+  // Download current version as a ZIP. It's a GET — the session cookie
+  // authorizes it (no CSRF needed) and the attachment response keeps the SPA in
+  // place. A temporary anchor triggers the browser download.
+  const dlBtn = modal.querySelector("#settings-download-btn");
+  if (dlBtn) dlBtn.addEventListener("click", () => {
+    const a = document.createElement("a");
+    a.href = `${API}/sites/${slug}/download`;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
 
   // Tab switching
   modal.querySelectorAll(".settings-tab").forEach(tab => {
@@ -2231,6 +2667,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
   // Save settings form
   modal.querySelector("#site-settings-form").addEventListener("submit", async (e) => {
     e.preventDefault();
+    const newName = document.getElementById("settings-name").value.trim();
     const newRoot = document.getElementById("settings-root-dir").value.trim() || null;
     const newSpa = document.getElementById("settings-spa").checked;
     const newMcp = document.getElementById("settings-mcp").checked;
@@ -2238,10 +2675,10 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
     const newMcpAutoCommit = document.getElementById("settings-mcp-autocommit").checked;
     const newCms = document.getElementById("settings-cms").checked;
     try {
-      // Persist the settings (root_dir, spa, mcp flags, cms_enabled).
+      // Persist the settings (display name, root_dir, spa, mcp flags, cms_enabled).
       await api(`/sites/${slug}/settings`, {
         method: "POST",
-        body: JSON.stringify({ root_dir: newRoot, spa: newSpa, mcp_enabled: newMcp, mcp_read_only: newMcpReadOnly, mcp_auto_commit: newMcpAutoCommit, cms_enabled: newCms }),
+        body: JSON.stringify({ name: newName, root_dir: newRoot, spa: newSpa, mcp_enabled: newMcp, mcp_read_only: newMcpReadOnly, mcp_auto_commit: newMcpAutoCommit, cms_enabled: newCms }),
       });
       // If CMS was just turned on and isn't scaffolded yet, lay the files down.
       if (newCms && !cmsEnabled) {

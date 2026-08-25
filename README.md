@@ -47,7 +47,7 @@ In every case the Hoster binary itself is identical — only the front-end TLS l
 - **Self-healing site state** — `_current` symlinks rebuild at startup, after restore, or on demand from a database-driven repair pass; broken sites surface a red badge in the admin UI
 - **Analytics dashboard** — request logs, visitor stats, countries, top pages, status codes, blocked request intelligence, min/avg/max response times
 - **IP auto-blocking** — automatically block IPs that accumulate too many denied requests, with configurable thresholds and duration
-- **Secure auth** — Argon2id password hashing, TOTP two-factor authentication, session tokens, CSRF protection, rate-limited login
+- **Secure auth** — Argon2id password hashing, passkeys (WebAuthn) for passwordless sign-in, TOTP two-factor authentication, session tokens, CSRF protection, rate-limited login
 - **Light/Dark/Auto themes** — admin panel respects system preference
 - **Single binary** — compiles to a standalone executable with no runtime dependencies
 - **MCP server** — a full content-management command surface for AI tools (Claude Code, Cursor, etc.) over the Model Context Protocol: read/write/rename/delete files, chunked media uploads (JPEG, PNG, GIF, SVG, MP3, MP4) with magic-byte / XML-script validation, server-side `fetch_remote_media` for importing assets from public URLs, and server-side `resize_image` to scale, re-encode, and recompress images in place
@@ -272,6 +272,19 @@ After logging in, go to **Settings** and click **Enable 2FA** to add TOTP-based 
 3. Save the recovery codes in a safe place — each can only be used once
 
 With 2FA enabled, login requires both your password and a code from your authenticator app. Recovery codes work as a backup if you lose your device.
+
+### 10. Register a Passkey (Optional)
+
+A passkey signs you in with Touch ID, Windows Hello, or a hardware security key — no password and no authenticator code. Because it combines something you have (the device) with something you are (biometric or PIN), it replaces the whole password + 2FA flow in one tap rather than acting as a second factor.
+
+Go to **Settings → Passkeys**, enter your password to confirm, click **Add Passkey**, and approve the prompt from your browser or OS. From then on, the login screen offers **Sign in with a passkey** above the password form.
+
+Two things are worth knowing before you rely on it:
+
+- **A passkey is tied to the hostname you created it on.** One registered at `https://yourdomain.com` will not be offered at `https://admin.yourdomain.com` or at `http://192.168.1.50:3500`. Register a separate passkey for each address you actually sign in from; the Settings list shows which host each one belongs to.
+- **Passkeys need HTTPS, or localhost.** This is a browser rule, not a Hoster one — WebAuthn is unavailable in a non-secure context. On a LAN-only install reached over plain HTTP, the Settings card says so and the option is hidden.
+
+Your password (and TOTP, if enabled) stays active the whole time, so losing the device that holds a passkey never locks you out. Adding or removing a passkey re-checks your password, so a hijacked session cannot quietly enroll one.
 
 ## Deploying Sites
 
@@ -663,6 +676,7 @@ Sites whose on-disk state doesn't match the database appear in the admin UI with
 | Data | Included |
 |------|----------|
 | Admin password, TOTP secret, recovery codes | Yes |
+| Registered passkeys (public keys) | Yes |
 | Country restrictions, auto-block config | Yes |
 | All sites (files, versions, aliases) | Yes (current version only by default) |
 | MCP tokens (hashed), blocked IPs | Yes |
@@ -754,6 +768,7 @@ Hoster is designed to be safe for public exposure. Since the source code is publ
 ### Authentication & Sessions
 
 - Admin password hashed with **Argon2id** (memory-hard, GPU-resistant; memoryCost=64KB, timeCost=3)
+- **Passkeys (WebAuthn)** — phishing-resistant passwordless sign-in. Discoverable credentials with user verification required, so a passkey is possession + biometric/PIN on its own; only public keys are stored. Credentials are bound to the RP ID (hostname) they were created on, challenges are single-use with a 5-minute TTL, and the signature counter is checked on every assertion to detect cloned authenticators. Enrolling or removing one requires the password.
 - **TOTP two-factor authentication** — RFC 6238 compliant, compatible with all major authenticator apps
 - 8 one-time **recovery codes** (SHA-256 hashed, constant-time comparison) for account recovery
 - 256-bit cryptographically random session tokens with per-session **CSRF tokens**
@@ -762,7 +777,24 @@ Hoster is designed to be safe for public exposure. Since the source code is publ
 - Login **rate-limited** to 5 attempts per 15 minutes per IP; 2FA verification separately rate-limited
 - 24-hour session duration
 - Password change requires current password verification
-- **Audit logging** — login, password changes, 2FA enable/disable, and site deletion are logged with IP and timestamp
+- **Audit logging** — login (password or passkey), password changes, 2FA enable/disable, passkey enrollment/removal, and site deletion are logged with IP and timestamp
+
+### Passkeys (WebAuthn)
+
+A passkey replaces the password + 2FA flow rather than adding to it. The private key never leaves the authenticator, so there is no shared secret to phish, reuse, leak, or keylog — the classes of attack that dominate real-world admin compromise.
+
+Design decisions and why:
+
+- **Discoverable credentials, user verification required.** Registration and every assertion demand `userVerification: "required"`, so a passkey is possession of the device *plus* a biometric or PIN. That's what makes it sound as a single-step login instead of a second factor. Requiring the resident key also lets the login screen offer the passkey before you type anything.
+- **Only public keys are stored.** A dump of `webauthn_credentials` yields nothing an attacker can authenticate with.
+- **Credentials are bound to their RP ID** — the hostname the browser was on when the passkey was created. Hoster answers on whatever hostnames your proxy sends it, so the RP ID is derived per-request from the `Origin` header and stored alongside the credential. A passkey registered at one host is neither offered nor accepted at another. Register one per address you sign in from.
+- **Challenges are single-use, 5-minute, and origin-checked.** Replaying a captured assertion fails because the challenge is consumed on first use, and the origin the authenticator signed into `clientDataJSON` must match the one that issued the challenge.
+- **Signature counters detect cloned authenticators.** Every assertion must report a counter above the stored value; a regression is refused.
+- **Challenges are IP-bound when an IP is verifiable.** Deliberately weaker than the TOTP pending-token check, which rejects an unverifiable address outright. A pending 2FA token is a bearer credential — holding it plus a code gets you in — whereas completing a WebAuthn challenge additionally requires a signature from the private key. Treating an unknown address as fatal would break passkeys on every deployment not behind a proxy that sets `cf-connecting-ip` or `x-real-ip`, while buying nothing. Differing addresses are still refused.
+- **Enrolling or removing a passkey re-checks the password**, matching the bar set by disabling 2FA. A hijacked session cannot quietly mint itself a durable second way in.
+- **A passkey is never the only way in.** The password (and TOTP, if enabled) stays active. Losing the device that holds a passkey does not lock you out — which also matters because WebAuthn requires a secure context, so the LAN-over-plain-HTTP path can't use passkeys at all.
+
+Failed passkey sign-ins feed the same per-IP lockout as password logins, and both enrollment and sign-in are written to the audit log.
 
 ### Network & Transport
 

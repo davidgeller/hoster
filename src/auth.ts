@@ -14,6 +14,45 @@ function sha256(input: string): string {
   return createHash("sha256").update(input).digest("hex");
 }
 
+// --- Site-scoped admin users ---
+//
+// A platform super-admin (the original password, optional TOTP) authenticates
+// with a blank username. Site-scoped users have a username + password and are
+// granted access to a subset of sites via admin_user_sites. They see the full
+// admin UI for their sites only — never the platform Settings screen.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS admin_users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    last_login TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS admin_user_sites (
+    user_id INTEGER NOT NULL,
+    site_slug TEXT NOT NULL,
+    PRIMARY KEY (user_id, site_slug),
+    FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE,
+    FOREIGN KEY (site_slug) REFERENCES sites(slug) ON DELETE CASCADE
+  );
+`);
+
+const USERNAME_PATTERN = /^[a-z0-9._-]{1,40}$/;
+
+export function normalizeUsername(username: string): string {
+  return (username || "").trim().toLowerCase();
+}
+
+export function validateUsername(username: string): string {
+  const normalized = normalizeUsername(username);
+  if (!normalized) throw new Error("Username is required");
+  if (!USERNAME_PATTERN.test(normalized)) {
+    throw new Error("Username must be 1–40 chars: lowercase letters, digits, dot, dash, underscore");
+  }
+  return normalized;
+}
+
 export function getAdminPasswordHash(): string | null {
   const row = db.query("SELECT value FROM config WHERE key = 'admin_password_hash'").get() as { value: string } | null;
   return row?.value ?? null;
@@ -42,7 +81,9 @@ export function isRateLimited(ip: string): boolean {
   return row.cnt >= MAX_LOGIN_ATTEMPTS;
 }
 
-function recordLoginAttempt(ip: string, success: boolean): void {
+// Exported so the passkey login path can feed the same per-IP lockout that
+// guards password logins — one login surface, one attempt counter.
+export function recordLoginAttempt(ip: string, success: boolean): void {
   db.run("INSERT INTO login_attempts (ip, success) VALUES (?, ?)", ip, success ? 1 : 0);
   // Clean old attempts (older than 24 hours) — SQL-side datetime keeps formats aligned.
   db.run("DELETE FROM login_attempts WHERE created_at < datetime('now', '-24 hours')");
@@ -57,18 +98,41 @@ export async function verifyPassword(password: string, ip: string): Promise<bool
   return valid;
 }
 
-export function createSession(ip: string): { sessionToken: string; csrfToken: string } {
+export function createSession(ip: string, userId: number | null = null): { sessionToken: string; csrfToken: string } {
   const sessionToken = randomBytes(32).toString("hex");
   const csrfToken = randomBytes(32).toString("hex");
   // SQL-side datetime so expires_at is stored in the same format that
   // datetime('now') comparisons (validateSession, getCsrfToken, cleanExpiredSessions)
   // produce. Mixing toISOString() with datetime('now') silently breaks expiry.
   db.run(
-    `INSERT INTO sessions (token, csrf_token, expires_at, ip)
-     VALUES (?, ?, datetime('now', ?), ?)`,
-    sessionToken, csrfToken, `+${SESSION_DURATION_HOURS} hours`, ip
+    `INSERT INTO sessions (token, csrf_token, expires_at, ip, user_id)
+     VALUES (?, ?, datetime('now', ?), ?, ?)`,
+    sessionToken, csrfToken, `+${SESSION_DURATION_HOURS} hours`, ip, userId
   );
   return { sessionToken, csrfToken };
+}
+
+// Resolve the principal behind a session. Returns null for an invalid/expired
+// token. userId === null means the platform super-admin; otherwise it's the
+// admin_users.id of a site-scoped user.
+export function getSessionUser(token: string | undefined): { userId: number | null; isSuperAdmin: boolean } | null {
+  if (!token) return null;
+  const row = db.query(
+    "SELECT user_id FROM sessions WHERE token = ? AND expires_at > datetime('now')"
+  ).get(token) as { user_id: number | null } | null;
+  if (!row) return null;
+  return { userId: row.user_id ?? null, isSuperAdmin: row.user_id == null };
+}
+
+// Delete sessions belonging to one principal (super-admin when userId is null).
+// Used to rotate a single principal's session on login without evicting other
+// logged-in users (unlike destroyAllSessions).
+export function destroySessionsForUser(userId: number | null): void {
+  if (userId == null) {
+    db.run("DELETE FROM sessions WHERE user_id IS NULL");
+  } else {
+    db.run("DELETE FROM sessions WHERE user_id = ?", userId);
+  }
 }
 
 export function validateSession(token: string | undefined, ip?: string): boolean {
@@ -335,4 +399,97 @@ export function isTotpRateLimited(ip: string): boolean {
 export function recordTotpAttempt(ip: string, success: boolean): void {
   db.run("INSERT INTO totp_attempts (ip, success) VALUES (?, ?)", ip, success ? 1 : 0);
   db.run("DELETE FROM totp_attempts WHERE created_at < datetime('now', '-24 hours')");
+}
+
+// --- Admin user management (site-scoped accounts) ---
+
+export interface AdminUser {
+  id: number;
+  username: string;
+  created_at: string;
+  last_login: string | null;
+  sites: string[];
+}
+
+export function getUserSiteSlugs(userId: number): string[] {
+  const rows = db.query(
+    "SELECT site_slug FROM admin_user_sites WHERE user_id = ? ORDER BY site_slug"
+  ).all(userId) as { site_slug: string }[];
+  return rows.map(r => r.site_slug);
+}
+
+export function setUserSites(userId: number, slugs: string[]): void {
+  const unique = Array.from(new Set((slugs || []).map(s => s.trim()).filter(Boolean)));
+  const tx = db.transaction(() => {
+    db.run("DELETE FROM admin_user_sites WHERE user_id = ?", userId);
+    for (const slug of unique) {
+      // Only assign slugs that correspond to a real site.
+      const exists = db.query("SELECT 1 FROM sites WHERE slug = ?").get(slug);
+      if (exists) db.run("INSERT INTO admin_user_sites (user_id, site_slug) VALUES (?, ?)", userId, slug);
+    }
+  });
+  tx();
+}
+
+export function listAdminUsers(): AdminUser[] {
+  const rows = db.query(
+    "SELECT id, username, created_at, last_login FROM admin_users ORDER BY username"
+  ).all() as Omit<AdminUser, "sites">[];
+  return rows.map(r => ({ ...r, sites: getUserSiteSlugs(r.id) }));
+}
+
+export function getAdminUserByUsername(username: string): { id: number; username: string; password_hash: string } | null {
+  const normalized = normalizeUsername(username);
+  if (!normalized) return null;
+  return db.query(
+    "SELECT id, username, password_hash FROM admin_users WHERE username = ?"
+  ).get(normalized) as { id: number; username: string; password_hash: string } | null;
+}
+
+export async function createAdminUser(username: string, password: string, slugs: string[]): Promise<number> {
+  const normalized = validateUsername(username);
+  if (!password || password.length < 8) throw new Error("Password must be at least 8 characters");
+  if (getAdminUserByUsername(normalized)) throw new Error(`User '${normalized}' already exists`);
+  const hash = await Bun.password.hash(password, { algorithm: "argon2id", memoryCost: 65536, timeCost: 3 });
+  const result = db.run("INSERT INTO admin_users (username, password_hash) VALUES (?, ?)", normalized, hash);
+  const userId = Number(result.lastInsertRowid);
+  setUserSites(userId, slugs || []);
+  return userId;
+}
+
+export async function updateAdminUser(id: number, opts: { password?: string; sites?: string[] }): Promise<boolean> {
+  const existing = db.query("SELECT id FROM admin_users WHERE id = ?").get(id) as { id: number } | null;
+  if (!existing) return false;
+  if (opts.password !== undefined) {
+    if (opts.password.length < 8) throw new Error("Password must be at least 8 characters");
+    const hash = await Bun.password.hash(opts.password, { algorithm: "argon2id", memoryCost: 65536, timeCost: 3 });
+    db.run("UPDATE admin_users SET password_hash = ? WHERE id = ?", hash, id);
+  }
+  if (opts.sites !== undefined) {
+    setUserSites(id, opts.sites);
+  }
+  return true;
+}
+
+export function deleteAdminUser(id: number): boolean {
+  // admin_user_sites rows cascade via FK. Also drop the user's active sessions.
+  destroySessionsForUser(id);
+  const result = db.run("DELETE FROM admin_users WHERE id = ?", id);
+  return result.changes > 0;
+}
+
+// Verify a site-user's credentials. Records the attempt against the shared
+// per-IP login rate limiter (same as the super-admin path). Returns the user
+// id on success, or null on failure.
+export async function verifyUserPassword(username: string, password: string, ip: string): Promise<number | null> {
+  const user = getAdminUserByUsername(username);
+  if (!user) {
+    recordLoginAttempt(ip, false);
+    return null;
+  }
+  const valid = await Bun.password.verify(password, user.password_hash);
+  recordLoginAttempt(ip, valid);
+  if (!valid) return null;
+  db.run("UPDATE admin_users SET last_login = datetime('now') WHERE id = ?", user.id);
+  return user.id;
 }
