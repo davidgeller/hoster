@@ -688,7 +688,10 @@ function handleAuthCodeGrant(form: FormData, client: OauthClientRow): Response {
     return jsonResponse({ error: "invalid_grant", error_description: "Unknown authorization code" }, 400);
   }
 
-  // Atomic single-use: mark consumed first; reject if already consumed.
+  // Fast-path reject for an already-consumed code. This is only an early exit;
+  // the authoritative single-use guarantee is the atomic claim below (an
+  // UPDATE ... WHERE consumed = 0), which closes the check-then-act race where
+  // two concurrent requests both pass this check before either marks the code.
   if (row.consumed) {
     // Spec says we MAY revoke any tokens issued from this code on replay.
     return jsonResponse({ error: "invalid_grant", error_description: "Authorization code already used" }, 400);
@@ -716,8 +719,14 @@ function handleAuthCodeGrant(form: FormData, client: OauthClientRow): Response {
     }
   }
 
-  // Mark code consumed (single-use).
-  db.run("UPDATE oauth_codes SET consumed = 1 WHERE code_hash = ?", codeHash);
+  // Atomically claim the code (single-use). The `AND consumed = 0` predicate is
+  // the race-free gate: if a concurrent exchange consumed the code between our
+  // SELECT above and this write, `changes` is 0 and we refuse rather than mint a
+  // second set of tokens from one authorization.
+  const claim = db.run("UPDATE oauth_codes SET consumed = 1 WHERE code_hash = ? AND consumed = 0", codeHash);
+  if (claim.changes === 0) {
+    return jsonResponse({ error: "invalid_grant", error_description: "Authorization code already used" }, 400);
+  }
 
   // Issue tokens.
   const accessToken = randHex(32);

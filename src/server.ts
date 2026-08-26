@@ -10,13 +10,39 @@ import { logRequest, extractRequestMeta, shouldTrack, isCountryAllowed, isIpBloc
 import { resolveSitePath, resolveAlias, resolveHostAlias, normalizeHost } from "./sites";
 import { serveCmsLibFile } from "./cms-lib";
 
+// Full header set for first-party surfaces we control: the admin UI (document
+// + static assets), the admin/OAuth/MCP APIs, and OAuth/MCP discovery. Safe to
+// apply here because we author every byte of these responses.
+//
+// Note on `script-src 'unsafe-inline'`: the admin SPA renders action buttons
+// with inline `onclick=` handlers (see admin/app.js), which a strict
+// `script-src 'self'` would block once the CSP is enforced on the *document*
+// (previously it was only sent on JSON API responses, where it was inert). The
+// interim allowance keeps the UI working while still adding real protection via
+// `object-src 'none'`, `base-uri 'self'`, and `frame-ancestors 'none'`. The
+// follow-up hardening is to move those handlers to delegated listeners and drop
+// `'unsafe-inline'`.
 const SECURITY_HEADERS: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
   "Referrer-Policy": "strict-origin-when-cross-origin",
   "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
-  "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'",
+  "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
   "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
+};
+
+// Reduced header set for hosted (customer) content. We deliberately DO NOT send
+// a Content-Security-Policy, X-Frame-Options, or HSTS here:
+//   • CSP/XFO would break or over-restrict arbitrary customer sites (inline
+//     scripts, third-party assets, intentional embedding).
+//   • HSTS with includeSubDomains on a host-aliased custom domain could force
+//     HTTPS on unrelated subdomains the customer also runs — a footgun. TLS is
+//     already enforced at the edge (Cloudflare).
+// `nosniff` and a conservative `Referrer-Policy` are universally safe and
+// beneficial, so hosted responses still get those.
+const SITE_SECURITY_HEADERS: Record<string, string> = {
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "strict-origin-when-cross-origin",
 };
 
 import { dirname } from "path";
@@ -52,6 +78,14 @@ const MIME_TYPES: Record<string, string> = {
 
 function addSecurityHeaders(res: Response): Response {
   for (const [k, v] of Object.entries(SECURITY_HEADERS)) {
+    res.headers.set(k, v);
+  }
+  return res;
+}
+
+// Apply the reduced, content-safe header set to hosted-site responses.
+function addSiteHeaders(res: Response): Response {
+  for (const [k, v] of Object.entries(SITE_SECURITY_HEADERS)) {
     res.headers.set(k, v);
   }
   return res;
@@ -195,22 +229,22 @@ export function createServer(port: number) {
         if (hostAliasSlug && isInfraPath) {
           status = 404;
           logReq();
-          return new Response("Not found", { status: 404 });
+          return addSiteHeaders(new Response("Not found", { status: 404 }));
         }
 
         // --- Version check (no auth needed) ---
         if (path === "/_admin/api/version") {
           const { VERSION } = await import("./index");
-          return new Response(JSON.stringify({ version: VERSION }), {
+          return addSecurityHeaders(new Response(JSON.stringify({ version: VERSION }), {
             headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
-          });
+          }));
         }
 
         // --- IP auto-block check (skip for infra paths) ---
         if (!isInfraPath) {
           if (isIpBlocked(meta.ip)) {
             status = 403;
-            const res = new Response("Access denied", { status: 403 });
+            const res = addSiteHeaders(new Response("Access denied", { status: 403 }));
             logReq(res);
             return res;
           }
@@ -220,7 +254,7 @@ export function createServer(port: number) {
         if (!isInfraPath) {
           if (!isCountryAllowed(meta.country)) {
             status = 403;
-            const res = new Response("Access denied", { status: 403 });
+            const res = addSiteHeaders(new Response("Access denied", { status: 403 }));
             logReq(res);
             checkAndAutoBlock(meta.ip);
             return res;
@@ -299,10 +333,10 @@ export function createServer(port: number) {
           // Serve admin SPA — all non-API admin routes get index.html
           if (path.startsWith("/_admin/api/")) {
             status = 404;
-            const res = new Response(JSON.stringify({ error: "Not found" }), {
+            const res = addSecurityHeaders(new Response(JSON.stringify({ error: "Not found" }), {
               status: 404,
               headers: { "Content-Type": "application/json" },
-            });
+            }));
             logReq(res);
             return res;
           }
@@ -315,12 +349,15 @@ export function createServer(port: number) {
           const resolvedAdmin = resolve(adminFile);
           const resolvedAdminDir = resolve(ADMIN_DIR);
           if (adminPath !== "/index.html" && resolvedAdmin.startsWith(resolvedAdminDir + "/") && existsSync(adminFile) && statSync(adminFile).isFile()) {
-            const res = serveFile(adminFile, req, "nocache");
+            // Admin document + static assets (app.js/style.css) get the full
+            // header set, incl. anti-clickjacking and CSP. Previously these were
+            // served bare — only the JSON API responses carried the headers.
+            const res = addSecurityHeaders(serveFile(adminFile, req, "nocache"));
             logReq(res);
             return res;
           }
           // SPA fallback
-          const res = serveFile(join(ADMIN_DIR, "index.html"), req, "nocache");
+          const res = addSecurityHeaders(serveFile(join(ADMIN_DIR, "index.html"), req, "nocache"));
           logReq(res);
           return res;
         }
@@ -346,7 +383,7 @@ export function createServer(port: number) {
           if (parts.length === 0) {
             // Root on canonical host — redirect to admin.
             status = 302;
-            const res = new Response(null, { status: 302, headers: { Location: "/_admin" } });
+            const res = addSecurityHeaders(new Response(null, { status: 302, headers: { Location: "/_admin" } }));
             logReq(res);
             return res;
           }
@@ -360,10 +397,10 @@ export function createServer(port: number) {
         // file as if it were a directory, breaking CSS/JS references.
         if (/\.html\/$/.test(path)) {
           status = 301;
-          const res = new Response(null, {
+          const res = addSiteHeaders(new Response(null, {
             status: 301,
             headers: { Location: path.replace(/\/+$/, "") + url.search },
-          });
+          }));
           logReq(res);
           return res;
         }
@@ -385,10 +422,10 @@ export function createServer(port: number) {
           resolved.filePath.endsWith("index.html")
         ) {
           status = 301;
-          const res = new Response(null, {
+          const res = addSiteHeaders(new Response(null, {
             status: 301,
             headers: { Location: path + "/" + url.search },
-          });
+          }));
           logReq(res);
           return res;
         }
@@ -398,7 +435,7 @@ export function createServer(port: number) {
           // For HTML files, rewrite <base href="/"> to the appropriate prefix:
           // path-based routing: "/<slug>/"; host-aliased: "/".
           if (resolved.filePath.endsWith(".html")) {
-            const res = await serveHtml(resolved.filePath, basePath, req, resolved.version);
+            const res = addSiteHeaders(await serveHtml(resolved.filePath, basePath, req, resolved.version));
             logReq(res);
             return res;
           }
@@ -406,7 +443,7 @@ export function createServer(port: number) {
           // everything else must revalidate so redeployments take effect immediately.
           const basename = resolved.filePath.substring(resolved.filePath.lastIndexOf("/") + 1);
           const isHashed = /\.[a-f0-9]{8,}\.\w+$/.test(basename) || /[-.][\w]*\.[a-f0-9]{8,}\./.test(basename);
-          const res = serveFile(resolved.filePath, req, isHashed ? "immutable" : "revalidate", resolved.version);
+          const res = addSiteHeaders(serveFile(resolved.filePath, req, isHashed ? "immutable" : "revalidate", resolved.version));
           logReq(res);
           return res;
         }
@@ -414,19 +451,19 @@ export function createServer(port: number) {
         // 404
         status = 404;
         const notFoundBody = "<!DOCTYPE html><html><head><title>404</title><style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f5f5;color:#333}h1{font-weight:300;font-size:2em}</style></head><body><h1>404 &mdash; Not Found</h1></body></html>";
-        const res404 = new Response(notFoundBody, {
+        const res404 = addSiteHeaders(new Response(notFoundBody, {
           status: 404,
           headers: {
             "Content-Type": "text/html; charset=utf-8",
             "Content-Length": String(Buffer.byteLength(notFoundBody)),
           },
-        });
+        }));
         logReq(res404);
         return res404;
       } catch (e: any) {
         console.error("Request error:", path, e?.message, e?.stack);
         status = 500;
-        const res = new Response("Internal Server Error", { status: 500 });
+        const res = addSiteHeaders(new Response("Internal Server Error", { status: 500 }));
         logReq(res);
         return res;
       }

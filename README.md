@@ -803,12 +803,13 @@ Failed passkey sign-ins feed the same per-IP lockout as password logins, and bot
 - Country-based access restriction (configurable, uses Cloudflare's `cf-ipcountry` header)
 - **IP auto-blocking** — IPs exceeding a configurable number of blocked requests within a time window are automatically denied access. Threshold, window, and block duration are all configurable in Settings. Uses real client IPs from Cloudflare's `cf-connecting-ip` header, so it works correctly behind a tunnel.
 - Proxy header trust validation — `cf-connecting-ip` only trusted when Cloudflare signal headers are present
-- Security headers: `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Strict-Transport-Security`, `Content-Security-Policy`, `Permissions-Policy`
+- **Security headers, applied on every response.** First-party surfaces (the admin UI document *and* its static assets, the admin/OAuth/MCP APIs, and discovery endpoints) carry the full set: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Strict-Transport-Security`, `Permissions-Policy`, and a `Content-Security-Policy` of `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'`. `X-Frame-Options: DENY` + `frame-ancestors 'none'` make the admin panel unframable (anti-clickjacking); `object-src 'none'` and `base-uri 'self'` blunt plugin and base-tag injection. (`script-src` retains `'unsafe-inline'` because the admin SPA renders action buttons with inline `onclick=` handlers; the planned hardening is to move those to delegated listeners and drop it.)
+- **Hosted (customer) content gets a deliberately reduced set** — only `X-Content-Type-Options: nosniff` and `Referrer-Policy`. A restrictive CSP or `X-Frame-Options` is *not* imposed on customer sites (it would break inline scripts, third-party assets, and intentional embedding), and HSTS is left to the edge to avoid an `includeSubDomains` footgun on host-aliased custom domains.
 
 ### File Serving & Path Traversal
 
-- All file paths validated with `resolve()` + `startsWith()` to prevent directory traversal
-- **Symlink resolution** — served files are verified via `realpathSync()` to ensure symlinks don't escape the site directory
+- All file paths validated with `resolve()` + a **strict containment check** to prevent directory traversal. Containment requires the resolved path to equal the site root or begin with `siteRoot + path.sep` — the trailing separator matters: a bare `startsWith(siteRoot)` would treat a sibling like `.../sites/blog-evil` as inside `.../sites/blog`, letting one slug read a prefix-sharing neighbor. (Not reachable over HTTP, since URLs normalize `..`, but the check is the last line of defense and is strict regardless of caller.)
+- **Symlink resolution** — served files are verified via `realpathSync()` (with the same trailing-separator containment check) to ensure symlinks don't escape the site directory
 - Admin static file paths are bounds-checked against the admin directory
 - URL pathname normalization by the URL parser prevents encoded traversal (`%2e%2e`, etc.)
 
@@ -854,7 +855,7 @@ OAuth-issued tokens stored alongside static tokens (same hashing, expiration, an
 
 - **Audience binding** — OAuth tokens are bound to a single site at issue time and rejected if presented at a different `/_mcp/<slug>` URL. The `WWW-Authenticate` challenge on a 401 response includes a `resource_metadata` link per RFC 9728.
 - **PKCE-only** authorization (S256). Plain `code_challenge_method` is not supported.
-- **Single-use authorization codes** with a 60-second lifetime; replay returns `invalid_grant`.
+- **Single-use authorization codes** with a 60-second lifetime; replay returns `invalid_grant`. The code is claimed with an atomic `UPDATE ... WHERE consumed = 0` (checked via affected-row count), so two concurrent exchanges of the same code can never both mint tokens — the check-then-act race is closed at the database.
 - **Refresh token rotation** — every refresh issues a new access + refresh pair and invalidates the previous one, so a leaked refresh token only works until the legitimate client next refreshes.
 - **Per-tool scope enforcement** — `write_file`, `write_media_file`, and `delete_file` require the `write` scope; `commit_version` requires `commit`. Read-only sites silently downgrade any granted scopes to `read`.
 - **Consent re-authentication** — every authorization requires either the admin password (and TOTP, if enabled) or a per-site delegate password. The consent flow does not rely on the admin session cookie surviving a cross-site redirect, and rate-limits failed attempts using the same window as admin login.
@@ -884,6 +885,7 @@ OAuth-issued tokens stored alongside static tokens (same hashing, expiration, an
 ### Data Protection
 
 - Error responses return generic messages — no stack traces, file paths, or SQL details leak to clients
+- **Malformed request bodies fail closed with `400`, not `500`** — auth endpoints (setup, login, 2FA, passkey verify, change-password) parse JSON through a guarded helper that returns a clean `400 Invalid request body` instead of letting a `SyntaxError` bubble up to the generic 500 handler
 - Errors logged server-side only (visible via `journalctl`)
 - Request logs auto-rotate at 500K rows to prevent disk exhaustion
 - All SQL queries use parameterized statements (no SQL injection)
@@ -899,6 +901,28 @@ OAuth-issued tokens stored alongside static tokens (same hashing, expiration, an
 - IP reputation and threat intelligence
 - HTTP/2 and HTTP/3 support
 - Edge caching (configurable per-path)
+
+### Security Hardening Log — v1.4.1
+
+v1.4.1 is a security point release following a threat-analysis pass against a live deployment. The assessment combined a **source-assisted code review** of the auth, routing, OAuth/MCP, SSRF, and file-serving paths with **non-destructive live probing** of the running site (headers, path-traversal attempts, malformed input, OAuth/MCP discovery). No way to gain unauthorized access was found — the authentication, OAuth 2.1/PKCE, SSRF, and path-traversal defenses all held. The pass did surface a set of defense-in-depth gaps, all fixed in this release:
+
+| # | Severity | Issue | Fix |
+|---|----------|-------|-----|
+| 1 | Medium | The admin UI **document and static assets** (`/_admin`, `app.js`, `style.css`) were served with **no security headers** — only the JSON API responses carried them. The admin panel was therefore framable (clickjacking) and ran with no CSP. | Full header set now applied to the admin document + assets, including `X-Frame-Options: DENY` and CSP `frame-ancestors 'none'`. CSP hardened with `object-src 'none'` and `base-uri 'self'`. |
+| 2 | Low | Hosted-site responses (and 404s) carried **no security headers** at all. | A content-safe subset (`nosniff`, `Referrer-Policy`) now applied to all hosted responses — deliberately without CSP/XFO/HSTS so customer content isn't broken. |
+| 3 | Low | A malformed JSON body to the login (and other auth) endpoints produced an unhandled **`500 Internal Server Error`** instead of a clean client error. | Auth endpoints parse bodies through a guarded helper that returns `400 Invalid request body`. |
+| 4 | Low | The OAuth **authorization-code single-use** check was a non-atomic check-then-act (`if (row.consumed)` … later `UPDATE`), a TOCTOU race under concurrent exchange. | Code is now claimed atomically with `UPDATE ... WHERE consumed = 0`, rejecting on zero affected rows. |
+| 5 | Info | `resolveSitePath` used `startsWith(siteRoot)` without a trailing separator — a prefix-match bug (not reachable over HTTP, since URLs normalize `..`). | Tightened to a strict `child === root || child.startsWith(root + sep)` containment check on both logical and realpath comparisons. |
+
+#### Testing methodology
+
+The changes were validated at three levels, so a header tweak can't silently break the admin UI or a customer site:
+
+1. **Static review** — read the security-critical modules end to end (`server.ts`, `auth.ts`, `admin-api.ts`, `oauth.ts`, `webauthn.ts`, `sites.ts`, `remote-fetch.ts`) to map every response path and confirm which ones did/didn't receive headers.
+2. **Live black-box probing** (non-destructive) — against the running site: full header dumps on `/_admin`, `/_admin/app.js`, and the API; encoded/`..` path-traversal attempts (all `400`); a malformed login body; and OAuth/MCP discovery endpoints. Confirmed the header gap and the 500 before fixing.
+3. **CSP compatibility check** — grepped `admin/app.js` for inline `onclick=` handlers and inline `<script>` blocks *before* choosing the document CSP, because a strict `script-src 'self'` would have broken every admin action button. This is why `script-src` keeps `'unsafe-inline'` for now.
+4. **Local boot verification** — booted the server with the changes and re-ran the probes, asserting: full headers on the admin document/assets/API, `400` (not `500`) on a malformed login body, and **only** `nosniff` + `Referrer-Policy` on both a real hosted page and a hosted 404 (proving customer content keeps working with no restrictive CSP/XFO).
+5. **Automated suite** — `bun test` (83 tests across auth, passkeys, uploads, backup/restore, host-aliases) passing, plus the build's own compile-and-boot preflight in `build-pi.sh`.
 
 ## Performance
 

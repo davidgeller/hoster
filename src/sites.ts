@@ -1,6 +1,6 @@
 import db from "./db";
 import { mkdirSync, rmSync, existsSync, readdirSync, statSync, symlinkSync, readlinkSync, unlinkSync, realpathSync, lstatSync, writeFileSync, readFileSync } from "fs";
-import { join, resolve } from "path";
+import { join, resolve, sep } from "path";
 import { tmpdir } from "os";
 import { getScaffoldFiles, CMS_LIB_VERSION } from "./cms-scaffold";
 
@@ -758,9 +758,18 @@ export function resolveSitePath(slug: string, filePath: string): ResolvedSite | 
 
   let resolved = resolve(contentDir, filePath);
 
+  // Containment check: `child` must equal `parent` or sit strictly beneath it.
+  // Requiring the trailing separator avoids the classic prefix-match bug where
+  // e.g. ".../sites/blog-evil" satisfies startsWith(".../sites/blog"); a bare
+  // startsWith would let one site's slug read a sibling whose name shares its
+  // prefix. Not reachable over HTTP today (URLs normalize `..`), but this is the
+  // last line of defense, so it should be strict regardless of the caller.
+  const within = (child: string, parent: string) =>
+    child === parent || child.startsWith(parent + sep);
+
   // Security: prevent path traversal (check both logical and real paths)
   const realSiteDir = resolve(SITES_DIR, slug);
-  if (!resolved.startsWith(realSiteDir)) return null;
+  if (!within(resolved, realSiteDir)) return null;
 
   // Cache the realpath of the site dir — it's the same for all files in this site
   const realSiteDirResolved = getCachedRealPath(realSiteDir);
@@ -770,7 +779,7 @@ export function resolveSitePath(slug: string, filePath: string): ResolvedSite | 
   // Try exact file
   if (existsSync(resolved) && statSync(resolved).isFile()) {
     const realPath = realpathSync(resolved);
-    if (!realPath.startsWith(realSiteDirResolved)) return null;
+    if (!within(realPath, realSiteDirResolved)) return null;
     return { filePath: resolved, version: ver };
   }
 
@@ -779,7 +788,7 @@ export function resolveSitePath(slug: string, filePath: string): ResolvedSite | 
     const index = join(resolved, "index.html");
     if (existsSync(index)) {
       const realPath = realpathSync(index);
-      if (realPath.startsWith(realSiteDirResolved)) return { filePath: index, version: ver };
+      if (within(realPath, realSiteDirResolved)) return { filePath: index, version: ver };
     }
   }
 
@@ -787,7 +796,7 @@ export function resolveSitePath(slug: string, filePath: string): ResolvedSite | 
   const htmlPath = resolved + ".html";
   if (existsSync(htmlPath)) {
     const realPath = realpathSync(htmlPath);
-    if (realPath.startsWith(realSiteDirResolved)) return { filePath: htmlPath, version: ver };
+    if (within(realPath, realSiteDirResolved)) return { filePath: htmlPath, version: ver };
   }
 
   // SPA fallback: serve index.html for any unmatched route

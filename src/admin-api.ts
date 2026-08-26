@@ -54,6 +54,18 @@ function json(data: any, status = 200, headers: Record<string, string> = {}): Re
   });
 }
 
+// Parse a JSON request body without letting a malformed/empty body escalate to
+// an unhandled 500. Returns null on any parse failure so callers can answer a
+// clean 400 instead. (A raw `await req.json()` throws SyntaxError on bad input,
+// which the top-level handler would otherwise surface as "Internal Server Error".)
+async function readJsonBody<T = any>(req: Request): Promise<T | null> {
+  try {
+    return (await req.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
 function unauthorized(): Response {
   return json({ error: "Unauthorized" }, 401);
 }
@@ -79,7 +91,8 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   // --- Setup endpoint (first-time password) ---
   if (path === "/_admin/api/setup" && req.method === "POST") {
     if (isSetup()) return json({ error: "Already configured" }, 400);
-    const body = await req.json() as { password?: string };
+    const body = await readJsonBody<{ password?: string }>(req);
+    if (!body) return json({ error: "Invalid request body" }, 400);
     if (!body.password || body.password.length < 8) {
       return json({ error: "Password must be at least 8 characters" }, 400);
     }
@@ -92,7 +105,8 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   if (path === "/_admin/api/login" && req.method === "POST") {
     if (!isSetup()) return json({ error: "Not configured — set up password first" }, 400);
     if (isRateLimited(ip)) return json({ error: "Too many attempts. Try again later." }, 429);
-    const body = await req.json() as { username?: string; password?: string };
+    const body = await readJsonBody<{ username?: string; password?: string }>(req);
+    if (!body) return json({ error: "Invalid request body" }, 400);
     if (!body.password) return json({ error: "Password required" }, 400);
 
     const username = (body.username || "").trim();
@@ -127,7 +141,8 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   // --- 2FA Verification (during login) ---
   if (path === "/_admin/api/login/2fa" && req.method === "POST") {
     if (isTotpRateLimited(ip)) return json({ error: "Too many attempts. Try again later." }, 429);
-    const body = await req.json() as { pending_token?: string; code?: string };
+    const body = await readJsonBody<{ pending_token?: string; code?: string }>(req);
+    if (!body) return json({ error: "Invalid request body" }, 400);
     if (!body.pending_token || !body.code) return json({ error: "Token and code required" }, 400);
 
     const secret = getTotpSecret();
@@ -175,7 +190,8 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     if (isRateLimited(ip)) return json({ error: "Too many attempts. Try again later." }, 429);
     const rp = getRpContext(req);
     if (!rp) return json({ error: "Passkeys require HTTPS (or localhost)" }, 400);
-    const body = await req.json() as { response?: any };
+    const body = await readJsonBody<{ response?: any }>(req);
+    if (!body) return json({ error: "Invalid request body" }, 400);
     if (!body.response) return json({ error: "Passkey response required" }, 400);
     try {
       const credential = await finishPasskeyLogin(rp, ip, body.response);
@@ -281,7 +297,8 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
 
   // --- Change password ---
   if (path === "/_admin/api/change-password" && req.method === "POST") {
-    const body = await req.json() as { current?: string; password?: string };
+    const body = await readJsonBody<{ current?: string; password?: string }>(req);
+    if (!body) return json({ error: "Invalid request body" }, 400);
     if (!body.current || !body.password) return json({ error: "Both current and new password required" }, 400);
     const valid = await verifyPassword(body.current, ip);
     if (!valid) return json({ error: "Current password is incorrect" }, 401);
