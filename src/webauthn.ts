@@ -9,11 +9,14 @@ import {
 
 // --- Passkeys (WebAuthn) ---
 //
-// A passkey is a standalone login for the platform super-admin: one tap on
-// Touch ID / Windows Hello / a security key replaces password + TOTP entirely.
-// Password (and TOTP, if enabled) stay available as the fallback — a passkey
-// must never be the only way in, because the admin panel is also reachable
-// over plain HTTP on a LAN address where WebAuthn cannot run at all.
+// A passkey is a standalone login for any account — administrator or site
+// user: one tap on Touch ID / Windows Hello / a security key replaces
+// password + TOTP entirely. The credential identifies the account (each
+// credential row carries its owner's user_id), so the login screen needs no
+// username first. Password (and TOTP, if enabled) stay available as the
+// fallback — a passkey must never be the only way in, because the admin panel
+// is also reachable over plain HTTP on a LAN address where WebAuthn cannot
+// run at all.
 //
 // Two properties of WebAuthn shape the schema below:
 //
@@ -105,22 +108,22 @@ export function getRpContext(req: Request): RpContext | null {
   return { rpId: hostname, origin: url.origin };
 }
 
-// Stable, non-PII user handle for the super-admin, generated once and reused
-// so every passkey registered across hostnames belongs to the same account in
-// the authenticator's UI.
-function getSuperAdminUserHandle(): Uint8Array {
-  const row = db.query("SELECT value FROM config WHERE key = 'webauthn_user_handle'").get() as { value: string } | null;
-  if (row?.value) return new Uint8Array(Buffer.from(row.value, "hex"));
+// Stable, non-PII user handle per account, generated once and reused so every
+// passkey an account registers across hostnames shows up as the same identity
+// in the authenticator's UI. Random rather than derived from the id or the
+// username so nothing about the account leaks through the authenticator.
+function userHandleFor(userId: number): Uint8Array {
+  const row = db.query("SELECT webauthn_user_handle FROM admin_users WHERE id = ?").get(userId) as { webauthn_user_handle: string | null } | null;
+  if (!row) throw new Error("Account not found");
+  if (row.webauthn_user_handle) return new Uint8Array(Buffer.from(row.webauthn_user_handle, "hex"));
   const handle = randomBytes(32).toString("hex");
-  db.run("INSERT INTO config (key, value) VALUES ('webauthn_user_handle', ?)", handle);
+  db.run("UPDATE admin_users SET webauthn_user_handle = ? WHERE id = ?", handle, userId);
   return new Uint8Array(Buffer.from(handle, "hex"));
 }
 
-function userHandleFor(userId: number | null): Uint8Array {
-  if (userId == null) return getSuperAdminUserHandle();
-  // Site-scoped users don't have passkeys yet; derive deterministically so the
-  // column stays meaningful if that changes.
-  return new Uint8Array(Buffer.from(`user-${userId}`.padEnd(32, "\0"), "utf8"));
+function usernameFor(userId: number): string {
+  const row = db.query("SELECT username FROM admin_users WHERE id = ?").get(userId) as { username: string } | null;
+  return row?.username ?? `user-${userId}`;
 }
 
 function sanitizeLabel(label: string | undefined, fallback: string): string {
@@ -133,29 +136,33 @@ function sanitizeLabel(label: string | undefined, fallback: string): string {
   return cleaned.slice(0, MAX_LABEL_LENGTH);
 }
 
-export function listCredentials(userId: number | null = null): StoredCredential[] {
+export function listCredentials(userId: number): StoredCredential[] {
   return db.query(
     `SELECT * FROM webauthn_credentials
-     WHERE user_id IS ? ORDER BY created_at DESC`
+     WHERE user_id = ? ORDER BY created_at DESC`
   ).all(userId) as StoredCredential[];
 }
 
-function credentialsForRp(rpId: string, userId: number | null): StoredCredential[] {
+function credentialsForRp(rpId: string, userId: number): StoredCredential[] {
   return db.query(
-    "SELECT * FROM webauthn_credentials WHERE rp_id = ? AND user_id IS ?"
+    "SELECT * FROM webauthn_credentials WHERE rp_id = ? AND user_id = ?"
   ).all(rpId, userId) as StoredCredential[];
 }
 
 // Does this hostname have at least one passkey the login screen can offer?
+// With no userId the question is asked across every account, which is what
+// the anonymous login screen needs; with one it's scoped to that account.
 export function hasCredentialsForRp(rpId: string, userId: number | null = null): boolean {
-  const row = db.query(
-    "SELECT COUNT(*) as cnt FROM webauthn_credentials WHERE rp_id = ? AND user_id IS ?"
-  ).get(rpId, userId) as { cnt: number };
+  const row = (userId == null
+    ? db.query("SELECT COUNT(*) as cnt FROM webauthn_credentials WHERE rp_id = ?").get(rpId)
+    : db.query("SELECT COUNT(*) as cnt FROM webauthn_credentials WHERE rp_id = ? AND user_id = ?").get(rpId, userId)
+  ) as { cnt: number };
   return row.cnt > 0;
 }
 
-export function deleteCredential(id: number, userId: number | null = null): boolean {
-  const result = db.run("DELETE FROM webauthn_credentials WHERE id = ? AND user_id IS ?", id, userId);
+// Scoped to the owning account so one user can never remove another's passkey.
+export function deleteCredential(id: number, userId: number): boolean {
+  const result = db.run("DELETE FROM webauthn_credentials WHERE id = ? AND user_id = ?", id, userId);
   return result.changes > 0;
 }
 
@@ -202,14 +209,15 @@ export function cleanExpiredChallenges(): void {
 
 // --- Registration ---
 
-export async function beginRegistration(rp: RpContext, ip: string, userId: number | null = null): Promise<any> {
+export async function beginRegistration(rp: RpContext, ip: string, userId: number): Promise<any> {
   const existing = credentialsForRp(rp.rpId, userId);
+  const username = usernameFor(userId);
   const options = await generateRegistrationOptions({
     rpName: RP_NAME,
     rpID: rp.rpId,
     userID: userHandleFor(userId),
-    userName: userId == null ? "admin" : `user-${userId}`,
-    userDisplayName: userId == null ? "Hoster Admin" : `Hoster user ${userId}`,
+    userName: username,
+    userDisplayName: `${username} · Hoster`,
     attestationType: "none",
     // Don't let the same authenticator register twice for this hostname.
     excludeCredentials: existing.map(c => ({
@@ -234,7 +242,7 @@ export async function finishRegistration(
   ip: string,
   response: any,
   label: string | undefined,
-  userId: number | null = null
+  userId: number
 ): Promise<StoredCredential> {
   if (!response?.id) throw new Error("Malformed registration response");
   const challenge = response?.response?.clientDataJSON
@@ -282,7 +290,7 @@ export async function finishRegistration(
 // --- Authentication ---
 
 export async function beginLogin(rp: RpContext, ip: string): Promise<any> {
-  if (!hasCredentialsForRp(rp.rpId, null)) {
+  if (!hasCredentialsForRp(rp.rpId)) {
     throw new Error("No passkeys registered for this address");
   }
   const options = await generateAuthenticationOptions({
@@ -313,9 +321,13 @@ export async function finishLogin(rp: RpContext, ip: string, response: any): Pro
   ).get(response.id, stored.rp_id) as StoredCredential | null;
   if (!credential) throw new Error("Unrecognized passkey");
 
-  // Only the super-admin has passkeys today; refuse anything else outright
-  // rather than silently minting a session for an unexpected principal.
-  if (credential.user_id !== null) throw new Error("Unrecognized passkey");
+  // The credential must belong to an account that still exists. Deleting a
+  // user removes their credentials, but fail closed regardless rather than
+  // mint a session for an orphaned row.
+  if (credential.user_id == null ||
+      !db.query("SELECT 1 FROM admin_users WHERE id = ?").get(credential.user_id)) {
+    throw new Error("Unrecognized passkey");
+  }
 
   const verification = await verifyAuthenticationResponse({
     response,

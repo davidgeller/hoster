@@ -27,10 +27,16 @@ if (!process.env.HOSTER_HOME) {
 // at module load) to evaluate now, so the schema is complete before any test
 // runs. Backup/restore queries every table; without these imports, tests that
 // don't directly touch mcp/oauth would still fail when backup.ts walks them.
-import "../src/db";
-import "../src/sites";
-import "../src/mcp";
-import "../src/oauth";
-import "../src/analytics";
-import "../src/auth";
-import "../src/webauthn";
+//
+// These MUST be dynamic imports. A static `import "../src/db"` is hoisted
+// above the HOSTER_HOME assignment, so db.ts would resolve its data directory
+// before the variable exists and fall back to dirname(process.execPath) — the
+// Bun install directory — leaking a persistent hoster.db and sites/ tree there
+// that every subsequent run silently reuses.
+await import("../src/db");
+await import("../src/sites");
+await import("../src/mcp");
+await import("../src/oauth");
+await import("../src/analytics");
+await import("../src/auth");
+await import("../src/webauthn");

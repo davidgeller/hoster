@@ -432,6 +432,7 @@ const TOOLS = [
       properties: {
         site: { type: "string" as const, description: "Site slug" },
         label: { type: "string" as const, description: "Optional short label applied to the snapshot being frozen (e.g. 'v1 — initial layout')" },
+        notes: { type: "string" as const, description: "Optional release notes (up to 2000 chars) describing what changed in this snapshot. Shown to admins in the Versions dialog." },
       },
       required: ["site"],
     },
@@ -945,6 +946,7 @@ async function handleToolCall(name: string, args: any, token: ValidatedToken, to
         const versions = listVersions(siteSlug).map(v => ({
           version: v.version,
           label: v.label,
+          notes: v.notes,
           size_bytes: v.size_bytes,
           file_count: v.file_count,
           created_at: v.created_at,
@@ -965,7 +967,14 @@ async function handleToolCall(name: string, args: any, token: ValidatedToken, to
           return { content: [{ type: "text", text: err }], isError: true };
         }
         const label = typeof args.label === "string" ? args.label : null;
-        const newVer = commitVersion(siteSlug, label);
+        const notes = typeof args.notes === "string" ? args.notes : null;
+        let newVer;
+        try {
+          newVer = commitVersion(siteSlug, label, notes);
+        } catch (e: any) {
+          logAudit(token.id, token.label, name, siteSlug, null, false, e?.message || "commit failed");
+          return { content: [{ type: "text", text: e?.message || "Commit failed" }], isError: true };
+        }
         if (!newVer) {
           const err = `Site '${siteSlug}' has no current version to commit`;
           logAudit(token.id, token.label, name, siteSlug, null, false, err);

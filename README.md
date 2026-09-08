@@ -46,8 +46,12 @@ In every case the Hoster binary itself is identical — only the front-end TLS l
 - **Configuration backup** — save and restore your entire hoster setup (settings, sites, versions) to a `.hoster` file with optional AES-256-GCM encryption for device migration; restore auto-rebuilds active-version symlinks and reports broken sites
 - **Self-healing site state** — `_current` symlinks rebuild at startup, after restore, or on demand from a database-driven repair pass; broken sites surface a red badge in the admin UI
 - **Analytics dashboard** — request logs, visitor stats, countries, top pages, status codes, blocked request intelligence, min/avg/max response times
+- **Country allow-list with a real picker** — search countries by name or code, add them from a list of who actually visited last week, and never look up an ISO code again; the server validates every code it saves
 - **IP auto-blocking** — automatically block IPs that accumulate too many denied requests, with configurable thresholds and duration
-- **Secure auth** — Argon2id password hashing, passkeys (WebAuthn) for passwordless sign-in, TOTP two-factor authentication, session tokens, CSRF protection, rate-limited login
+- **Multiple administrators and site users** — every person gets their own username and password; any number of accounts can be administrators, and site users see only the sites assigned to them. Every account can enable TOTP and register passkeys
+- **Secure auth** — Argon2id password hashing, passkeys (WebAuthn) for passwordless sign-in, TOTP two-factor authentication, session tokens, CSRF protection, rate-limited login, step-up password checks for sensitive changes, per-actor audit log
+- **File manager** — browse, upload, create folders, rename/move, duplicate, and delete files or whole folders in a site's working version, with bulk selection and auto-snapshot before the first destructive change
+- **Release notes on versions** — attach a label and free-text notes to any deploy or snapshot (from the admin UI or MCP) and edit them later, so every admin can see what changed and why
 - **Light/Dark/Auto themes** — admin panel respects system preference
 - **Single binary** — compiles to a standalone executable with no runtime dependencies
 - **MCP server** — a full content-management command surface for AI tools (Claude Code, Cursor, etc.) over the Model Context Protocol: read/write/rename/delete files, chunked media uploads (JPEG, PNG, GIF, SVG, MP3, MP4) with magic-byte / XML-script validation, server-side `fetch_remote_media` for importing assets from public URLs, and server-side `resize_image` to scale, re-encode, and recompress images in place
@@ -79,7 +83,7 @@ For the selected site it surfaces, at a glance:
 - **MCP** on/off and read-only state
 - **Aliases** (path aliases) and **Host** aliases (custom domains)
 
-Inline actions cover the full lifecycle without leaving the page: **Visit**, **Files**, **Versions**, **Update**, **Upload File**, **Settings**, **Reload**, plus **Disable** and **Delete**. The preview pane refreshes on demand so you can confirm a deploy or an AI edit immediately.
+Inline actions cover the full lifecycle without leaving the page: **Visit**, **Files** (the file manager), **Versions** (with release notes), **Update**, **Upload File**, **Settings**, **Reload**, plus **Disable** and **Delete**. The preview pane refreshes on demand so you can confirm a deploy or an AI edit immediately.
 
 ## Prerequisites
 
@@ -187,9 +191,9 @@ sudo systemctl enable --now hoster
 sudo journalctl -u hoster -f
 ```
 
-### 8. Set Your Admin Password
+### 8. Create the First Administrator
 
-Open `https://yourdomain.com/_admin` in your browser. On first visit, you'll be prompted to create an admin password (minimum 8 characters).
+Open `https://yourdomain.com/_admin` in your browser. On first visit, you'll be prompted to create the first administrator account — a username (defaults to `admin`) and a password of at least 8 characters. You can add more administrators and site users later under **Settings → Users**.
 
 ## Setup Guide — VPS with a public IP
 
@@ -265,7 +269,7 @@ Skip TLS entirely and just run Hoster as-is. The admin panel and sites are reach
 
 ### 9. Enable Two-Factor Authentication (Recommended)
 
-After logging in, go to **Settings** and click **Enable 2FA** to add TOTP-based two-factor authentication:
+After logging in, go to **Settings → Account** and click **Enable 2FA** to add TOTP-based two-factor authentication to your account. Every account — administrator or site user — sets up its own 2FA the same way:
 
 1. Scan the QR code with any authenticator app (Authy, Google Authenticator, 1Password, etc.)
 2. Enter the 6-digit code to confirm
@@ -277,7 +281,7 @@ With 2FA enabled, login requires both your password and a code from your authent
 
 A passkey signs you in with Touch ID, Windows Hello, or a hardware security key — no password and no authenticator code. Because it combines something you have (the device) with something you are (biometric or PIN), it replaces the whole password + 2FA flow in one tap rather than acting as a second factor.
 
-Go to **Settings → Passkeys**, enter your password to confirm, click **Add Passkey**, and approve the prompt from your browser or OS. From then on, the login screen offers **Sign in with a passkey** above the password form.
+Go to **Settings → Account → Passkeys**, enter your password to confirm, click **Add Passkey**, and approve the prompt from your browser or OS. From then on, the login screen offers **Sign in with a passkey** above the password form. Passkeys are per account: the credential your browser presents identifies which account is signing in, so no username is typed first, and every account (administrators and site users alike) can register its own.
 
 Two things are worth knowing before you rely on it:
 
@@ -285,6 +289,19 @@ Two things are worth knowing before you rely on it:
 - **Passkeys need HTTPS, or localhost.** This is a browser rule, not a Hoster one — WebAuthn is unavailable in a non-secure context. On a LAN-only install reached over plain HTTP, the Settings card says so and the option is hidden.
 
 Your password (and TOTP, if enabled) stays active the whole time, so losing the device that holds a passkey never locks you out. Adding or removing a passkey re-checks your password, so a hijacked session cannot quietly enroll one.
+
+### 11. Add More Administrators and Site Users
+
+Hoster has two kinds of accounts, both managed under **Settings → Users** (administrators only):
+
+- **Administrators** see and control everything: every site, Settings, users, MCP/OAuth, backups. There can be as many as you like, and the last one can never be demoted or deleted.
+- **Site users** sign in the same way but see the full admin panel for their assigned sites only. They can upload and manage files, snapshot and roll back versions, edit site settings, and read that site's analytics — but cannot create or delete sites, and never see the platform-wide Settings tabs.
+
+To add an account, enter a username and password, tick **Administrator** if it should be one (you'll be asked for *your* password to confirm), or pick the sites a site user may manage. From the same panel you can promote or demote accounts, reset passwords, reassign sites, delete accounts, and — for someone who has lost their phone or security key — disable their 2FA or remove their passkeys so they can sign in again. Every account manages its own password, 2FA, and passkeys under **Settings → Account**.
+
+Anything that touches an administrator account asks for your own password again, so a briefly hijacked session can't quietly take over a peer. All of these actions are written to the audit log with the acting username.
+
+> **Upgrading from an earlier release?** Older versions had a single admin who signed in with a blank username. On first start of v1.5+, that identity becomes an ordinary administrator account named **`admin`** (or `platform-admin` if a site user already had that name), keeping its password, 2FA, passkeys, and even its open sessions. Sign in with that username from now on; the startup log names the account it created.
 
 ## Deploying Sites
 
@@ -294,7 +311,8 @@ Your password (and TOTP, if enabled) stays active the whole time, so losing the 
 2. Click **Deploy Site**
 3. Enter a slug (e.g., `my-app`) — this becomes the URL path
 4. Upload a ZIP file containing your site files
-5. Your site is live at `https://yourdomain.com/my-app/`
+5. Optionally add a **version label** and **release notes** describing what's in this deploy
+6. Your site is live at `https://yourdomain.com/my-app/`
 
 ### Updating a Site
 
@@ -328,10 +346,26 @@ Blank sites work exactly like deployed sites: they version, snapshot, and can be
 Every deploy creates a version, but you can also snapshot the current working state at any time — useful for marking checkpoints during AI editing sessions:
 
 1. Open **Versions** on a site card
-2. Optionally enter a label (e.g. "first draft", "after hero redesign")
+2. Optionally enter a label (e.g. "first draft", "after hero redesign") and release notes
 3. Click **Snapshot Current**
 
 The current version is frozen under that label and a new mutable copy is forked for further edits. You can roll back to any snapshot from the same Versions dialog.
+
+### Release Notes
+
+Every version can carry a short label (up to 120 characters) and free-text release notes (up to 2000 characters). Add them when you deploy a ZIP, when you snapshot, or from an AI tool via the MCP `commit_version` tool's `notes` argument — and edit or clear them any time with **Edit notes** in the Versions dialog. Notes are shown to every admin who can see the site, so they're the place to record *why* a version exists ("hotfix for the broken contact form", "client-approved copy") before you roll forward or back.
+
+### Managing Files
+
+Click **Files** on a site card (or in the Site Explorer) to open the file manager for the site's current working version. It lists every file and folder under the served content directory — the same paths the upload dialog and the MCP tools use — and lets you:
+
+- **Upload** files or whole folders (drag-and-drop or picker), preserving structure
+- **New folder** — create an empty directory
+- **Rename / move** a file or folder to any path; destination folders are created as needed, and you'll be asked before an existing file is replaced (folders are never replaced)
+- **Duplicate** a file or an entire folder tree
+- **Delete** one item from its row, or tick several (or **select all** of a filtered view) and delete them together — folders are removed recursively
+
+Every change is made to the working version only, is audit-logged with your username, and honors the site's **Auto-snapshot before edits** setting: the first change to an untouched version freezes it first, so there is always a rollback point. With auto-snapshot off, a delete is permanent unless you have a snapshot or a backup — the confirmation dialog tells you which case you're in.
 
 ### Site Aliases
 
@@ -527,8 +561,8 @@ Tokens are short-lived (1 hour access, 30-day rotating refresh) and bound to a s
 | `resize_image` | Resize, re-encode, and/or recompress a PNG or JPEG already in the site, writing the result back (blocked in read-only mode) |
 | `rename_file` | Rename or move a file within a site, across folders, creating destination directories as needed (blocked in read-only mode) |
 | `delete_file` | Delete a file (blocked in read-only mode) |
-| `list_versions` | List all snapshot versions of a site with labels, sizes, and MCP-modified flags |
-| `commit_version` | Freeze the current working state as a labeled snapshot and fork a new mutable copy |
+| `list_versions` | List all snapshot versions of a site with labels, release notes, sizes, and modified flags |
+| `commit_version` | Freeze the current working state as a labeled snapshot (with optional release `notes`) and fork a new mutable copy |
 
 ### Media File Uploads
 
@@ -675,8 +709,9 @@ Sites whose on-disk state doesn't match the database appear in the admin UI with
 
 | Data | Included |
 |------|----------|
-| Admin password, TOTP secret, recovery codes | Yes |
+| All accounts (administrators and site users): usernames, password hashes, TOTP secrets, recovery codes, site assignments | Yes |
 | Registered passkeys (public keys) | Yes |
+| Version labels and release notes | Yes |
 | Country restrictions, auto-block config | Yes |
 | All sites (files, versions, aliases) | Yes (current version only by default) |
 | MCP tokens (hashed), blocked IPs | Yes |
@@ -705,7 +740,9 @@ scp hoster-x64.sh youruser@yourhost:~/
 ssh youruser@yourhost 'bash ~/hoster-x64.sh && sudo systemctl restart hoster'
 ```
 
-Your data (admin password, sites, analytics) is preserved across upgrades. The startup self-heal also rebuilds any missing `_current` symlinks automatically — so even if a previous upgrade or restore left sites in a half-broken state, restarting picks them up.
+Your data (accounts, sites, analytics) is preserved across upgrades. The startup self-heal also rebuilds any missing `_current` symlinks automatically — so even if a previous upgrade or restore left sites in a half-broken state, restarting picks them up.
+
+**Upgrading to v1.5 or later from an earlier release:** the single blank-username admin becomes a real account named `admin` on first start (see [Add More Administrators and Site Users](#11-add-more-administrators-and-site-users)). Sign in with username `admin` and your existing password; 2FA and passkeys carry over.
 
 ## Verifying Your Setup
 
@@ -732,8 +769,10 @@ hoster/
 ├── src/                # Server source (TypeScript)
 │   ├── index.ts        # Entry point
 │   ├── server.ts       # HTTP server & routing
-│   ├── auth.ts         # Authentication & sessions
-│   ├── admin-api.ts    # Admin REST API
+│   ├── auth.ts         # Accounts (admins + site users), sessions, TOTP
+│   ├── webauthn.ts     # Passkeys (per account)
+│   ├── admin-api.ts    # Admin REST API (incl. file manager, users, version notes)
+│   ├── countries.ts    # ISO 3166-1 list + allow-list validation
 │   ├── analytics.ts    # Request logging & dashboard queries
 │   ├── sites.ts        # Site management & versioning
 │   ├── backup.ts       # Configuration backup & restore
@@ -765,9 +804,23 @@ Runtime directories (created on the Pi, not in git):
 
 Hoster is designed to be safe for public exposure. Since the source code is public, security relies on defense in depth rather than obscurity.
 
+### Accounts & Roles
+
+Since v1.5 there is no special, anonymous administrator. Every principal is a row in one `admin_users` table with an `is_admin` flag, and every login names an account. Design decisions and why:
+
+- **Two roles, one code path.** Administrators see everything; site users see only their assigned sites. Authorization is decided once per request from the session's account, and every per-site route checks the slug against that account's grants. There is no "owner" tier — administrators are peers — so accountability comes from the audit log, which records the acting username on every entry.
+- **The last administrator is protected.** It can be neither demoted nor deleted, enforced in the account module itself so the rule holds for every caller. Nobody can change their own role or delete their own account.
+- **Step-up for anything that touches an administrator.** Creating an administrator, granting or revoking admin rights, resetting an administrator's password, disabling their 2FA or removing their passkeys, and deleting an administrator all require the acting admin's own password, rate-limited through the same lockout as login. A briefly hijacked admin session therefore cannot mint or capture a peer account and keep access after the session ends. Changes to site users carry no such risk and need no step-up.
+- **No username enumeration.** A login for a username that doesn't exist still performs a full Argon2id verification against a random dummy hash, and the OAuth consent screen returns the same error for a wrong account password and a wrong delegate password.
+- **Deleting an account is complete.** Its sessions, passkeys, pending 2FA tokens, and in-flight WebAuthn challenges go with it, and any session whose account has disappeared is rejected on its next request.
+- **Per-account 2FA and passkeys.** TOTP secrets and recovery codes live on the account; a pending 2FA token is bound to the account (and IP) it was issued for, so one user's recovery code can never complete another user's login. A passkey credential carries its owner, so passkey sign-in never asks for a username and can never be redeemed for a different account.
+- **Migration keeps you in.** The pre-v1.5 config-table admin is converted to an ordinary administrator on first start; its sessions and passkeys are re-parented rather than dropped.
+
+Residual risk: login lockout is per source IP. A distributed attacker can spread guesses across accounts and addresses. Per-username lockout was deliberately not added because it would let anyone lock out a named administrator; the mitigation is strong passwords plus TOTP or a passkey on every administrator account.
+
 ### Authentication & Sessions
 
-- Admin password hashed with **Argon2id** (memory-hard, GPU-resistant; memoryCost=64KB, timeCost=3)
+- Passwords hashed with **Argon2id** (memory-hard, GPU-resistant; memoryCost=64KB, timeCost=3)
 - **Passkeys (WebAuthn)** — phishing-resistant passwordless sign-in. Discoverable credentials with user verification required, so a passkey is possession + biometric/PIN on its own; only public keys are stored. Credentials are bound to the RP ID (hostname) they were created on, challenges are single-use with a 5-minute TTL, and the signature counter is checked on every assertion to detect cloned authenticators. Enrolling or removing one requires the password.
 - **TOTP two-factor authentication** — RFC 6238 compliant, compatible with all major authenticator apps
 - 8 one-time **recovery codes** (SHA-256 hashed, constant-time comparison) for account recovery
@@ -777,7 +830,7 @@ Hoster is designed to be safe for public exposure. Since the source code is publ
 - Login **rate-limited** to 5 attempts per 15 minutes per IP; 2FA verification separately rate-limited
 - 24-hour session duration
 - Password change requires current password verification
-- **Audit logging** — login (password or passkey), password changes, 2FA enable/disable, passkey enrollment/removal, and site deletion are logged with IP and timestamp
+- **Audit logging** — login (password or passkey), password changes, 2FA enable/disable, passkey enrollment/removal, user management, file operations, version changes, settings changes, and site deletion are logged with IP, timestamp, and the acting username
 
 ### Passkeys (WebAuthn)
 
@@ -800,7 +853,7 @@ Failed passkey sign-ins feed the same per-IP lockout as password logins, and bot
 
 - **No open ports** — all traffic enters through Cloudflare's encrypted tunnel
 - Cloudflare provides DDoS protection, WAF, bot management, and IP reputation filtering at the edge
-- Country-based access restriction (configurable, uses Cloudflare's `cf-ipcountry` header)
+- Country-based access restriction (configurable, uses Cloudflare's `cf-ipcountry` header). The allow-list only accepts codes from the server's ISO 3166-1 table (plus Cloudflare's `XK`, `T1`, `XX`); an unknown code is rejected by name and the previous list is kept, so a typo can no longer produce a list that silently blocks every visitor
 - **IP auto-blocking** — IPs exceeding a configurable number of blocked requests within a time window are automatically denied access. Threshold, window, and block duration are all configurable in Settings. Uses real client IPs from Cloudflare's `cf-connecting-ip` header, so it works correctly behind a tunnel.
 - Proxy header trust validation — `cf-connecting-ip` only trusted when Cloudflare signal headers are present
 - **Security headers, applied on every response.** First-party surfaces (the admin UI document *and* its static assets, the admin/OAuth/MCP APIs, and discovery endpoints) carry the full set: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Strict-Transport-Security`, `Permissions-Policy`, and a `Content-Security-Policy` of `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'`. `X-Frame-Options: DENY` + `frame-ancestors 'none'` make the admin panel unframable (anti-clickjacking); `object-src 'none'` and `base-uri 'self'` blunt plugin and base-tag injection. (`script-src` retains `'unsafe-inline'` because the admin SPA renders action buttons with inline `onclick=` handlers; the planned hardening is to move those to delegated listeners and drop it.)
@@ -822,6 +875,21 @@ Failed passkey sign-ins feed the same per-IP lockout as password logins, and bot
 - Site slugs validated against strict regex (`[a-z0-9-]+`, no leading/trailing hyphens)
 - Site aliases validated with the same rules; aliases cannot shadow existing site slugs or reserved prefixes
 - `root_dir` setting validated at configuration time — rejects path traversal sequences
+
+### File Management
+
+The admin file manager can now delete, rename, copy, and create folders, which extends what an authenticated session can do from "add content" to "destroy content". The controls:
+
+- **One containment helper for every operation.** Upload, delete, rename, copy, and mkdir all resolve paths through the same function: normalized relative path (no `..`, no NUL, leading slashes stripped), logical containment under the site's served content directory, and *realpath* containment for anything that already exists — including the leaf. A symlink inside a site that points outside it is refused for every operation, deletion included. Deploy already strips symlinks from uploaded ZIPs; this is the backstop.
+- **No dereferencing.** Copies never follow symlinks and deletes never descend into a link's target.
+- **Directories are never replaced.** Rename and copy will replace a *file* only when you explicitly confirm; a directory at the destination always aborts. A directory cannot be moved or copied into itself.
+- **Batches validate before they act.** A bulk delete checks every path first; one bad path aborts the whole request before anything is removed.
+- **Bounded.** Copies are capped at 500 MB (the ZIP deploy limit) so a single request can't fill the disk. Bulk deletes are capped at 5000 paths.
+- **Rollback-aware.** Every operation honors the site's auto-snapshot setting exactly like MCP writes: the first change to an untouched working version freezes it first. Version statistics are recomputed after each change.
+- **Audited.** Each operation is logged with the acting username, slug, and paths (truncated for very large batches).
+- **Scoped.** Site users can manage files only on sites assigned to them; the same per-site gate that protects upload protects these routes.
+
+Residual risk: with auto-snapshot off, deletion is permanent unless a snapshot or backup exists. The confirmation dialog says which case applies. Enable auto-snapshot on sites that people edit by hand.
 
 ### MCP Access
 
@@ -878,7 +946,8 @@ OAuth-issued tokens stored alongside static tokens (same hashing, expiration, an
 - Uploaded backup files are size-limited (500 MB max)
 - Restored archives are stripped of symlinks and verified against zip slip (path escape) attacks before any files are written
 - Optional **AES-256-GCM encryption** with PBKDF2 key derivation (100,000 iterations, 32-byte random salt) protects backups at rest
-- **Unencrypted backups contain sensitive data** — the TOTP secret and recovery code hashes are included. Anyone with an unencrypted `.hoster` file and access to the password hash could potentially compromise the account. Use a password for backups stored off-device.
+- **Unencrypted backups contain sensitive data** — every account's password hash, TOTP secret, and recovery code hashes are included. Anyone with an unencrypted `.hoster` file could attempt offline cracking of any account. Use a password for backups stored off-device.
+- Restoring a backup requires the acting administrator's own password (step-up) and invalidates every session, since it replaces every account.
 - Import requires explicit confirmation (`confirm=yes`) to prevent accidental overwrites
 - All backup and restore operations are audit-logged with IP address
 
@@ -902,6 +971,16 @@ OAuth-issued tokens stored alongside static tokens (same hashing, expiration, an
 - HTTP/2 and HTTP/3 support
 - Edge caching (configurable per-path)
 
+### Security Hardening Log — v1.5.0
+
+v1.5.0 adds multi-administrator accounts, the file manager, version release notes, and the country picker. The full design review is in [`SECURITY-AUDIT.md`](SECURITY-AUDIT.md) (September 2026 section). Fixes that shipped alongside the features:
+
+| # | Severity | Issue | Fix |
+|---|----------|-------|-----|
+| 1 | Medium (test integrity) | The test preload set `HOSTER_HOME` *after* hoisted static imports, so the whole suite had been running against a persistent database in the Bun install directory with a months-old schema. | Preload uses dynamic imports; every run now gets a fresh temp directory. |
+| 2 | Low | Failed **delegate** logins on the OAuth consent screen did not feed the login lockout. | They now record a failed attempt like every other password check. |
+| 3 | Info | Several HTML `pattern` attributes were invalid under the browser's `v` regex flag, disabling client-side validation for slug/username fields (server validation was unaffected). | Patterns fixed. |
+
 ### Security Hardening Log — v1.4.1
 
 v1.4.1 is a security point release following a threat-analysis pass against a live deployment. The assessment combined a **source-assisted code review** of the auth, routing, OAuth/MCP, SSRF, and file-serving paths with **non-destructive live probing** of the running site (headers, path-traversal attempts, malformed input, OAuth/MCP discovery). No way to gain unauthorized access was found — the authentication, OAuth 2.1/PKCE, SSRF, and path-traversal defenses all held. The pass did surface a set of defense-in-depth gaps, all fixed in this release:
@@ -922,7 +1001,7 @@ The changes were validated at three levels, so a header tweak can't silently bre
 2. **Live black-box probing** (non-destructive) — against the running site: full header dumps on `/_admin`, `/_admin/app.js`, and the API; encoded/`..` path-traversal attempts (all `400`); a malformed login body; and OAuth/MCP discovery endpoints. Confirmed the header gap and the 500 before fixing.
 3. **CSP compatibility check** — grepped `admin/app.js` for inline `onclick=` handlers and inline `<script>` blocks *before* choosing the document CSP, because a strict `script-src 'self'` would have broken every admin action button. This is why `script-src` keeps `'unsafe-inline'` for now.
 4. **Local boot verification** — booted the server with the changes and re-ran the probes, asserting: full headers on the admin document/assets/API, `400` (not `500`) on a malformed login body, and **only** `nosniff` + `Referrer-Policy` on both a real hosted page and a hosted 404 (proving customer content keeps working with no restrictive CSP/XFO).
-5. **Automated suite** — `bun test` (83 tests across auth, passkeys, uploads, backup/restore, host-aliases) passing, plus the build's own compile-and-boot preflight in `build-pi.sh`.
+5. **Automated suite** — `bun test` (now 118 tests across auth/accounts, passkeys, uploads, file operations, version notes, countries, backup/restore, host-aliases) passing, plus the build's own compile-and-boot preflight in `build-pi.sh`.
 
 ## Performance
 

@@ -20,8 +20,10 @@
 // works unchanged for both static and OAuth tokens.
 
 import db, { sqliteNow } from "./db";
-import { verifyPassword, isTotpEnabled, getTotpSecret, verifyTotpCode, isRateLimited } from "./auth";
-import { useRecoveryCode } from "./auth";
+import {
+  verifyUserPassword, isTotpEnabled, verifyTotpOrRecovery, isRateLimited,
+  getUserByUsername, userCanAccessSite, recordLoginAttempt,
+} from "./auth";
 import { getSite } from "./sites";
 
 // --- Schema ---
@@ -400,7 +402,6 @@ function authorizeError(p: AuthorizeParams, error: string, description: string):
 }
 
 function renderConsent(p: AuthorizeParams, client: OauthClientRow, slug: string, scopes: string[], errorMsg?: string): Response {
-  const totp = isTotpEnabled();
   const site = getSite(slug);
   const siteName = site?.name || slug;
   const clientUri = client.client_uri ? `<div style="font-size:0.85rem;color:#666;margin-top:4px"><a href="${escapeHtml(client.client_uri)}" rel="noopener noreferrer" target="_blank">${escapeHtml(client.client_uri)}</a></div>` : "";
@@ -466,12 +467,13 @@ function renderConsent(p: AuthorizeParams, client: OauthClientRow, slug: string,
     <form method="POST" action="/oauth/authorize" autocomplete="off">
       ${hiddenFields}
 
-      <label for="delegate_label">Delegate name <small style="color:#888;font-weight:normal">(leave empty to authorize as the admin)</small></label>
-      <input type="text" id="delegate_label" name="delegate_label" autocomplete="username" placeholder="empty = admin">
+      <label for="username">Username <small style="color:#888;font-weight:normal">(a Hoster account with access to this site, or a site delegate name)</small></label>
+      <input type="text" id="username" name="username" autocomplete="username" required autofocus>
 
       <label for="password">Password</label>
-      <input type="password" id="password" name="password" required autofocus>
-      ${totp ? `<label for="totp_code">2FA code <small style="color:#888;font-weight:normal">(admin only)</small></label><input type="text" id="totp_code" name="totp_code" inputmode="numeric" pattern="[0-9]*" autocomplete="off">` : ""}
+      <input type="password" id="password" name="password" required>
+      <label for="totp_code">2FA code <small style="color:#888;font-weight:normal">(only if your account has two-factor enabled)</small></label>
+      <input type="text" id="totp_code" name="totp_code" inputmode="numeric" pattern="[0-9a-fA-F\\-\\s]*" autocomplete="one-time-code">
       <div class="actions">
         <button type="submit" name="decision" value="deny" class="btn-secondary" formnovalidate>Deny</button>
         <button type="submit" name="decision" value="approve" class="btn-primary">Authorize</button>
@@ -551,31 +553,48 @@ export async function handleAuthorize(req: Request, ip: string): Promise<Respons
   }
 
   const password = (formData!.get("password") as string | null) || "";
-  const delegateLabel = ((formData!.get("delegate_label") as string | null) || "").trim();
+  // "delegate_label" is accepted as an alias for older bookmarked forms.
+  const identity = (((formData!.get("username") ?? formData!.get("delegate_label")) as string | null) || "").trim();
+  if (!identity) {
+    return renderConsent(p, client, slug, scopes, "Username is required.");
+  }
 
-  // --- Authenticate as either admin (no delegate label) or site delegate ---
+  // --- Authenticate as a Hoster account or, failing that, a site delegate ---
+  //
+  // Accounts (administrators and site users) are global; delegates are
+  // per-site labels. A name that matches an account is always treated as that
+  // account, so a delegate can never be created to shadow a real user. An
+  // unknown name falls through to the delegate check, which pays the same
+  // Argon2 cost either way, so the response time doesn't reveal whether a
+  // username exists.
   let principal: string;       // who authenticated, for the token label and audit
   let delegateRow: SiteDelegateRow | null = null;
-  if (delegateLabel) {
-    delegateRow = await verifyDelegate(slug, delegateLabel, password);
-    if (!delegateRow) {
-      return renderConsent(p, client, slug, scopes, "Incorrect delegate password, or no such delegate for this site.");
+  const account = getUserByUsername(identity);
+  if (account) {
+    const verified = await verifyUserPassword(identity, password, ip);
+    if (!verified) {
+      return renderConsent(p, client, slug, scopes, "Incorrect username or password.");
     }
-    principal = `delegate:${delegateRow.label}`;
-    // Delegates do not have TOTP — admin is the only TOTP-protected identity.
-  } else {
-    if (!password || !(await verifyPassword(password, ip))) {
-      return renderConsent(p, client, slug, scopes, "Incorrect admin password.");
+    if (!userCanAccessSite(verified, slug)) {
+      return renderConsent(p, client, slug, scopes, "This account does not have access to this site.");
     }
-    if (isTotpEnabled()) {
+    if (isTotpEnabled(verified.userId)) {
       const code = ((formData!.get("totp_code") as string | null) || "").trim();
-      const secret = getTotpSecret();
-      const totpOk = !!code && !!secret && (verifyTotpCode(secret, code) || useRecoveryCode(code));
-      if (!totpOk) {
+      if (!verifyTotpOrRecovery(verified.userId, code)) {
         return renderConsent(p, client, slug, scopes, "Invalid 2FA code.");
       }
     }
-    principal = "admin";
+    principal = `user:${verified.username}`;
+  } else {
+    delegateRow = await verifyDelegate(slug, identity, password);
+    if (!delegateRow) {
+      // Feed the shared per-IP lockout so delegate passwords can't be
+      // brute-forced any faster than account passwords.
+      recordLoginAttempt(ip, false);
+      return renderConsent(p, client, slug, scopes, "Incorrect username or password.");
+    }
+    principal = `delegate:${delegateRow.label}`;
+    // Delegates do not have TOTP — only accounts do.
   }
 
   // --- Issue authorization code ---
@@ -737,7 +756,9 @@ function handleAuthCodeGrant(form: FormData, client: OauthClientRow): Response {
   const principal = row.principal || "admin";
   // Suffix the label with the delegate name so admins can tell at a glance which
   // human/principal actually authorized this connection in the OAuth Connections list.
-  const principalSuffix = principal.startsWith("delegate:") ? ` (as ${principal.substring("delegate:".length)})` : "";
+  const principalSuffix = principal.startsWith("delegate:") ? ` (as ${principal.substring("delegate:".length)})`
+    : principal.startsWith("user:") ? ` (as ${principal.substring("user:".length)})`
+    : "";
 
   insertOauthAccessToken({
     tokenHash: accessHash,

@@ -1,13 +1,13 @@
 import { dirname } from "path";
 import { createServer } from "./server";
-import { cleanExpiredSessions, cleanExpiredPending2fa } from "./auth";
+import { cleanExpiredSessions, cleanExpiredPending2fa, migrateLegacyAdmin } from "./auth";
 import { cleanExpiredChallenges } from "./webauthn";
 import { pruneExpired as pruneExpiredOauth } from "./oauth";
 import { rebuildCurrentSymlinks } from "./sites";
 
 export const VERSION = "__BUILD_VERSION__";
 const PORT = parseInt(process.env.PORT || "3500");
-const BASE = dirname(process.execPath);
+const BASE = process.env.HOSTER_HOME || dirname(process.execPath);
 
 console.log(`
   ╦ ╦╔═╗╔═╗╔╦╗╔═╗╦═╗
@@ -20,6 +20,13 @@ console.log(`
   Admin:   http://localhost:${PORT}/_admin
   Base:    ${BASE}
 `);
+
+// v1.5 upgrade: convert the pre-multi-admin config-table administrator into a
+// real account (username "admin"). No-op on databases that already migrated.
+const migration = migrateLegacyAdmin();
+if (migration.migrated) {
+  console.log(`  Migrated the platform administrator to account '${migration.username}'. Sign in with that username.`);
+}
 
 // Self-heal: at startup, walk every site in the DB and (re)create _current
 // symlinks. Catches missing/broken links from any cause — restore that

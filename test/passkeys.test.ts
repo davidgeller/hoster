@@ -6,10 +6,11 @@
 // small because attestation is "none" — the only CBOR shapes needed are a
 // 3-entry map, a 5-entry COSE key, and byte strings.
 
-import { describe, expect, test, beforeEach } from "bun:test";
+import { describe, expect, test, beforeEach, beforeAll } from "bun:test";
 import { createHash, createSign, generateKeyPairSync, randomBytes } from "crypto";
 
 import db from "../src/db";
+import { createAdminUser } from "../src/auth";
 import {
   getRpContext,
   beginRegistration,
@@ -25,6 +26,15 @@ import {
 const RP_ID = "admin.example.com";
 const ORIGIN = `https://${RP_ID}`;
 const IP = "203.0.113.9";
+
+// Passkeys belong to accounts, so the suite needs a couple of real users.
+let USER = 0;
+let OTHER = 0;
+beforeAll(async () => {
+  db.exec("DELETE FROM admin_users");
+  USER = await createAdminUser("passkey-owner", "correct-horse-battery", { isAdmin: true });
+  OTHER = await createAdminUser("passkey-other", "correct-horse-battery", { sites: [] });
+});
 
 function rp(rpId = RP_ID, origin = ORIGIN) {
   return { rpId, origin };
@@ -140,10 +150,11 @@ class Authenticator {
 }
 
 // Register a passkey and return the authenticator that owns it.
-async function enroll(ip = IP, context = rp()): Promise<Authenticator> {
+async function enroll(ip = IP, context = rp(), userId?: number): Promise<Authenticator> {
+  const uid = userId ?? USER;
   const authenticator = new Authenticator();
-  const options = await beginRegistration(context, ip, null);
-  await finishRegistration(context, ip, authenticator.attest(options.challenge, context.rpId, context.origin), "Test key", null);
+  const options = await beginRegistration(context, ip, uid);
+  await finishRegistration(context, ip, authenticator.attest(options.challenge, context.rpId, context.origin), "Test key", uid);
   return authenticator;
 }
 
@@ -195,42 +206,42 @@ describe("getRpContext", () => {
 describe("registration", () => {
   test("stores a credential that can then be listed", async () => {
     const authenticator = await enroll();
-    const credentials = listCredentials(null);
+    const credentials = listCredentials(USER);
     expect(credentials).toHaveLength(1);
     expect(credentials[0].label).toBe("Test key");
     expect(credentials[0].rp_id).toBe(RP_ID);
     expect(credentials[0].credential_id).toBe(authenticator.credentialId.toString("base64url"));
-    expect(hasCredentialsForRp(RP_ID, null)).toBe(true);
+    expect(hasCredentialsForRp(RP_ID, USER)).toBe(true);
   });
 
   test("excludes already-registered authenticators from a new registration", async () => {
     const authenticator = await enroll();
-    const options = await beginRegistration(rp(), IP, null);
+    const options = await beginRegistration(rp(), IP, USER);
     expect(options.excludeCredentials.map((c: any) => c.id))
       .toContain(authenticator.credentialId.toString("base64url"));
   });
 
   test("requires user verification", async () => {
     const authenticator = new Authenticator();
-    const options = await beginRegistration(rp(), IP, null);
+    const options = await beginRegistration(rp(), IP, USER);
     // UP and AT set, UV clear — a key with no PIN or biometric.
     const response = authenticator.attest(options.challenge, RP_ID, ORIGIN, FLAG_UP | FLAG_AT);
-    await expect(finishRegistration(rp(), IP, response, "No UV", null)).rejects.toThrow();
+    await expect(finishRegistration(rp(), IP, response, "No UV", USER)).rejects.toThrow();
   });
 
   test("rejects a challenge replayed from a different IP", async () => {
     const authenticator = new Authenticator();
-    const options = await beginRegistration(rp(), IP, null);
+    const options = await beginRegistration(rp(), IP, USER);
     const response = authenticator.attest(options.challenge);
-    await expect(finishRegistration(rp(), "198.51.100.7", response, "Elsewhere", null))
+    await expect(finishRegistration(rp(), "198.51.100.7", response, "Elsewhere", USER))
       .rejects.toThrow(/IP changed/);
   });
 
   test("falls back to a host-derived label when none is given", async () => {
     const authenticator = new Authenticator();
-    const options = await beginRegistration(rp(), IP, null);
-    await finishRegistration(rp(), IP, authenticator.attest(options.challenge), "   ", null);
-    expect(listCredentials(null)[0].label).toBe(`Passkey on ${RP_ID}`);
+    const options = await beginRegistration(rp(), IP, USER);
+    await finishRegistration(rp(), IP, authenticator.attest(options.challenge), "   ", USER);
+    expect(listCredentials(USER)[0].label).toBe(`Passkey on ${RP_ID}`);
   });
 });
 
@@ -240,7 +251,28 @@ describe("authentication", () => {
     const options = await beginLogin(rp(), IP);
     const credential = await finishLogin(rp(), IP, authenticator.assert(options.challenge));
     expect(credential.label).toBe("Test key");
-    expect(credential.user_id).toBeNull();
+    expect(credential.user_id).toBe(USER);
+  });
+
+  test("identifies which account a passkey belongs to", async () => {
+    // Two accounts, one passkey each, same hostname. The login screen never
+    // asks for a username — the credential the browser presents decides.
+    await enroll(IP, rp(), USER);
+    const otherKey = await enroll(IP, rp(), OTHER);
+    const options = await beginLogin(rp(), IP);
+    const credential = await finishLogin(rp(), IP, otherKey.assert(options.challenge));
+    expect(credential.user_id).toBe(OTHER);
+    expect(listCredentials(OTHER)).toHaveLength(1);
+    expect(listCredentials(USER)).toHaveLength(1);
+  });
+
+  test("refuses a passkey whose account has been deleted", async () => {
+    const orphan = await createAdminUser("passkey-orphan", "correct-horse-battery", { sites: [] });
+    const key = await enroll(IP, rp(), orphan);
+    // Bypass deleteAdminUser (which removes credentials) to simulate an orphan row.
+    db.run("DELETE FROM admin_users WHERE id = ?", orphan);
+    const options = await beginLogin(rp(), IP);
+    await expect(finishLogin(rp(), IP, key.assert(options.challenge))).rejects.toThrow(/Unrecognized passkey/);
   });
 
   test("refuses to start when no passkey exists for the host", async () => {
@@ -328,28 +360,31 @@ describe("authentication", () => {
 
   test("records last_used on success", async () => {
     const authenticator = await enroll();
-    expect(listCredentials(null)[0].last_used).toBeNull();
+    expect(listCredentials(USER)[0].last_used).toBeNull();
     const options = await beginLogin(rp(), IP);
     await finishLogin(rp(), IP, authenticator.assert(options.challenge));
-    expect(listCredentials(null)[0].last_used).not.toBeNull();
+    expect(listCredentials(USER)[0].last_used).not.toBeNull();
   });
 });
 
 describe("credential management", () => {
   test("removing a credential disables passkey login for that host", async () => {
     await enroll();
-    const id = listCredentials(null)[0].id;
-    expect(deleteCredential(id, null)).toBe(true);
-    expect(listCredentials(null)).toHaveLength(0);
-    expect(hasCredentialsForRp(RP_ID, null)).toBe(false);
+    const id = listCredentials(USER)[0].id;
+    // Another account can't remove it…
+    expect(deleteCredential(id, OTHER)).toBe(false);
+    // …but the owner can.
+    expect(deleteCredential(id, USER)).toBe(true);
+    expect(listCredentials(USER)).toHaveLength(0);
+    expect(hasCredentialsForRp(RP_ID, USER)).toBe(false);
   });
 
   test("removing a non-existent credential reports failure", () => {
-    expect(deleteCredential(9999, null)).toBe(false);
+    expect(deleteCredential(9999, USER)).toBe(false);
   });
 
   test("expired challenges are cleaned up", async () => {
-    await beginRegistration(rp(), IP, null);
+    await beginRegistration(rp(), IP, USER);
     db.run("UPDATE webauthn_challenges SET expires_at = datetime('now', '-1 minute')");
     cleanExpiredChallenges();
     const row = db.query("SELECT COUNT(*) as cnt FROM webauthn_challenges").get() as { cnt: number };
@@ -358,9 +393,9 @@ describe("credential management", () => {
 
   test("an expired challenge cannot be used", async () => {
     const authenticator = new Authenticator();
-    const options = await beginRegistration(rp(), IP, null);
+    const options = await beginRegistration(rp(), IP, USER);
     db.run("UPDATE webauthn_challenges SET expires_at = datetime('now', '-1 minute')");
-    await expect(finishRegistration(rp(), IP, authenticator.attest(options.challenge), "Stale", null))
+    await expect(finishRegistration(rp(), IP, authenticator.attest(options.challenge), "Stale", USER))
       .rejects.toThrow(/expired/);
   });
 });

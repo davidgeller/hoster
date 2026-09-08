@@ -1,5 +1,6 @@
 import db from "./db";
 import { SITES_DIR, rebuildCurrentSymlinks, type RebuildResult } from "./sites";
+import { migrateLegacyAdmin } from "./auth";
 import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync, statSync, unlinkSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { randomBytes, createCipheriv, createDecipheriv, pbkdf2Sync } from "crypto";
@@ -154,7 +155,7 @@ function importDatabase(tables: Record<string, any[]>) {
 
     // Import site versions
     if (tables.site_versions) {
-      const cols = ["site_slug", "version", "label", "size_bytes", "file_count", "created_at"];
+      const cols = ["site_slug", "version", "label", "notes", "size_bytes", "file_count", "created_at", "mcp_modified"];
       const placeholders = cols.map(() => "?").join(", ");
       const stmt = db.prepare(`INSERT INTO site_versions (${cols.join(", ")}) VALUES (${placeholders})`);
       for (const row of tables.site_versions) {
@@ -190,11 +191,17 @@ function importDatabase(tables: Record<string, any[]>) {
 
     // Import admin users (after sites, since admin_user_sites references both)
     if (tables.admin_users) {
-      const cols = ["id", "username", "password_hash", "created_at", "last_login"];
+      // Older backups lack the v1.5 columns; the `?? default` fills them in and
+      // the legacy config-table admin is migrated right after the transaction.
+      const cols = ["id", "username", "password_hash", "created_at", "last_login",
+        "is_admin", "totp_secret", "totp_enabled", "totp_recovery_codes", "webauthn_user_handle"];
       const placeholders = cols.map(() => "?").join(", ");
       const stmt = db.prepare(`INSERT INTO admin_users (${cols.join(", ")}) VALUES (${placeholders})`);
       for (const row of tables.admin_users) {
-        stmt.run(...cols.map(c => row[c] ?? null));
+        stmt.run(...cols.map(c => {
+          if (c === "is_admin" || c === "totp_enabled") return row[c] ?? 0;
+          return row[c] ?? null;
+        }));
       }
     }
     if (tables.admin_user_sites) {
@@ -458,6 +465,9 @@ export async function restoreBackup(fileBuffer: Buffer, password?: string): Prom
 
     // Restore database
     importDatabase(tables);
+    // Backups taken before v1.5 still store the platform admin in the config
+    // table; convert it into an administrator account like startup does.
+    migrateLegacyAdmin();
 
     // Restore site files
     const restoreSitesDir = join(restoreDir, "sites");

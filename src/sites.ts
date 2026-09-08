@@ -1,5 +1,5 @@
 import db from "./db";
-import { mkdirSync, rmSync, existsSync, readdirSync, statSync, symlinkSync, readlinkSync, unlinkSync, realpathSync, lstatSync, writeFileSync, readFileSync } from "fs";
+import { mkdirSync, rmSync, rmdirSync, existsSync, readdirSync, statSync, symlinkSync, readlinkSync, unlinkSync, realpathSync, lstatSync, writeFileSync, readFileSync, renameSync, copyFileSync } from "fs";
 import { join, resolve, sep } from "path";
 import { tmpdir } from "os";
 import { getScaffoldFiles, CMS_LIB_VERSION } from "./cms-scaffold";
@@ -38,6 +38,7 @@ export interface SiteVersion {
   file_count: number;
   created_at: string;
   mcp_modified: number;     // 1 = at least one MCP write/delete has touched this version
+  notes: string | null;     // free-text release notes shown in the Versions dialog
 }
 
 // Ensure version tables exist
@@ -86,6 +87,41 @@ try { db.exec("ALTER TABLE sites ADD COLUMN cms_enabled INTEGER DEFAULT 0"); } c
 try { db.exec("ALTER TABLE sites ADD COLUMN cms_lib_version TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN pinned_at TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE site_versions ADD COLUMN mcp_modified INTEGER DEFAULT 0"); } catch (_) {}
+try { db.exec("ALTER TABLE site_versions ADD COLUMN notes TEXT"); } catch (_) {}
+
+// --- Version label / notes validation ---
+//
+// Both fields are rendered back into the admin UI (HTML-escaped there) and
+// into MCP tool output, so they're bounded and stripped of control characters
+// here. Notes keep newlines and tabs; labels are single-line.
+const MAX_VERSION_LABEL = 120;
+const MAX_VERSION_NOTES = 2000;
+
+function stripControl(input: string, keepNewlines: boolean): string {
+  return Array.from(input)
+    .filter(ch => {
+      const c = ch.codePointAt(0)!;
+      if (keepNewlines && (c === 10 || c === 9)) return true;
+      return c >= 32 && c !== 127;
+    })
+    .join("");
+}
+
+export function sanitizeVersionLabel(label: string | null | undefined): string | null {
+  if (label == null) return null;
+  const cleaned = stripControl(String(label), false).trim();
+  if (!cleaned) return null;
+  if (cleaned.length > MAX_VERSION_LABEL) throw new Error(`Label exceeds ${MAX_VERSION_LABEL} characters`);
+  return cleaned;
+}
+
+export function sanitizeVersionNotes(notes: string | null | undefined): string | null {
+  if (notes == null) return null;
+  const cleaned = stripControl(String(notes).replace(/\r\n?/g, "\n"), true).trim();
+  if (!cleaned) return null;
+  if (cleaned.length > MAX_VERSION_NOTES) throw new Error(`Notes exceed ${MAX_VERSION_NOTES} characters`);
+  return cleaned;
+}
 
 // --- Site config cache (avoids DB + filesystem hits on every request) ---
 const siteCache = new Map<string, { site: Site; ts: number }>();
@@ -294,8 +330,12 @@ export function createBlankSite(slug: string, name: string): { site: Site; versi
   return { site: getSite(slug)!, version: getVersion(slug, version)! };
 }
 
-export async function deploySite(slug: string, name: string, zipBuffer: ArrayBuffer, label?: string): Promise<{ site: Site; version: SiteVersion }> {
+export async function deploySite(
+  slug: string, name: string, zipBuffer: ArrayBuffer, label?: string | null, notes?: string | null
+): Promise<{ site: Site; version: SiteVersion }> {
   validateSlug(slug);
+  const cleanLabel = sanitizeVersionLabel(label);
+  const cleanNotes = sanitizeVersionNotes(notes);
   if (zipBuffer.byteLength > MAX_UPLOAD_SIZE) {
     throw new Error("Upload exceeds maximum size of 500 MB");
   }
@@ -380,9 +420,9 @@ export async function deploySite(slug: string, name: string, zipBuffer: ArrayBuf
 
   // Insert version record
   db.run(`
-    INSERT INTO site_versions (site_slug, version, label, size_bytes, file_count)
-    VALUES (?, ?, ?, ?, ?)
-  `, slug, version, label || null, stats.size, stats.count);
+    INSERT INTO site_versions (site_slug, version, label, notes, size_bytes, file_count)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `, slug, version, cleanLabel, cleanNotes, stats.size, stats.count);
 
   // Point _current symlink to this version
   updateCurrentSymlink(slug, version);
@@ -418,7 +458,7 @@ export function switchVersion(slug: string, version: string): boolean {
 // Freeze the current working version (optionally labeling it) and fork a new
 // mutable copy. _current is pointed at the new copy so subsequent edits do not
 // touch the frozen snapshot.
-export function commitVersion(slug: string, label?: string | null): SiteVersion | null {
+export function commitVersion(slug: string, label?: string | null, notes?: string | null): SiteVersion | null {
   const site = getSite(slug);
   if (!site || !site.current_version) return null;
 
@@ -426,12 +466,15 @@ export function commitVersion(slug: string, label?: string | null): SiteVersion 
   const currentDir = join(SITES_DIR, slug, currentVersionId);
   if (!existsSync(currentDir)) return null;
 
-  // Update the label on the version being frozen (only if the caller supplied one).
-  if (label && label.trim()) {
-    db.run(
-      "UPDATE site_versions SET label = ? WHERE site_slug = ? AND version = ?",
-      label.trim(), slug, currentVersionId
-    );
+  // Update the label / notes on the version being frozen (only the fields the
+  // caller supplied; an omitted field leaves any existing value alone).
+  const cleanLabel = sanitizeVersionLabel(label);
+  const cleanNotes = sanitizeVersionNotes(notes);
+  if (cleanLabel) {
+    db.run("UPDATE site_versions SET label = ? WHERE site_slug = ? AND version = ?", cleanLabel, slug, currentVersionId);
+  }
+  if (cleanNotes) {
+    db.run("UPDATE site_versions SET notes = ? WHERE site_slug = ? AND version = ?", cleanNotes, slug, currentVersionId);
   }
 
   // Refresh stats on the frozen version (may have drifted from in-place MCP writes).
@@ -476,6 +519,24 @@ export function markVersionModified(slug: string, version: string): void {
     "UPDATE site_versions SET mcp_modified = 1 WHERE site_slug = ? AND version = ?",
     slug, version
   );
+}
+
+// Edit the label and/or notes on an existing version. Passing null clears a
+// field; leaving it undefined keeps the current value.
+export function setVersionMeta(
+  slug: string, version: string, meta: { label?: string | null; notes?: string | null }
+): SiteVersion | null {
+  const v = getVersion(slug, version);
+  if (!v) return null;
+  if (meta.label !== undefined) {
+    db.run("UPDATE site_versions SET label = ? WHERE site_slug = ? AND version = ?",
+      sanitizeVersionLabel(meta.label), slug, version);
+  }
+  if (meta.notes !== undefined) {
+    db.run("UPDATE site_versions SET notes = ? WHERE site_slug = ? AND version = ?",
+      sanitizeVersionNotes(meta.notes), slug, version);
+  }
+  return getVersion(slug, version);
 }
 
 export function deleteVersion(slug: string, version: string): boolean {
@@ -608,15 +669,161 @@ export function updateSiteSettings(
   return result.changes > 0;
 }
 
-// --- Single-file upload (admin) ---
+// --- Admin file management (upload / delete / rename / copy / mkdir) ---
 //
-// Writes one file into the current version's content directory (honoring root_dir).
-// Subdirectories in the relative path are created if missing. If the destination
-// exists, `replace=false` aborts with an error.
+// Every mutation below operates on the CURRENT version's content directory
+// (honoring root_dir) and shares one containment helper, so a path-handling
+// fix lands in every operation at once. The rules:
 //
-// If the site has mcp_auto_commit enabled and the current version hasn't yet
-// been touched (mcp_modified=0), the existing version is snapshotted first
-// so the pre-upload state is preserved as a rollback point.
+//   * Paths are relative, normalized, and may not contain "..", NUL, or be
+//     empty. Leading slashes are stripped so an "absolute" path lands at the
+//     site root rather than escaping.
+//   * The logical (resolve()) path must sit under the content dir, AND — for
+//     anything that already exists — its realpath must too. Deploy strips
+//     symlinks from every uploaded tree, so this second check is defense in
+//     depth against a link introduced by manual tampering or a future bug.
+//   * The content root itself is never a valid target for delete/rename/copy.
+//   * If the site has auto-snapshot on and the working version is untouched,
+//     the pre-change state is frozen first so there is always a rollback.
+//   * Version stats are recomputed and the working version is marked modified
+//     after every successful change, exactly like an MCP write.
+
+const MAX_COPY_BYTES = 500 * 1024 * 1024; // matches the ZIP deploy cap
+
+// Split and validate a user-supplied relative path. Returns the normalized
+// "a/b/c" form (no leading/trailing slash, no empty segments).
+export function normalizeSitePath(relPath: string, opts: { allowEmpty?: boolean } = {}): string {
+  if (typeof relPath !== "string") throw new Error("Invalid path");
+  if (relPath.includes("\0")) throw new Error("Invalid path");
+  const parts = relPath.replace(/\\/g, "/").replace(/^\/+/, "").split("/").filter(p => p && p !== ".");
+  if (parts.some(p => p === ".." || p.includes("\0"))) {
+    throw new Error("Path traversal is not allowed");
+  }
+  const normalized = parts.join("/");
+  if (!normalized && !opts.allowEmpty) throw new Error("Path is required");
+  return normalized;
+}
+
+const within = (child: string, parent: string) => child === parent || child.startsWith(parent + sep);
+
+// Content directory of the site's current version, or throw.
+function contentDirFor(site: Site): string {
+  if (!site.current_version) throw new Error("Site has no current version");
+  const siteDir = join(SITES_DIR, site.slug, "_current");
+  if (!existsSync(siteDir)) throw new Error("Site directory not found");
+  const contentDir = site.root_dir ? join(siteDir, site.root_dir) : siteDir;
+  if (!existsSync(contentDir)) throw new Error("Content directory not found");
+  return contentDir;
+}
+
+interface ContainedPath {
+  rel: string;        // normalized relative path
+  abs: string;        // resolved absolute path (logical)
+  exists: boolean;
+}
+
+// Resolve a relative path inside the content dir with both containment checks.
+function containedPath(contentDir: string, relPath: string, opts: { allowRoot?: boolean } = {}): ContainedPath {
+  const rel = normalizeSitePath(relPath, { allowEmpty: !!opts.allowRoot });
+  const abs = resolve(contentDir, rel);
+  if (!within(abs, contentDir)) throw new Error("Path escapes site directory");
+  if (!opts.allowRoot && abs === contentDir) throw new Error("Path is required");
+  let exists = false;
+  try { lstatSync(abs); exists = true; } catch { exists = false; }
+  if (exists) {
+    // realpath of the target (follows a symlink AT the leaf too, which is what
+    // we want to check: if the leaf is a link pointing outside, refuse).
+    const realContentDir = realpathSync(contentDir);
+    let realAbs: string;
+    try { realAbs = realpathSync(abs); } catch { throw new Error("Path escapes site directory"); }
+    if (!within(realAbs, realContentDir)) throw new Error("Path escapes site directory");
+  }
+  return { rel, abs, exists };
+}
+
+// After creating intermediate directories, confirm the parent really lives
+// inside the content dir (a symlinked parent would have passed the logical
+// check while pointing elsewhere).
+function assertParentReal(abs: string, contentDir: string): void {
+  const realParent = realpathSync(dirname(abs));
+  const realContent = realpathSync(contentDir);
+  if (!within(realParent, realContent)) throw new Error("Path escapes site directory");
+}
+
+// Freeze the working version first if auto-snapshot is on and it's untouched.
+// Returns the version id that was frozen, or null if nothing happened.
+function snapshotIfNeeded(site: Site): string | null {
+  if (!site.mcp_auto_commit || !site.current_version) return null;
+  const current = getVersion(site.slug, site.current_version);
+  if (!current || current.mcp_modified) return null;
+  const frozen = site.current_version;
+  const newVer = commitVersion(site.slug, null);
+  return newVer ? frozen : null;
+}
+
+// Mark the working version modified and refresh size/count on both the version
+// row and the site row. Call after every successful mutation.
+function finalizeMutation(slug: string): void {
+  const refreshed = getSite(slug);
+  if (!refreshed?.current_version) return;
+  markVersionModified(slug, refreshed.current_version);
+  const versionDir = join(SITES_DIR, slug, refreshed.current_version);
+  const stats = calcDirStats(versionDir);
+  db.run(
+    "UPDATE site_versions SET size_bytes = ?, file_count = ? WHERE site_slug = ? AND version = ?",
+    stats.size, stats.count, slug, refreshed.current_version
+  );
+  db.run(
+    "UPDATE sites SET size_bytes = ?, file_count = ?, updated_at = datetime('now') WHERE slug = ?",
+    stats.size, stats.count, slug
+  );
+  invalidateSiteCache(slug);
+}
+
+// Recursive size of a directory (or the size of a file), counting only regular
+// files — symlinks are never followed or counted.
+function pathBytes(abs: string): number {
+  const st = lstatSync(abs);
+  if (st.isSymbolicLink()) return 0;
+  if (st.isFile()) return st.size;
+  if (!st.isDirectory()) return 0;
+  let total = 0;
+  for (const entry of readdirSync(abs, { withFileTypes: true })) {
+    total += pathBytes(join(abs, entry.name));
+  }
+  return total;
+}
+
+// Recursive copy that never follows symlinks (links inside a site tree should
+// not exist post-deploy; if one does, it's skipped rather than dereferenced).
+function copyTree(src: string, dst: string): void {
+  const st = lstatSync(src);
+  if (st.isSymbolicLink()) return;
+  if (st.isDirectory()) {
+    mkdirSync(dst, { recursive: true });
+    for (const entry of readdirSync(src, { withFileTypes: true })) {
+      copyTree(join(src, entry.name), join(dst, entry.name));
+    }
+    return;
+  }
+  if (st.isFile()) copyFileSync(src, dst);
+}
+
+// Remove a path without ever following a symlink into its target.
+function removeTree(abs: string): void {
+  const st = lstatSync(abs);
+  if (st.isSymbolicLink() || st.isFile()) {
+    unlinkSync(abs);
+    return;
+  }
+  if (st.isDirectory()) {
+    for (const entry of readdirSync(abs, { withFileTypes: true })) {
+      removeTree(join(abs, entry.name));
+    }
+    rmdirSync(abs);
+  }
+}
+
 export interface UploadFileResult {
   path: string;     // relative path inside content dir
   size: number;
@@ -624,6 +831,8 @@ export interface UploadFileResult {
   snapshot_version: string | null;  // version id of the rollback snapshot, if auto-commit fired
 }
 
+// Write one file into the current version's content directory. Subdirectories
+// are created if missing. If the destination exists, `replace=false` aborts.
 export function uploadFileToSite(
   slug: string,
   relPath: string,
@@ -633,99 +842,191 @@ export function uploadFileToSite(
   const site = getSite(slug);
   if (!site) throw new Error("Site not found");
   if (!site.current_version) throw new Error("Site has no current version");
+  const contentDir = contentDirFor(site);
 
-  if (relPath.includes("\0")) throw new Error("Invalid path");
-
-  // Normalize: strip leading slashes, collapse "./" segments. Reject ".." and absolute paths.
-  let normalized = relPath.replace(/^\/+/, "");
-  const parts = normalized.split("/").filter(p => p && p !== ".");
-  if (parts.some(p => p === ".." || p.includes("\0"))) {
-    throw new Error("Path traversal is not allowed");
+  let target: ContainedPath;
+  try {
+    target = containedPath(contentDir, relPath);
+  } catch (e: any) {
+    if (e?.message === "Path is required") throw new Error("Destination filename is required");
+    throw e;
   }
-  normalized = parts.join("/");
-  if (!normalized) throw new Error("Destination filename is required");
 
-  const siteDir = join(SITES_DIR, slug, "_current");
-  if (!existsSync(siteDir)) throw new Error("Site directory not found");
-  const contentDir = site.root_dir ? join(siteDir, site.root_dir) : siteDir;
-  if (!existsSync(contentDir)) throw new Error("Content directory not found");
-
-  const resolved = resolve(contentDir, normalized);
-  // Logical check first: stays under the (possibly-symlinked) content dir.
-  if (!resolved.startsWith(contentDir + "/") && resolved !== contentDir) {
-    throw new Error("Path escapes site directory");
-  }
-  // If the destination already exists, also verify the real path is inside
-  // the real content dir — catches a pre-existing symlink at the destination.
-  const existed = existsSync(resolved);
-  if (existed) {
-    const realContentDir = realpathSync(contentDir);
-    const realResolved = realpathSync(resolved);
-    if (!realResolved.startsWith(realContentDir + "/") && realResolved !== realContentDir) {
-      throw new Error("Path escapes site directory");
-    }
+  if (target.exists) {
     if (!options.replace) {
-      throw new Error(`File '${normalized}' already exists. Enable "Replace existing" to overwrite.`);
+      throw new Error(`File '${target.rel}' already exists. Enable "Replace existing" to overwrite.`);
     }
-    if (statSync(resolved).isDirectory()) {
-      throw new Error(`'${normalized}' is a directory, not a file`);
-    }
-  }
-
-  // Auto-snapshot before first mutation if configured.
-  let snapshotVersion: string | null = null;
-  if (site.mcp_auto_commit) {
-    const current = getVersion(slug, site.current_version);
-    if (current && !current.mcp_modified) {
-      const frozen = site.current_version;
-      const newVer = commitVersion(slug, null);
-      if (newVer) snapshotVersion = frozen;
+    if (statSync(target.abs).isDirectory()) {
+      throw new Error(`'${target.rel}' is a directory, not a file`);
     }
   }
 
-  const parentDir = dirname(resolved);
-  mkdirSync(parentDir, { recursive: true });
+  const snapshotVersion = snapshotIfNeeded(site);
 
-  // Defense-in-depth: after creating subdirs, confirm the parent's real path
-  // still resolves inside the content dir. Deploy-time removeSymlinks() should
-  // guarantee no symlinks exist within site trees, but this guards against a
-  // future code path that introduces one (or manual tampering).
-  const realParentDir = realpathSync(parentDir);
-  const realContentDirCheck = realpathSync(contentDir);
-  if (!realParentDir.startsWith(realContentDirCheck + "/") && realParentDir !== realContentDirCheck) {
-    throw new Error("Path escapes site directory");
-  }
+  mkdirSync(dirname(target.abs), { recursive: true });
+  assertParentReal(target.abs, contentDir);
 
-  const bytes = data instanceof ArrayBuffer ? new Uint8Array(data)
-    : data instanceof Uint8Array ? data
+  // Buffer is a Uint8Array subclass, so the view constructor covers both.
+  const bytes = data instanceof ArrayBuffer
+    ? new Uint8Array(data)
     : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-  writeFileSync(resolved, bytes);
+  writeFileSync(target.abs, bytes);
 
-  // Mark the (post-snapshot) current version as modified
-  const refreshed = getSite(slug);
-  if (refreshed?.current_version) {
-    markVersionModified(slug, refreshed.current_version);
-  }
-
-  // Recalculate version stats so the sites list reflects the new size/count.
-  const versionDir = join(SITES_DIR, slug, refreshed!.current_version!);
-  const stats = calcDirStats(versionDir);
-  db.run(
-    "UPDATE site_versions SET size_bytes = ?, file_count = ? WHERE site_slug = ? AND version = ?",
-    stats.size, stats.count, slug, refreshed!.current_version!
-  );
-  db.run(
-    "UPDATE sites SET size_bytes = ?, file_count = ?, updated_at = datetime('now') WHERE slug = ?",
-    stats.size, stats.count, slug
-  );
-  invalidateSiteCache(slug);
+  finalizeMutation(slug);
 
   return {
-    path: normalized,
+    path: target.rel,
     size: bytes.length,
-    replaced: existed,
+    replaced: target.exists,
     snapshot_version: snapshotVersion,
   };
+}
+
+export interface FileOpResult {
+  ok: boolean;
+  path: string;
+  error?: string;
+  kind?: "file" | "dir";
+}
+
+export interface FileOpsResult {
+  results: FileOpResult[];
+  deleted?: number;
+  snapshot_version: string | null;
+}
+
+// Delete one or more files or directories (recursively). Each path succeeds or
+// fails independently; the caller gets a per-path report. The snapshot (if
+// any) is taken once, before the first deletion.
+export function deleteSitePaths(slug: string, relPaths: string[]): FileOpsResult {
+  const site = getSite(slug);
+  if (!site) throw new Error("Site not found");
+  if (!Array.isArray(relPaths) || relPaths.length === 0) throw new Error("No paths given");
+  if (relPaths.length > 5000) throw new Error("Too many paths in one request (max 5000)");
+  const contentDir = contentDirFor(site);
+
+  // Validate everything first so a bad path in the batch aborts before any
+  // deletion happens — and before the snapshot is taken.
+  const targets: ContainedPath[] = [];
+  for (const rel of relPaths) {
+    const t = containedPath(contentDir, rel);
+    if (!t.exists) throw new Error(`'${t.rel}' does not exist`);
+    targets.push(t);
+  }
+
+  const snapshotVersion = snapshotIfNeeded(site);
+  // Re-resolve after a snapshot: _current now points at the forked copy.
+  const liveDir = contentDirFor(getSite(slug)!);
+
+  const results: FileOpResult[] = [];
+  let deleted = 0;
+  for (const t of targets) {
+    const live = containedPath(liveDir, t.rel);
+    if (!live.exists) { results.push({ ok: false, path: t.rel, error: "does not exist" }); continue; }
+    try {
+      const kind = lstatSync(live.abs).isDirectory() ? "dir" : "file";
+      removeTree(live.abs);
+      deleted++;
+      results.push({ ok: true, path: t.rel, kind });
+    } catch (e: any) {
+      results.push({ ok: false, path: t.rel, error: e?.message || "delete failed" });
+    }
+  }
+  finalizeMutation(slug);
+  return { results, deleted, snapshot_version: snapshotVersion };
+}
+
+export interface MoveCopyResult {
+  from: string;
+  to: string;
+  kind: "file" | "dir";
+  replaced: boolean;
+  bytes: number;
+  snapshot_version: string | null;
+}
+
+// Shared validation for rename and copy: both endpoints inside the content
+// dir, source exists, destination not inside the source tree, destination
+// free unless `replace` (and even then only a file may replace a file).
+function prepareMoveCopy(
+  contentDir: string, from: string, to: string, replace: boolean
+): { src: ContainedPath; dst: ContainedPath; kind: "file" | "dir" } {
+  const src = containedPath(contentDir, from);
+  if (!src.exists) throw new Error(`'${src.rel}' does not exist`);
+  const dst = containedPath(contentDir, to);
+  if (src.abs === dst.abs) throw new Error("Source and destination are the same path");
+  const srcStat = lstatSync(src.abs);
+  const kind: "file" | "dir" = srcStat.isDirectory() ? "dir" : "file";
+  if (kind === "dir" && within(dst.abs, src.abs)) {
+    throw new Error("Cannot place a directory inside itself");
+  }
+  if (dst.exists) {
+    const dstIsDir = lstatSync(dst.abs).isDirectory();
+    if (kind === "dir" || dstIsDir) {
+      throw new Error(`'${dst.rel}' already exists. Directories are never replaced — delete it first.`);
+    }
+    if (!replace) throw new Error(`'${dst.rel}' already exists. Enable "Replace existing" to overwrite.`);
+  }
+  return { src, dst, kind };
+}
+
+export function renameSitePath(slug: string, from: string, to: string, options: { replace?: boolean } = {}): MoveCopyResult {
+  const site = getSite(slug);
+  if (!site) throw new Error("Site not found");
+  const contentDir = contentDirFor(site);
+  prepareMoveCopy(contentDir, from, to, !!options.replace); // validate before snapshot
+
+  const snapshotVersion = snapshotIfNeeded(site);
+  const liveDir = contentDirFor(getSite(slug)!);
+  const { src, dst, kind } = prepareMoveCopy(liveDir, from, to, !!options.replace);
+
+  mkdirSync(dirname(dst.abs), { recursive: true });
+  assertParentReal(dst.abs, liveDir);
+  const bytes = pathBytes(src.abs);
+  renameSync(src.abs, dst.abs);
+  finalizeMutation(slug);
+  return { from: src.rel, to: dst.rel, kind, replaced: dst.exists, bytes, snapshot_version: snapshotVersion };
+}
+
+export function copySitePath(slug: string, from: string, to: string, options: { replace?: boolean } = {}): MoveCopyResult {
+  const site = getSite(slug);
+  if (!site) throw new Error("Site not found");
+  const contentDir = contentDirFor(site);
+  const pre = prepareMoveCopy(contentDir, from, to, !!options.replace);
+  const bytes = pathBytes(pre.src.abs);
+  if (bytes > MAX_COPY_BYTES) {
+    throw new Error(`Copy exceeds the ${MAX_COPY_BYTES / (1024 * 1024)} MB limit`);
+  }
+
+  const snapshotVersion = snapshotIfNeeded(site);
+  const liveDir = contentDirFor(getSite(slug)!);
+  const { src, dst, kind } = prepareMoveCopy(liveDir, from, to, !!options.replace);
+
+  mkdirSync(dirname(dst.abs), { recursive: true });
+  assertParentReal(dst.abs, liveDir);
+  if (dst.exists) unlinkSync(dst.abs);
+  copyTree(src.abs, dst.abs);
+  finalizeMutation(slug);
+  return { from: src.rel, to: dst.rel, kind, replaced: dst.exists, bytes, snapshot_version: snapshotVersion };
+}
+
+// Create an (empty) directory. Idempotent if it already exists as a directory.
+export function createSiteDirectory(slug: string, relPath: string): { path: string; created: boolean; snapshot_version: string | null } {
+  const site = getSite(slug);
+  if (!site) throw new Error("Site not found");
+  const contentDir = contentDirFor(site);
+  const target = containedPath(contentDir, relPath);
+  if (target.exists) {
+    if (!lstatSync(target.abs).isDirectory()) throw new Error(`'${target.rel}' exists and is a file`);
+    return { path: target.rel, created: false, snapshot_version: null };
+  }
+  const snapshotVersion = snapshotIfNeeded(site);
+  const liveDir = contentDirFor(getSite(slug)!);
+  const live = containedPath(liveDir, relPath);
+  mkdirSync(live.abs, { recursive: true });
+  assertParentReal(live.abs, liveDir);
+  finalizeMutation(slug);
+  return { path: live.rel, created: true, snapshot_version: snapshotVersion };
 }
 
 // Cache resolved real paths for site directories (cleared on deploy/switch/delete)
@@ -808,7 +1109,12 @@ export function resolveSitePath(slug: string, filePath: string): ResolvedSite | 
   return null;
 }
 
-// --- File bundle listing ---
+// --- File listing ---
+//
+// Paths are relative to the served content directory (root_dir-aware) so they
+// line up with what upload / delete / rename / copy and the MCP tools accept.
+// Directories are listed separately (including empty ones) so the file
+// manager can rename or delete a folder as a unit.
 
 export interface SiteFile {
   path: string;
@@ -816,34 +1122,45 @@ export interface SiteFile {
   modified: string;
 }
 
-export function listSiteFiles(slug: string): SiteFile[] {
-  const site = getSite(slug);
-  if (!site || !site.current_version) return [];
+export interface SiteTree {
+  files: SiteFile[];
+  dirs: string[];
+}
 
-  const versionDir = join(SITES_DIR, slug, site.current_version);
-  if (!existsSync(versionDir)) return [];
+export function listSiteTree(slug: string): SiteTree {
+  const site = getSite(slug);
+  if (!site || !site.current_version) return { files: [], dirs: [] };
+
+  const siteDir = join(SITES_DIR, slug, "_current");
+  const contentDir = site.root_dir ? join(siteDir, site.root_dir) : siteDir;
+  if (!existsSync(contentDir)) return { files: [], dirs: [] };
 
   const files: SiteFile[] = [];
+  const dirs: string[] = [];
   function walk(dir: string, prefix: string) {
-    if (!existsSync(dir)) return;
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
       const full = join(dir, entry.name);
       const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isSymbolicLink()) continue; // never follow; deploy strips these anyway
       if (entry.isDirectory()) {
+        dirs.push(rel);
         walk(full, rel);
-      } else {
+      } else if (entry.isFile()) {
         const st = statSync(full);
-        files.push({
-          path: rel,
-          size: st.size,
-          modified: st.mtime.toISOString(),
-        });
+        files.push({ path: rel, size: st.size, modified: st.mtime.toISOString() });
       }
     }
   }
-  walk(versionDir, "");
+  walk(contentDir, "");
   files.sort((a, b) => a.path.localeCompare(b.path));
-  return files;
+  dirs.sort((a, b) => a.localeCompare(b));
+  return { files, dirs };
+}
+
+export function listSiteFiles(slug: string): SiteFile[] {
+  return listSiteTree(slug).files;
 }
 
 // --- Reload site from disk (clear all caches, recalculate stats) ---

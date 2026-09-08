@@ -143,6 +143,7 @@ label small code {
 
 input[type="text"],
 input[type="password"],
+textarea,
 select {
   display: block;
   width: 100%;
@@ -157,7 +158,9 @@ select {
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 
-input:focus, select:focus {
+textarea { resize: vertical; line-height: 1.45; }
+
+input:focus, textarea:focus, select:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
@@ -1192,3 +1195,138 @@ tr:hover td { background: var(--bg-hover); }
   font-size: 0.82rem;
   margin: 0;
 }
+
+/* --- Chips (country picker) --- */
+.chip-box {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 42px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  align-items: center;
+  margin-bottom: 8px;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 10px;
+  border-radius: 999px;
+  background: var(--accent-bg);
+  color: var(--text);
+  font-size: 0.82rem;
+  border: 1px solid transparent;
+  font-family: var(--font);
+}
+.chip-remove {
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.75rem;
+  padding: 0 2px;
+  line-height: 1;
+}
+.chip-remove:hover { color: var(--danger); }
+.chip-add {
+  cursor: pointer;
+  background: var(--bg-card);
+  border-color: var(--border);
+}
+.chip-add:hover { background: var(--bg-hover); border-color: var(--accent); }
+.country-search-wrap { position: relative; }
+.country-search-wrap input { margin-bottom: 0; }
+.country-suggest {
+  position: absolute;
+  left: 0; right: 0; top: 100%;
+  z-index: 20;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  max-height: 280px;
+  overflow-y: auto;
+  margin-top: 4px;
+}
+.country-suggest-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  border: none;
+  background: none;
+  color: var(--text);
+  font-size: 0.85rem;
+  font-family: var(--font);
+  cursor: pointer;
+}
+.country-suggest-item.active, .country-suggest-item:hover { background: var(--bg-hover); }
+
+/* --- Users --- */
+.user-row {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+}
+.badge-admin { background: var(--accent-bg); color: var(--accent); }
+.badge-user { background: var(--bg-hover); color: var(--text-secondary); }
+
+/* --- File manager --- */
+.fm-toolbar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.fm-toolbar input[type="text"] {
+  width: 220px;
+  max-width: 100%;
+  padding: 6px 10px;
+  font-size: 0.85rem;
+  margin: 0;
+}
+.fm-table { width: 100%; font-size: 0.8rem; border-collapse: collapse; }
+.fm-table thead { position: sticky; top: 0; background: var(--bg-card); z-index: 1; }
+.fm-table th {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 500;
+  color: var(--text-secondary);
+  user-select: none;
+}
+.fm-table td { padding: 3px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.fm-table tr.selected td { background: var(--accent-bg); }
+.fm-table tbody tr:hover td { background: var(--bg-hover); }
+.fm-table tr.selected:hover td { background: var(--accent-bg); }
+.fm-table .fm-path { word-break: break-all; }
+.fm-table .fm-icon { margin-right: 4px; opacity: 0.8; }
+.fm-table input[type="checkbox"] { width: auto; margin: 0; }
+.fm-table .btn-ghost { padding: 2px 6px; font-size: 0.75rem; }
+.fm-table .fm-danger { color: var(--danger); }
+.fm-table td:last-child .btn { visibility: hidden; }
+.fm-table tbody tr:hover td:last-child .btn { visibility: visible; }
+
+/* --- Version notes --- */
+.snapshot-form { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.snapshot-form input, .snapshot-form textarea { margin: 0; }
+.version-item { align-items: flex-start; }
+.version-notes {
+  white-space: pre-wrap;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--border);
+  background: var(--bg);
+  border-radius: 0 4px 4px 0;
+  line-height: 1.5;
+}
+.version-edit { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.version-edit input, .version-edit textarea { margin: 0; font-size: 0.85rem; }
+.version-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }

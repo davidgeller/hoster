@@ -24,21 +24,39 @@ async function refreshAuthScoping() {
   applyAuthScoping();
 }
 
-// Toggle UI surfaces that only the platform super-admin may use.
+// Toggle UI surfaces that only administrators may use. Every account can open
+// Settings → Account (own password / 2FA / passkeys); the other tabs are
+// administrator-only and marked with data-admin-only in the markup.
 function applyAuthScoping() {
-  const settingsLink = document.querySelector('[data-view="settings"]');
-  if (settingsLink) {
-    const li = settingsLink.closest("li");
-    if (li) li.hidden = !isSuperAdmin;
-  }
   document.body.classList.toggle("scoped-user", !isSuperAdmin);
-  // Provisioning controls (deploy / create blank site) — super-admin only.
+  document.querySelectorAll("[data-admin-only]").forEach(el => { el.hidden = !isSuperAdmin; });
+  // Provisioning controls (deploy / create blank site) — administrators only.
   ["upload-btn", "blank-site-btn"].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.hidden = !isSuperAdmin;
   });
   const who = document.getElementById("current-user-label");
-  if (who) who.textContent = currentUsername ? `Signed in as ${currentUsername}` : "";
+  if (who) who.textContent = currentUsername ? `${currentUsername} · ${isSuperAdmin ? "administrator" : "site user"}` : "";
+  const intro = document.getElementById("account-intro");
+  if (intro) intro.textContent = currentUsername
+    ? `Signed in as ${currentUsername} (${isSuperAdmin ? "administrator" : "site user"}). These settings apply to your account only.`
+    : "";
+  // If a site user somehow has an admin-only tab selected, fall back to Account.
+  if (!isSuperAdmin) {
+    const active = document.querySelector("#view-settings .settings-tab.active");
+    if (active && active.hasAttribute("data-admin-only")) selectSettingsTab("account");
+  }
+}
+
+function selectSettingsTab(name) {
+  const tabs = document.querySelectorAll("#view-settings .settings-tab[data-settings-tab]");
+  const panels = document.querySelectorAll("#view-settings .settings-page-panel");
+  tabs.forEach(t => t.classList.toggle("active", t.dataset.settingsTab === name));
+  panels.forEach(p => {
+    const match = p.dataset.settingsPanel === name;
+    p.classList.toggle("active", match);
+    p.hidden = !match;
+  });
 }
 
 // Country code to name resolver (uses browser's built-in Intl API)
@@ -140,13 +158,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   // --- Setup Form ---
   document.getElementById("setup-form").addEventListener("submit", async (e) => {
     e.preventDefault();
+    const username = document.getElementById("setup-username").value.trim();
     const pw = document.getElementById("setup-password").value;
     const confirm = document.getElementById("setup-confirm").value;
     const errEl = document.getElementById("setup-error");
 
     if (pw !== confirm) { errEl.textContent = "Passwords do not match"; return; }
     try {
-      await api("/setup", { method: "POST", body: JSON.stringify({ password: pw }) });
+      await api("/setup", { method: "POST", body: JSON.stringify({ username, password: pw }) });
+      await refreshAuthScoping();
       showScreen("main-screen");
       navigateTo("dashboard");
     } catch (err) { errEl.textContent = err.message; }
@@ -159,6 +179,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const pw = document.getElementById("login-password").value;
     const errEl = document.getElementById("login-error");
     errEl.textContent = "";
+    if (!username) { errEl.textContent = "Username is required"; return; }
     try {
       const res = await fetch(API + "/login", {
         method: "POST",
@@ -316,6 +337,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     fd.append("slug", slug);
     fd.append("name", name);
     fd.append("file", file);
+    const label = document.getElementById("upload-label").value.trim();
+    const notes = document.getElementById("upload-notes").value.trim();
+    if (label) fd.append("label", label);
+    if (notes) fd.append("notes", notes);
 
     try {
       await apiForm("/sites", fd);
@@ -374,23 +399,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (e.key === "Enter") { e.preventDefault(); loadLogs(); }
   });
 
-  // --- Country restriction form ---
-  document.getElementById("country-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const errEl = document.getElementById("country-error");
-    const successEl = document.getElementById("country-success");
-    errEl.textContent = "";
-    successEl.textContent = "";
-    const input = document.getElementById("allowed-countries").value.trim();
-    const countries = input ? input.split(",").map(c => c.trim().toUpperCase()).filter(Boolean) : [];
-    try {
-      await api("/settings/countries", {
-        method: "POST",
-        body: JSON.stringify({ countries }),
-      });
-      successEl.textContent = countries.length ? `Restricted to: ${countries.join(", ")}` : "All countries allowed";
-    } catch (err) { errEl.textContent = err.message; }
-  });
+  // --- Country restriction form (chip picker; see loadCountryPicker) ---
+  bindCountryPicker();
 
   // --- Auto-block form ---
   document.getElementById("autoblock-form").addEventListener("submit", async (e) => {
@@ -420,8 +430,6 @@ function showScreen(id) {
 }
 
 function navigateTo(view) {
-  // Site-scoped users have no access to the platform Settings screen.
-  if (view === "settings" && !isSuperAdmin) view = "dashboard";
   currentView = view;
   document.querySelectorAll(".view").forEach((v) => (v.hidden = true));
   document.getElementById("view-" + view).hidden = false;
@@ -440,11 +448,16 @@ function navigateTo(view) {
 
 async function loadSettings() {
   bindSettingsTabs();
+  applyAuthScoping();
 
-  try {
-    const data = await api("/settings/countries");
-    document.getElementById("allowed-countries").value = (data.countries || []).join(", ");
-  } catch (_) {}
+  // Account tab — every signed-in user.
+  loadTotpSettings();
+  loadPasskeySettings();
+
+  if (!isSuperAdmin) return;
+
+  // Administrator-only tabs.
+  loadCountryPicker();
 
   try {
     const config = await api("/settings/autoblock");
@@ -455,8 +468,6 @@ async function loadSettings() {
   } catch (_) {}
 
   loadBlockedIps();
-  loadTotpSettings();
-  loadPasskeySettings();
   loadMcpTokens();
   loadOauthGrants();
   loadMcpAudit();
@@ -464,9 +475,11 @@ async function loadSettings() {
   loadUsers();
 }
 
-// --- Site admin users (super-admin only) ---
-// Lists scoped user accounts and lets the super-admin create them, reassign
-// their sites, reset passwords, and delete them. Lives in Settings → Access.
+// --- Users (administrators only) ---
+// Lists every account and lets an administrator add accounts, grant or revoke
+// administrator rights, reassign sites, reset passwords, clear a locked-out
+// user's 2FA/passkeys, and delete accounts. Actions that touch an administrator
+// account ask for the acting admin's own password (server-enforced step-up).
 let usersAllSites = [];
 
 async function loadUsers() {
@@ -509,63 +522,133 @@ function pickedSlugs(containerId) {
   return Array.from(el.querySelectorAll('input[type="checkbox"]:checked')).map(i => i.value);
 }
 
+// Ask the acting admin for their own password when the server will demand it.
+function confirmPasswordPrompt(what) {
+  const pw = prompt(`${what}\n\nEnter YOUR password to confirm:`);
+  return pw ? pw : null;
+}
+
 function renderUsersList(users) {
   const el = document.getElementById("users-list");
   if (!el) return;
   if (!users.length) {
-    el.innerHTML = '<div class="text-sm text-muted">No site users yet.</div>';
+    el.innerHTML = '<div class="text-sm text-muted">No accounts yet.</div>';
     return;
   }
-  el.innerHTML = users.map(u => `
-    <div class="user-row" data-user-id="${u.id}" style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:6px">
+  const adminCount = users.filter(u => u.is_admin).length;
+  el.innerHTML = users.map(u => {
+    const isMe = u.username === currentUsername;
+    const factors = [
+      u.totp_enabled ? "2FA on" : null,
+      u.passkey_count ? `${u.passkey_count} passkey${u.passkey_count === 1 ? "" : "s"}` : null,
+    ].filter(Boolean).join(" · ");
+    return `
+    <div class="user-row" data-user-id="${u.id}" data-admin="${u.is_admin ? 1 : 0}">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <strong>${esc(u.username)}</strong>
-        <span class="text-sm text-muted">${u.sites.length} site${u.sites.length === 1 ? "" : "s"}${u.last_login ? " · last login " + timeAgo(u.last_login) : ""}</span>
+        <span class="site-badge ${u.is_admin ? "badge-admin" : "badge-user"}">${u.is_admin ? "Administrator" : "Site user"}</span>
+        ${isMe ? '<span class="text-sm text-muted">(you)</span>' : ""}
+        <span class="text-sm text-muted">${u.is_admin ? "all sites" : `${u.sites.length} site${u.sites.length === 1 ? "" : "s"}`}${factors ? " · " + factors : ""}${u.last_login ? " · last login " + timeAgo(u.last_login) : " · never signed in"}</span>
         <span style="flex:1"></span>
+        ${isMe ? "" : `<button type="button" class="btn btn-sm" data-act="role">${u.is_admin ? "Make site user" : "Make administrator"}</button>`}
         <button type="button" class="btn btn-sm" data-act="reset">Reset password</button>
-        <button type="button" class="btn btn-sm btn-danger" data-act="delete">Delete</button>
+        <button type="button" class="btn btn-sm" data-act="more">More ▾</button>
+        ${isMe ? "" : `<button type="button" class="btn btn-sm btn-danger" data-act="delete" ${u.is_admin && adminCount <= 1 ? "disabled title=\"The last administrator cannot be deleted\"" : ""}>Delete</button>`}
       </div>
+      <div class="user-more" data-more hidden style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+        <button type="button" class="btn btn-sm" data-act="disable-totp" ${u.totp_enabled ? "" : "disabled"}>Disable their 2FA</button>
+        <button type="button" class="btn btn-sm" data-act="remove-passkeys" ${u.passkey_count ? "" : "disabled"}>Remove their passkeys</button>
+        <span class="text-sm text-muted" style="align-self:center">Recovery tools for a locked-out user. They're audit-logged.</span>
+      </div>
+      ${u.is_admin ? "" : `
       <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px" data-sites></div>
       <div style="margin-top:6px">
         <button type="button" class="btn btn-sm btn-primary" data-act="save-sites">Save sites</button>
-        <span class="form-error" data-err style="margin-left:8px"></span>
-      </div>
-    </div>
-  `).join("");
+      </div>`}
+      <span class="form-error" data-err style="display:block;margin-top:4px;min-height:0"></span>
+    </div>`;
+  }).join("");
 
   users.forEach(u => {
     const row = el.querySelector(`[data-user-id="${u.id}"]`);
     if (!row) return;
-    const sitesBox = row.querySelector("[data-sites]");
-    sitesBox.innerHTML = usersAllSites.map(s => `
-      <label style="display:inline-flex;align-items:center;gap:4px;font-weight:normal">
-        <input type="checkbox" value="${esc(s.slug)}" ${u.sites.includes(s.slug) ? "checked" : ""} style="width:auto;margin:0">
-        <span class="text-sm">${esc(s.name)} <span class="text-muted">/${esc(s.slug)}</span></span>
-      </label>
-    `).join("") || '<span class="text-sm text-muted">No sites available.</span>';
     const errEl = row.querySelector("[data-err]");
+    const sitesBox = row.querySelector("[data-sites]");
+    if (sitesBox) {
+      sitesBox.innerHTML = usersAllSites.map(s => `
+        <label style="display:inline-flex;align-items:center;gap:4px;font-weight:normal">
+          <input type="checkbox" value="${esc(s.slug)}" ${u.sites.includes(s.slug) ? "checked" : ""} style="width:auto;margin:0">
+          <span class="text-sm">${esc(s.name)} <span class="text-muted">/${esc(s.slug)}</span></span>
+        </label>
+      `).join("") || '<span class="text-sm text-muted">No sites available.</span>';
+    }
 
-    row.querySelector('[data-act="save-sites"]').addEventListener("click", async () => {
+    const put = async (body) => {
       errEl.textContent = "";
-      const slugs = Array.from(sitesBox.querySelectorAll('input:checked')).map(i => i.value);
       try {
-        await api(`/users/${u.id}`, { method: "PUT", body: JSON.stringify({ sites: slugs }) });
+        await api(`/users/${u.id}`, { method: "PUT", body: JSON.stringify(body) });
         loadUsers();
       } catch (e) { errEl.textContent = e.message; }
+    };
+
+    row.querySelector('[data-act="save-sites"]')?.addEventListener("click", () => {
+      const slugs = Array.from(sitesBox.querySelectorAll('input:checked')).map(i => i.value);
+      put({ sites: slugs });
     });
-    row.querySelector('[data-act="reset"]').addEventListener("click", async () => {
-      errEl.textContent = "";
+    row.querySelector('[data-act="reset"]').addEventListener("click", () => {
       const pw = prompt(`New password for "${u.username}" (min 8 chars):`);
       if (!pw) return;
-      try {
-        await api(`/users/${u.id}`, { method: "PUT", body: JSON.stringify({ password: pw }) });
-        errEl.textContent = "Password updated.";
-      } catch (e) { errEl.textContent = e.message; }
+      const body = { password: pw };
+      if (u.is_admin) {
+        const confirm_password = confirmPasswordPrompt(`Reset the password of administrator "${u.username}"? They will be signed out everywhere.`);
+        if (!confirm_password) return;
+        body.confirm_password = confirm_password;
+      }
+      put(body);
     });
-    row.querySelector('[data-act="delete"]').addEventListener("click", async () => {
-      if (!confirm(`Delete user "${u.username}"? They will lose admin access immediately.`)) return;
+    row.querySelector('[data-act="role"]')?.addEventListener("click", () => {
+      const toAdmin = !u.is_admin;
+      const confirm_password = confirmPasswordPrompt(toAdmin
+        ? `Make "${u.username}" an administrator? They will gain access to every site, Settings, users, and backups.`
+        : `Remove administrator rights from "${u.username}"? They will keep no site access until you assign sites.`);
+      if (!confirm_password) return;
+      put({ is_admin: toAdmin, confirm_password });
+    });
+    row.querySelector('[data-act="more"]').addEventListener("click", () => {
+      const more = row.querySelector("[data-more]");
+      more.hidden = !more.hidden;
+    });
+    row.querySelector('[data-act="disable-totp"]').addEventListener("click", () => {
+      if (!confirm(`Disable two-factor authentication for "${u.username}"? They should re-enable it once they can sign in.`)) return;
+      const body = { disable_totp: true };
+      if (u.is_admin) {
+        const confirm_password = confirmPasswordPrompt(`"${u.username}" is an administrator.`);
+        if (!confirm_password) return;
+        body.confirm_password = confirm_password;
+      }
+      put(body);
+    });
+    row.querySelector('[data-act="remove-passkeys"]').addEventListener("click", () => {
+      if (!confirm(`Remove all passkeys registered by "${u.username}"?`)) return;
+      const body = { remove_passkeys: true };
+      if (u.is_admin) {
+        const confirm_password = confirmPasswordPrompt(`"${u.username}" is an administrator.`);
+        if (!confirm_password) return;
+        body.confirm_password = confirm_password;
+      }
+      put(body);
+    });
+    row.querySelector('[data-act="delete"]')?.addEventListener("click", async () => {
+      if (!confirm(`Delete "${u.username}"? They lose access immediately and their passkeys are removed.`)) return;
+      const body = {};
+      if (u.is_admin) {
+        const confirm_password = confirmPasswordPrompt(`"${u.username}" is an administrator.`);
+        if (!confirm_password) return;
+        body.confirm_password = confirm_password;
+      }
+      errEl.textContent = "";
       try {
-        await api(`/users/${u.id}`, { method: "DELETE" });
+        await api(`/users/${u.id}`, { method: "DELETE", body: JSON.stringify(body) });
         loadUsers();
       } catch (e) { errEl.textContent = e.message; }
     });
@@ -576,17 +659,29 @@ function bindUserAddForm() {
   const form = document.getElementById("user-add-form");
   if (!form || form.dataset.bound) return;
   form.dataset.bound = "1";
+  const adminBox = document.getElementById("user-new-admin");
+  const sitesWrap = document.getElementById("user-new-sites-wrap");
+  adminBox.addEventListener("change", () => { sitesWrap.hidden = adminBox.checked; });
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const errEl = document.getElementById("users-error");
     errEl.textContent = "";
     const username = document.getElementById("user-new-username").value.trim();
     const password = document.getElementById("user-new-password").value;
-    const sites = pickedSlugs("user-new-sites");
+    const is_admin = adminBox.checked;
+    const sites = is_admin ? [] : pickedSlugs("user-new-sites");
+    const body = { username, password, is_admin, sites };
+    if (is_admin) {
+      const confirm_password = confirmPasswordPrompt(`Create administrator "${username}" with access to everything?`);
+      if (!confirm_password) return;
+      body.confirm_password = confirm_password;
+    }
     try {
-      await api("/users", { method: "POST", body: JSON.stringify({ username, password, sites }) });
+      await api("/users", { method: "POST", body: JSON.stringify(body) });
       document.getElementById("user-new-username").value = "";
       document.getElementById("user-new-password").value = "";
+      adminBox.checked = false;
+      sitesWrap.hidden = false;
       loadUsers();
     } catch (e) { errEl.textContent = e.message; }
   });
@@ -600,16 +695,9 @@ function bindSettingsTabs() {
   const panels = document.querySelectorAll("#view-settings .settings-page-panel");
   tabs.forEach(tab => {
     tab.dataset.bound = "1";
-    tab.addEventListener("click", () => {
-      const target = tab.dataset.settingsTab;
-      tabs.forEach(t => t.classList.toggle("active", t === tab));
-      panels.forEach(p => {
-        const match = p.dataset.settingsPanel === target;
-        p.classList.toggle("active", match);
-        p.hidden = !match;
-      });
-    });
+    tab.addEventListener("click", () => selectSettingsTab(tab.dataset.settingsTab));
   });
+  void panels;
 }
 
 // --- CMS Library editor ---
@@ -721,6 +809,198 @@ function bindCmsLibHandlers() {
     } catch (e) {
       err.textContent = e.message;
     }
+  });
+}
+
+// --- Country allow-list picker ---
+//
+// The server owns the code→name list (/settings/countries/list) and validates
+// what's saved, so the picker is purely a convenience: search by name or code,
+// click to add, ✕ to remove, plus quick-add chips built from the countries
+// that actually visited in the last 7 days. State lives in `countryState`.
+const countryState = {
+  all: [],            // [{code, name}]
+  byCode: new Map(),
+  selected: [],       // codes
+  loaded: false,
+};
+
+function flagEmoji(code) {
+  if (!/^[A-Z]{2}$/.test(code)) return "";
+  return String.fromCodePoint(...code.split("").map(c => 0x1f1e6 + c.charCodeAt(0) - 65));
+}
+
+function countryLabel(code) {
+  const entry = countryState.byCode.get(code);
+  const name = entry ? entry.name : countryName(code);
+  return `${flagEmoji(code)} ${name} (${code})`.trim();
+}
+
+async function loadCountryPicker() {
+  try {
+    if (!countryState.loaded) {
+      const { countries } = await api("/settings/countries/list");
+      countryState.all = countries || [];
+      countryState.byCode = new Map(countryState.all.map(c => [c.code, c]));
+      countryState.loaded = true;
+    }
+    const data = await api("/settings/countries");
+    countryState.selected = data.countries || [];
+    renderCountryChips();
+    loadRecentVisitorCountries();
+  } catch (e) {
+    const errEl = document.getElementById("country-error");
+    if (errEl) errEl.textContent = e.message;
+  }
+}
+
+function renderCountryChips() {
+  const box = document.getElementById("country-chips");
+  if (!box) return;
+  if (!countryState.selected.length) {
+    box.innerHTML = '<span class="text-sm text-muted" id="country-chips-empty">All countries allowed</span>';
+    return;
+  }
+  const sorted = [...countryState.selected].sort((a, b) => countryLabel(a).localeCompare(countryLabel(b)));
+  box.innerHTML = sorted.map(code => `
+    <span class="chip" data-code="${esc(code)}">
+      <span>${esc(countryLabel(code))}</span>
+      <button type="button" class="chip-remove" title="Remove ${esc(code)}" aria-label="Remove ${esc(code)}">✕</button>
+    </span>`).join("");
+  box.querySelectorAll(".chip-remove").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const code = btn.closest(".chip").dataset.code;
+      countryState.selected = countryState.selected.filter(c => c !== code);
+      renderCountryChips();
+      renderRecentVisitorCountries();
+    });
+  });
+}
+
+function addCountry(code) {
+  if (!countryState.byCode.has(code)) return;
+  if (!countryState.selected.includes(code)) countryState.selected.push(code);
+  renderCountryChips();
+  renderRecentVisitorCountries();
+}
+
+let recentVisitorCountries = [];
+async function loadRecentVisitorCountries() {
+  try {
+    recentVisitorCountries = await api("/analytics/countries?hours=168");
+  } catch (_) { recentVisitorCountries = []; }
+  renderRecentVisitorCountries();
+}
+
+function renderRecentVisitorCountries() {
+  const el = document.getElementById("country-recent");
+  if (!el) return;
+  const candidates = recentVisitorCountries
+    .filter(r => r.country && countryState.byCode.has(r.country) && !countryState.selected.includes(r.country))
+    .slice(0, 12);
+  if (!candidates.length) { el.innerHTML = ""; return; }
+  el.innerHTML = `<span class="text-muted">Visitors in the last 7 days — click to allow:</span>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">${candidates.map(r => `
+      <button type="button" class="chip chip-add" data-code="${esc(r.country)}" title="${fmt(r.hits)} requests">${esc(countryLabel(r.country))} <span class="text-muted">· ${fmt(r.hits)}</span></button>`).join("")}
+    </div>`;
+  el.querySelectorAll(".chip-add").forEach(btn => btn.addEventListener("click", () => addCountry(btn.dataset.code)));
+}
+
+function bindCountryPicker() {
+  const form = document.getElementById("country-form");
+  const search = document.getElementById("country-search");
+  const suggest = document.getElementById("country-suggest");
+  if (!form || form.dataset.bound) return;
+  form.dataset.bound = "1";
+
+  let highlighted = -1;
+  let matches = [];
+
+  const closeSuggest = () => { suggest.hidden = true; suggest.innerHTML = ""; highlighted = -1; matches = []; };
+
+  const renderSuggest = () => {
+    const q = search.value.trim().toLowerCase();
+    if (!q) { closeSuggest(); return; }
+    matches = countryState.all
+      .filter(c => !countryState.selected.includes(c.code))
+      .filter(c => c.name.toLowerCase().includes(q) || c.code.toLowerCase() === q || c.code.toLowerCase().startsWith(q))
+      .sort((a, b) => {
+        // Exact code, then name-prefix, then substring.
+        const score = c => c.code.toLowerCase() === q ? 0 : c.name.toLowerCase().startsWith(q) ? 1 : 2;
+        return score(a) - score(b) || a.name.localeCompare(b.name);
+      })
+      .slice(0, 8);
+    if (!matches.length) {
+      suggest.innerHTML = '<div class="country-suggest-item text-muted">No matching country</div>';
+      suggest.hidden = false;
+      return;
+    }
+    highlighted = 0;
+    suggest.innerHTML = matches.map((c, i) => `
+      <button type="button" class="country-suggest-item ${i === highlighted ? "active" : ""}" data-code="${esc(c.code)}">
+        ${esc(flagEmoji(c.code))} ${esc(c.name)} <span class="text-muted">${esc(c.code)}</span>
+      </button>`).join("");
+    suggest.hidden = false;
+    suggest.querySelectorAll("[data-code]").forEach(btn => {
+      btn.addEventListener("mousedown", (e) => { e.preventDefault(); pick(btn.dataset.code); });
+    });
+  };
+
+  const pick = (code) => {
+    addCountry(code);
+    search.value = "";
+    closeSuggest();
+    search.focus();
+  };
+
+  search.addEventListener("input", renderSuggest);
+  search.addEventListener("focus", renderSuggest);
+  search.addEventListener("blur", () => setTimeout(closeSuggest, 120));
+  search.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { closeSuggest(); return; }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      if (!matches.length) return;
+      e.preventDefault();
+      highlighted = (highlighted + (e.key === "ArrowDown" ? 1 : -1) + matches.length) % matches.length;
+      suggest.querySelectorAll(".country-suggest-item").forEach((el, i) => el.classList.toggle("active", i === highlighted));
+      return;
+    }
+    if (e.key === "Enter" || e.keyCode === 13) {
+      e.preventDefault(); // never submit the form from the search box
+      if (matches.length && highlighted >= 0) pick(matches[highlighted].code);
+      return;
+    }
+    if (e.key === "Backspace" && !search.value && countryState.selected.length) {
+      // Backspace in an empty box removes the last chip, like a tag input.
+      countryState.selected.pop();
+      renderCountryChips();
+      renderRecentVisitorCountries();
+    }
+  });
+
+  document.getElementById("country-clear").addEventListener("click", () => {
+    countryState.selected = [];
+    renderCountryChips();
+    renderRecentVisitorCountries();
+  });
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const errEl = document.getElementById("country-error");
+    const successEl = document.getElementById("country-success");
+    errEl.textContent = "";
+    successEl.textContent = "";
+    try {
+      const res = await api("/settings/countries", {
+        method: "POST",
+        body: JSON.stringify({ countries: countryState.selected }),
+      });
+      countryState.selected = res.countries || [];
+      renderCountryChips();
+      successEl.textContent = countryState.selected.length
+        ? `Saved. Only visitors from ${countryState.selected.map(countryLabel).join(", ")} can reach your sites.`
+        : "Saved. All countries allowed.";
+    } catch (err) { errEl.textContent = err.message; }
   });
 }
 
@@ -1259,8 +1539,10 @@ async function loadOauthGrants() {
           <tbody>`;
       for (const g of grants) {
         const principalLabel = g.principal === "admin" || !g.principal
-          ? '<span class="text-sm text-muted">admin</span>'
-          : `<span class="text-sm">delegate <code>${esc(g.principal.replace(/^delegate:/, ""))}</code></span>`;
+          ? '<span class="text-sm text-muted">admin (legacy)</span>'
+          : g.principal.startsWith("user:")
+            ? `<span class="text-sm">user <code>${esc(g.principal.replace(/^user:/, ""))}</code></span>`
+            : `<span class="text-sm">delegate <code>${esc(g.principal.replace(/^delegate:/, ""))}</code></span>`;
         html += `<tr>
           <td>${esc(g.client_name)}${g.client_uri ? ` <a href="${esc(g.client_uri)}" target="_blank" rel="noopener" style="font-size:0.75rem">↗</a>` : ""}</td>
           <td><code>${esc(g.site_slug)}</code></td>
@@ -1936,7 +2218,7 @@ async function loadSites() {
       </div>
       <div class="site-actions">
         <a href="/${esc(s.slug)}/${s.current_version ? "?_v=" + esc(s.current_version) : ""}" target="_blank" rel="noopener" class="btn btn-sm">Visit</a>
-        <button class="btn btn-sm" onclick="showSiteFiles('${esc(s.slug)}', '${esc(s.name)}')">Files</button>
+        <button class="btn btn-sm" onclick="showSiteFiles('${esc(s.slug)}', '${esc(s.name)}', loadSites)">Files</button>
         <button class="btn btn-sm" onclick="showSiteDetail('${esc(s.slug)}')">Versions</button>
         <button class="btn btn-sm" onclick="redeploySite('${esc(s.slug)}', '${esc(s.name)}')">Update</button>
         <button class="btn btn-sm" onclick="showUploadFile('${esc(s.slug)}', '${esc(s.name)}', loadSites)">Upload File</button>
@@ -2087,7 +2369,7 @@ function renderExplorerActions(site) {
   `;
 
   const slug = site.slug;
-  el.querySelector('[data-act="files"]').addEventListener("click", () => showSiteFiles(slug, site.name));
+  el.querySelector('[data-act="files"]').addEventListener("click", () => showSiteFiles(slug, site.name, () => loadExplorer()));
   el.querySelector('[data-act="versions"]').addEventListener("click", () => showSiteDetail(slug));
   el.querySelector('[data-act="update"]').addEventListener("click", () => redeploySite(slug, site.name));
   el.querySelector('[data-act="upload"]').addEventListener("click", () => showUploadFile(slug, site.name, () => loadExplorer()));
@@ -2155,20 +2437,34 @@ window.showSiteDetail = async function (slug) {
       <h2>${esc(site.name)} — Versions</h2>
       <p class="text-sm text-muted mb-2">Current: <code>${site.current_version || "none"}</code></p>
       ${site.current_version ? `
-        <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
-          <input type="text" id="commit-label" placeholder="Optional label (e.g. 'first draft')" style="flex:1">
-          <button class="btn btn-sm btn-primary" id="commit-btn">Snapshot Current</button>
+        <div class="snapshot-form">
+          <input type="text" id="commit-label" placeholder="Label (optional, e.g. 'first draft')" maxlength="120">
+          <textarea id="commit-notes" rows="2" maxlength="2000" placeholder="Release notes (optional) — what's in this snapshot?"></textarea>
+          <div style="display:flex;justify-content:flex-end">
+            <button class="btn btn-sm btn-primary" id="commit-btn">Snapshot Current</button>
+          </div>
         </div>
         <div class="form-error" id="commit-error" style="margin-bottom:8px"></div>
       ` : ""}
       <div class="version-list">
         ${versions.map((v) => `
-          <div class="version-item ${v.version === site.current_version ? "active" : ""}">
+          <div class="version-item ${v.version === site.current_version ? "active" : ""}" data-version="${esc(v.version)}">
             <div class="version-meta">
-              <span class="version-id">${v.version}${v.label ? ` — ${esc(v.label)}` : ""}${v.mcp_modified ? ' <span class="text-sm text-muted">(MCP edits)</span>' : ""}</span>
+              <span class="version-id">${esc(v.version)}${v.label ? ` — ${esc(v.label)}` : ""}${v.mcp_modified ? ' <span class="text-sm text-muted">(edited since)</span>' : ""}</span>
               <span class="version-date">${formatBytes(v.size_bytes)} · ${v.file_count} files · ${timeAgo(v.created_at)}</span>
+              ${v.notes ? `<div class="version-notes">${esc(v.notes)}</div>` : ""}
+              <div class="version-edit" hidden>
+                <input type="text" class="version-edit-label" value="${esc(v.label || "")}" maxlength="120" placeholder="Label">
+                <textarea class="version-edit-notes" rows="3" maxlength="2000" placeholder="Release notes">${esc(v.notes || "")}</textarea>
+                <div style="display:flex;gap:6px;justify-content:flex-end">
+                  <button type="button" class="btn btn-sm btn-ghost version-edit-cancel">Cancel</button>
+                  <button type="button" class="btn btn-sm btn-primary version-edit-save">Save</button>
+                </div>
+                <div class="form-error version-edit-error" style="margin-top:4px;min-height:0"></div>
+              </div>
             </div>
             <div class="version-actions">
+              <button class="btn btn-sm btn-ghost version-edit-btn" title="Edit label and release notes">${v.notes || v.label ? "Edit notes" : "Add notes"}</button>
               ${v.version !== site.current_version ? `
                 <button class="btn btn-sm btn-primary" onclick="activateVersion('${slug}', '${v.version}')">Activate</button>
                 <button class="btn btn-sm btn-danger" onclick="deleteVersionBtn('${slug}', '${v.version}')">Delete</button>
@@ -2192,13 +2488,14 @@ window.showSiteDetail = async function (slug) {
     commitBtn.addEventListener("click", async () => {
       const errEl = modal.querySelector("#commit-error");
       const label = modal.querySelector("#commit-label").value.trim();
+      const notes = modal.querySelector("#commit-notes").value.trim();
       errEl.textContent = "";
       commitBtn.disabled = true;
       try {
-        await api(`/sites/${slug}/commit`, {
-          method: "POST",
-          body: JSON.stringify(label ? { label } : {}),
-        });
+        const body = {};
+        if (label) body.label = label;
+        if (notes) body.notes = notes;
+        await api(`/sites/${slug}/commit`, { method: "POST", body: JSON.stringify(body) });
         modal.remove();
         showSiteDetail(slug);
       } catch (err) {
@@ -2207,6 +2504,31 @@ window.showSiteDetail = async function (slug) {
       }
     });
   }
+
+  // Inline label/notes editor per version.
+  modal.querySelectorAll(".version-item").forEach(item => {
+    const version = item.dataset.version;
+    const editor = item.querySelector(".version-edit");
+    const errEl = item.querySelector(".version-edit-error");
+    item.querySelector(".version-edit-btn").addEventListener("click", () => {
+      editor.hidden = !editor.hidden;
+      if (!editor.hidden) item.querySelector(".version-edit-notes").focus();
+    });
+    item.querySelector(".version-edit-cancel").addEventListener("click", () => { editor.hidden = true; errEl.textContent = ""; });
+    item.querySelector(".version-edit-save").addEventListener("click", async () => {
+      errEl.textContent = "";
+      const label = item.querySelector(".version-edit-label").value.trim();
+      const notes = item.querySelector(".version-edit-notes").value.trim();
+      try {
+        await api(`/sites/${slug}/versions/${version}/meta`, {
+          method: "POST",
+          body: JSON.stringify({ label: label || null, notes: notes || null }),
+        });
+        modal.remove();
+        showSiteDetail(slug);
+      } catch (err) { errEl.textContent = err.message; }
+    });
+  });
 };
 
 window.activateVersion = async function (slug, version) {
@@ -2334,7 +2656,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
             `).join("") : '<div class="text-sm text-muted" id="no-aliases-msg">No aliases configured.</div>'}
           </div>
           <div style="display:flex;gap:8px;align-items:center">
-            <input type="text" id="settings-new-alias" placeholder="e.g. ecg" style="flex:1" pattern="[a-z0-9][a-z0-9-]*[a-z0-9]?">
+            <input type="text" id="settings-new-alias" placeholder="e.g. ecg" style="flex:1" pattern="[a-z0-9][a-z0-9\\-]*[a-z0-9]?">
             <button type="button" class="btn btn-sm btn-primary" id="add-alias-btn">Add Alias</button>
           </div>
           <div class="form-error" id="alias-error" style="margin-top:4px"></div>
@@ -3012,129 +3334,320 @@ window.confirmDeleteSite = async function (slug) {
   loadSites();
 };
 
-// --- Site File Browser ---
-window.showSiteFiles = async function (slug, name) {
+// --- Site File Manager ---
+//
+// Lists the current version's files and folders (relative to the served
+// content directory) and lets the admin upload, create folders, rename/move,
+// duplicate, and delete — singly or in bulk. Every mutation round-trips through
+// the server, which enforces path containment and auto-snapshot, and the list
+// is re-fetched afterwards so what's shown is always what's on disk.
+window.showSiteFiles = async function (slug, name, onChanged) {
   const modal = document.createElement("div");
   modal.className = "modal site-files-modal";
   modal.innerHTML = `
     <div class="modal-backdrop"></div>
-    <div class="modal-content" style="max-width:800px;max-height:90vh;display:flex;flex-direction:column">
+    <div class="modal-content" style="max-width:900px;max-height:90vh;display:flex;flex-direction:column">
       <h2>${esc(name)} — Files</h2>
       <p class="text-sm text-muted">Loading...</p>
     </div>
   `;
   document.body.appendChild(modal);
   modal.querySelector(".modal-backdrop").addEventListener("click", () => modal.remove());
+  const content = modal.querySelector(".modal-content");
 
-  try {
+  const state = {
+    entries: [],          // [{path, kind:"file"|"dir", size, modified}]
+    selected: new Set(),
+    sortKey: "path",
+    sortAsc: true,
+    filter: "",
+    meta: {},
+    dirty: false,         // whether anything changed (to refresh the caller)
+  };
+
+  const notify = (msg, isError) => {
+    const el = content.querySelector("#fm-status");
+    if (!el) return;
+    el.textContent = msg || "";
+    el.style.color = isError ? "var(--danger)" : "var(--success)";
+  };
+
+  async function reload() {
     const data = await api(`/sites/${slug}/files`);
-    const files = data.files || [];
-    const content = modal.querySelector(".modal-content");
+    state.meta = data;
+    const files = (data.files || []).map(f => ({ ...f, kind: "file" }));
+    const dirs = (data.dirs || []).map(d => ({ path: d, kind: "dir", size: 0, modified: null }));
+    state.entries = [...dirs, ...files];
+    // Drop selections that no longer exist.
+    const live = new Set(state.entries.map(e => e.path));
+    state.selected = new Set([...state.selected].filter(p => live.has(p)));
+    renderShell();
+    renderRows();
+  }
 
-    if (!files.length) {
-      content.innerHTML = `
-        <h2>${esc(name)} — Files</h2>
-        <p class="text-muted">No files found in this bundle.</p>
-        <div class="modal-actions"><button class="btn btn-ghost close-modal">Close</button></div>
-      `;
-      content.querySelector(".close-modal").addEventListener("click", () => modal.remove());
-      return;
-    }
-
+  function renderShell() {
+    const files = state.entries.filter(e => e.kind === "file");
     const totalSize = files.reduce((sum, f) => sum + f.size, 0);
-    const rootNote = data.root_dir ? ` · root: <code>${esc(data.root_dir)}</code>` : "";
-
-    content.innerHTML = `
-      <div style="flex:0 0 auto">
-        <h2>${esc(name)} — Files</h2>
-        <p class="text-sm text-muted" style="margin-bottom:12px">
-          Version <code>${data.version || "—"}</code>${rootNote} · ${files.length} files · ${formatBytes(totalSize)}
-        </p>
-        <div style="margin-bottom:12px">
-          <input type="text" id="file-search" placeholder="Filter files..." style="width:100%;padding:6px 10px;font-size:0.85rem;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);box-sizing:border-box">
+    const rootNote = state.meta.root_dir ? ` · root: <code>${esc(state.meta.root_dir)}</code>` : "";
+    const snapNote = state.meta.auto_snapshot ? ' · <span title="The first change to an untouched version freezes it as a rollback point">auto-snapshot on</span>' : "";
+    if (!content.querySelector("#fm-table")) {
+      content.innerHTML = `
+        <div style="flex:0 0 auto">
+          <h2>${esc(name)} — Files</h2>
+          <p class="text-sm text-muted" id="fm-summary" style="margin-bottom:10px"></p>
+          <div class="fm-toolbar">
+            <input type="text" id="fm-search" placeholder="Filter…" autocomplete="off" spellcheck="false">
+            <span style="flex:1"></span>
+            <button type="button" class="btn btn-sm" id="fm-upload">Upload</button>
+            <button type="button" class="btn btn-sm" id="fm-mkdir">New folder</button>
+            <button type="button" class="btn btn-sm" id="fm-rename" disabled>Rename / move</button>
+            <button type="button" class="btn btn-sm" id="fm-copy" disabled>Duplicate</button>
+            <button type="button" class="btn btn-sm btn-danger" id="fm-delete" disabled>Delete</button>
+          </div>
         </div>
-      </div>
-      <div style="flex:1 1 auto;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
-        <table style="width:100%;font-size:0.8rem;border-collapse:collapse" id="file-table">
-          <thead style="position:sticky;top:0;background:var(--surface);z-index:1">
-            <tr>
-              <th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);cursor:pointer" data-sort="path">Path</th>
-              <th style="text-align:right;padding:8px 12px;border-bottom:1px solid var(--border);white-space:nowrap;cursor:pointer" data-sort="size">Size</th>
-              <th style="text-align:right;padding:8px 12px;border-bottom:1px solid var(--border);white-space:nowrap;cursor:pointer" data-sort="modified">Modified</th>
-            </tr>
-          </thead>
-          <tbody id="file-table-body"></tbody>
-        </table>
-      </div>
-      <div class="modal-actions" style="flex:0 0 auto;margin-top:12px">
-        <button class="btn btn-ghost close-modal">Close</button>
-      </div>
-    `;
+        <div style="flex:1 1 auto;overflow-y:auto;border:1px solid var(--border);border-radius:6px;min-height:200px">
+          <table class="fm-table" id="fm-table">
+            <thead>
+              <tr>
+                <th style="width:28px"><input type="checkbox" id="fm-select-all" title="Select all shown"></th>
+                <th data-sort="path" style="cursor:pointer">Path</th>
+                <th data-sort="size" style="text-align:right;white-space:nowrap;cursor:pointer">Size</th>
+                <th data-sort="modified" style="text-align:right;white-space:nowrap;cursor:pointer">Modified</th>
+                <th style="width:1%;white-space:nowrap"></th>
+              </tr>
+            </thead>
+            <tbody id="fm-body"></tbody>
+          </table>
+        </div>
+        <div style="flex:0 0 auto;display:flex;align-items:center;gap:10px;margin-top:10px">
+          <span class="text-sm" id="fm-status" style="flex:1;min-height:1.2em"></span>
+          <button class="btn btn-ghost close-modal">Close</button>
+        </div>
+      `;
+      bindShell();
+    }
+    content.querySelector("#fm-summary").innerHTML =
+      `Version <code>${esc(state.meta.version || "—")}</code>${rootNote} · ${files.length} files · ${formatBytes(totalSize)}${snapNote}`;
+  }
 
-    let sortKey = "path";
-    let sortAsc = true;
+  function visibleEntries() {
+    const q = state.filter.toLowerCase();
+    const filtered = q ? state.entries.filter(e => e.path.toLowerCase().includes(q)) : state.entries;
+    return [...filtered].sort((a, b) => {
+      let cmp = 0;
+      if (state.sortKey === "path") cmp = a.path.localeCompare(b.path);
+      else if (state.sortKey === "size") cmp = a.size - b.size;
+      else if (state.sortKey === "modified") cmp = (a.modified || "").localeCompare(b.modified || "");
+      return state.sortAsc ? cmp : -cmp;
+    });
+  }
 
-    function renderFiles(filter) {
-      const filtered = filter
-        ? files.filter(f => f.path.toLowerCase().includes(filter.toLowerCase()))
-        : files;
-
-      const sorted = [...filtered].sort((a, b) => {
-        let cmp = 0;
-        if (sortKey === "path") cmp = a.path.localeCompare(b.path);
-        else if (sortKey === "size") cmp = a.size - b.size;
-        else if (sortKey === "modified") cmp = a.modified.localeCompare(b.modified);
-        return sortAsc ? cmp : -cmp;
-      });
-
-      const tbody = document.getElementById("file-table-body");
-      if (!sorted.length) {
-        tbody.innerHTML = '<tr><td colspan="3" style="padding:16px;text-align:center;color:var(--text-muted)">No matching files</td></tr>';
-        return;
-      }
-      tbody.innerHTML = sorted.map(f => {
-        const dir = f.path.lastIndexOf("/") >= 0 ? f.path.substring(0, f.path.lastIndexOf("/") + 1) : "";
-        const fname = f.path.lastIndexOf("/") >= 0 ? f.path.substring(f.path.lastIndexOf("/") + 1) : f.path;
-        const modDate = new Date(f.modified);
-        const modStr = modDate.toLocaleDateString() + " " + modDate.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
-        return `<tr>
-          <td style="padding:4px 12px;border-bottom:1px solid var(--border);word-break:break-all;font-family:monospace">
-            ${dir ? '<span class="text-muted">' + esc(dir) + '</span>' : ''}${esc(fname)}
+  function renderRows() {
+    const tbody = content.querySelector("#fm-body");
+    const rows = visibleEntries();
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="5" style="padding:16px;text-align:center;color:var(--text-muted)">No matching files</td></tr>';
+    } else {
+      tbody.innerHTML = rows.map(e => {
+        const slash = e.path.lastIndexOf("/");
+        const dir = slash >= 0 ? e.path.substring(0, slash + 1) : "";
+        const base = slash >= 0 ? e.path.substring(slash + 1) : e.path;
+        const modStr = e.modified ? new Date(e.modified).toLocaleDateString() + " " + new Date(e.modified).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—";
+        const checked = state.selected.has(e.path) ? "checked" : "";
+        return `<tr data-path="${esc(e.path)}" class="${checked ? "selected" : ""}">
+          <td><input type="checkbox" class="fm-check" ${checked}></td>
+          <td class="fm-path" style="font-family:var(--font-mono)">
+            ${e.kind === "dir" ? '<span class="fm-icon" title="Folder">📁</span>' : '<span class="fm-icon">📄</span>'}
+            ${dir ? '<span class="text-muted">' + esc(dir) + '</span>' : ''}${esc(base)}
           </td>
-          <td style="padding:4px 12px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap">${formatBytes(f.size)}</td>
-          <td style="padding:4px 12px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap">${modStr}</td>
+          <td style="text-align:right;white-space:nowrap">${e.kind === "dir" ? '<span class="text-muted">folder</span>' : formatBytes(e.size)}</td>
+          <td style="text-align:right;white-space:nowrap">${modStr}</td>
+          <td style="white-space:nowrap;text-align:right">
+            <button type="button" class="btn btn-sm btn-ghost" data-row-act="rename" title="Rename or move">Rename</button>
+            <button type="button" class="btn btn-sm btn-ghost" data-row-act="copy" title="Duplicate">Copy</button>
+            <button type="button" class="btn btn-sm btn-ghost fm-danger" data-row-act="delete" title="Delete">Delete</button>
+          </td>
         </tr>`;
       }).join("");
     }
-
-    renderFiles("");
-
-    // Search filter
-    content.querySelector("#file-search").addEventListener("input", (e) => {
-      renderFiles(e.target.value);
+    tbody.querySelectorAll(".fm-check").forEach(cb => {
+      cb.addEventListener("change", () => {
+        const path = cb.closest("tr").dataset.path;
+        if (cb.checked) state.selected.add(path); else state.selected.delete(path);
+        cb.closest("tr").classList.toggle("selected", cb.checked);
+        updateToolbar();
+      });
     });
+    tbody.querySelectorAll("[data-row-act]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const path = btn.closest("tr").dataset.path;
+        const act = btn.dataset.rowAct;
+        if (act === "rename") doRename(path);
+        else if (act === "copy") doCopy(path);
+        else if (act === "delete") doDelete([path]);
+      });
+    });
+    const all = content.querySelector("#fm-select-all");
+    all.checked = rows.length > 0 && rows.every(r => state.selected.has(r.path));
+    all.indeterminate = !all.checked && rows.some(r => state.selected.has(r.path));
+    content.querySelectorAll("[data-sort]").forEach(th => {
+      th.textContent = th.textContent.replace(/ [▲▼]$/, "");
+      if (th.dataset.sort === state.sortKey) th.textContent += state.sortAsc ? " ▲" : " ▼";
+    });
+    updateToolbar();
+  }
 
-    // Column sorting
+  function updateToolbar() {
+    const n = state.selected.size;
+    content.querySelector("#fm-rename").disabled = n !== 1;
+    content.querySelector("#fm-copy").disabled = n !== 1;
+    const del = content.querySelector("#fm-delete");
+    del.disabled = n === 0;
+    del.textContent = n > 1 ? `Delete (${n})` : "Delete";
+  }
+
+  function entryFor(path) { return state.entries.find(e => e.path === path); }
+
+  function reportSnapshot(result) {
+    if (result && result.snapshot_version) {
+      notify(`Done. The previous state was frozen as version ${result.snapshot_version} before this change.`);
+      return true;
+    }
+    return false;
+  }
+
+  async function run(label, fn) {
+    notify("");
+    try {
+      const result = await fn();
+      state.dirty = true;
+      await reload();
+      if (!reportSnapshot(result)) notify(label);
+    } catch (err) {
+      notify(err.message || "Operation failed", true);
+    }
+  }
+
+  async function doRename(path) {
+    const to = prompt(`Rename or move "${path}".\nEnter the new path (folders are created as needed):`, path);
+    if (to == null) return;
+    const target = to.trim();
+    if (!target || target === path) return;
+    await run(`Renamed ${path} → ${target}`, async () => {
+      try {
+        return await api(`/sites/${slug}/files/rename`, { method: "POST", body: JSON.stringify({ from: path, to: target }) });
+      } catch (err) {
+        if (/already exists/.test(err.message) && entryFor(path)?.kind === "file" &&
+            confirm(`"${target}" already exists. Replace it?`)) {
+          return await api(`/sites/${slug}/files/rename`, { method: "POST", body: JSON.stringify({ from: path, to: target, replace: true }) });
+        }
+        throw err;
+      }
+    });
+  }
+
+  function suggestCopyName(path) {
+    const slash = path.lastIndexOf("/");
+    const dir = slash >= 0 ? path.substring(0, slash + 1) : "";
+    const base = slash >= 0 ? path.substring(slash + 1) : path;
+    const dot = base.lastIndexOf(".");
+    const isDir = entryFor(path)?.kind === "dir";
+    if (isDir || dot <= 0) return `${dir}${base} copy`;
+    return `${dir}${base.substring(0, dot)} copy${base.substring(dot)}`;
+  }
+
+  async function doCopy(path) {
+    const to = prompt(`Duplicate "${path}".\nEnter the destination path:`, suggestCopyName(path));
+    if (to == null) return;
+    const target = to.trim();
+    if (!target || target === path) return;
+    await run(`Copied ${path} → ${target}`, async () => {
+      try {
+        return await api(`/sites/${slug}/files/copy`, { method: "POST", body: JSON.stringify({ from: path, to: target }) });
+      } catch (err) {
+        if (/already exists/.test(err.message) && entryFor(path)?.kind === "file" &&
+            confirm(`"${target}" already exists. Replace it?`)) {
+          return await api(`/sites/${slug}/files/copy`, { method: "POST", body: JSON.stringify({ from: path, to: target, replace: true }) });
+        }
+        throw err;
+      }
+    });
+  }
+
+  async function doDelete(paths) {
+    if (!paths.length) return;
+    const dirs = paths.filter(p => entryFor(p)?.kind === "dir");
+    const preview = paths.slice(0, 10).map(p => `  • ${p}${entryFor(p)?.kind === "dir" ? "/ (folder and everything in it)" : ""}`).join("\n");
+    const more = paths.length > 10 ? `\n  …and ${paths.length - 10} more` : "";
+    const warn = dirs.length ? "\n\nFolders are deleted recursively." : "";
+    const snap = state.meta.auto_snapshot ? "\n\nAuto-snapshot is on: the current state is frozen first if it hasn't been already." : "\n\nThis cannot be undone unless you have a snapshot.";
+    if (!confirm(`Delete ${paths.length} item${paths.length === 1 ? "" : "s"} from ${name}?\n\n${preview}${more}${warn}${snap}`)) return;
+    await run(`Deleted ${paths.length} item${paths.length === 1 ? "" : "s"}`, async () => {
+      const result = await api(`/sites/${slug}/files/delete`, { method: "POST", body: JSON.stringify({ paths }) });
+      const failed = (result.results || []).filter(r => !r.ok);
+      if (failed.length) throw new Error(`Deleted ${result.deleted}; failed: ${failed.map(f => `${f.path} (${f.error})`).join(", ")}`);
+      return result;
+    });
+  }
+
+  async function doMkdir() {
+    const dir = prompt("New folder path (e.g. images/icons):");
+    if (dir == null) return;
+    const target = dir.trim();
+    if (!target) return;
+    await run(`Created folder ${target}`, () =>
+      api(`/sites/${slug}/files/mkdir`, { method: "POST", body: JSON.stringify({ path: target }) }));
+  }
+
+  function bindShell() {
+    content.querySelector(".close-modal").addEventListener("click", () => modal.remove());
+    content.querySelector("#fm-search").addEventListener("input", (e) => { state.filter = e.target.value.trim(); renderRows(); });
     content.querySelectorAll("[data-sort]").forEach(th => {
       th.addEventListener("click", () => {
         const key = th.dataset.sort;
-        if (sortKey === key) sortAsc = !sortAsc;
-        else { sortKey = key; sortAsc = true; }
-        // Update sort indicators
-        content.querySelectorAll("[data-sort]").forEach(h => h.textContent = h.textContent.replace(/ [▲▼]$/, ""));
-        th.textContent += sortAsc ? " ▲" : " ▼";
-        renderFiles(content.querySelector("#file-search").value);
+        if (state.sortKey === key) state.sortAsc = !state.sortAsc;
+        else { state.sortKey = key; state.sortAsc = true; }
+        renderRows();
       });
     });
+    content.querySelector("#fm-select-all").addEventListener("change", (e) => {
+      const rows = visibleEntries();
+      rows.forEach(r => { if (e.target.checked) state.selected.add(r.path); else state.selected.delete(r.path); });
+      renderRows();
+    });
+    content.querySelector("#fm-upload").addEventListener("click", () => {
+      showUploadFile(slug, name, () => { state.dirty = true; reload().catch(err => notify(err.message, true)); });
+    });
+    content.querySelector("#fm-mkdir").addEventListener("click", doMkdir);
+    content.querySelector("#fm-rename").addEventListener("click", () => {
+      const [path] = [...state.selected];
+      if (path) doRename(path);
+    });
+    content.querySelector("#fm-copy").addEventListener("click", () => {
+      const [path] = [...state.selected];
+      if (path) doCopy(path);
+    });
+    content.querySelector("#fm-delete").addEventListener("click", () => doDelete([...state.selected]));
+  }
 
-    content.querySelector(".close-modal").addEventListener("click", () => modal.remove());
+  // Refresh whichever list opened us once the dialog closes after changes.
+  const observer = new MutationObserver(() => {
+    if (!document.body.contains(modal)) {
+      observer.disconnect();
+      if (state.dirty && typeof onChanged === "function") onChanged();
+    }
+  });
+  observer.observe(document.body, { childList: true });
+
+  try {
+    await reload();
   } catch (err) {
-    modal.querySelector(".modal-content").innerHTML = `
+    content.innerHTML = `
       <h2>${esc(name)} — Files</h2>
       <p style="color:var(--danger)">${esc(err.message)}</p>
       <div class="modal-actions"><button class="btn btn-ghost close-modal">Close</button></div>
     `;
-    modal.querySelector(".close-modal").addEventListener("click", () => modal.remove());
+    content.querySelector(".close-modal").addEventListener("click", () => modal.remove());
   }
 };
 

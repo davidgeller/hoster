@@ -1,4 +1,5 @@
 import db from "./db";
+import { normalizeCountryCodes } from "./countries";
 
 export interface RequestLog {
   site_slug: string | null;
@@ -140,7 +141,10 @@ export function getAllowedCountries(): string[] {
 }
 
 export function setAllowedCountries(countries: string[]): void {
-  const value = countries.map(c => c.trim().toUpperCase()).filter(Boolean).join(",");
+  // Reject anything that isn't a known ISO 3166-1 alpha-2 code (or one of the
+  // Cloudflare specials) — a typo here would otherwise silently lock every
+  // visitor out because unknown codes never match.
+  const value = normalizeCountryCodes(countries).join(",");
   db.run(
     "INSERT INTO config (key, value) VALUES ('allowed_countries', ?) ON CONFLICT(key) DO UPDATE SET value = ?",
     value, value

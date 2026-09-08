@@ -9,17 +9,31 @@ const MAX_TOTP_ATTEMPTS = 5;
 const LOCKOUT_MINUTES = 15;
 const TOTP_ISSUER = "Hoster";
 const RECOVERY_CODE_COUNT = 8;
+const MIN_PASSWORD_LENGTH = 8;
+const ARGON2_OPTS = { algorithm: "argon2id" as const, memoryCost: 65536, timeCost: 3 };
 
 function sha256(input: string): string {
   return createHash("sha256").update(input).digest("hex");
 }
 
-// --- Site-scoped admin users ---
+// --- Accounts ---
 //
-// A platform super-admin (the original password, optional TOTP) authenticates
-// with a blank username. Site-scoped users have a username + password and are
-// granted access to a subset of sites via admin_user_sites. They see the full
-// admin UI for their sites only — never the platform Settings screen.
+// Every principal that can sign in to the admin panel is a row in admin_users.
+// There are two kinds, distinguished by `is_admin`:
+//
+//   * Administrators (is_admin = 1) see and control the whole platform: every
+//     site, Settings, users, MCP/OAuth, backups. A deployment may have any
+//     number of them; the last one can never be demoted or deleted.
+//   * Site users (is_admin = 0) are granted specific sites via
+//     admin_user_sites and see the full admin UI for those sites only.
+//
+// Every account — admin or not — owns its own password, optional TOTP, and
+// optional passkeys. Before v1.5 the platform had a single anonymous
+// "super-admin" whose password/TOTP lived in the config table and who signed
+// in with a blank username. migrateLegacyAdmin() below converts that identity
+// into an ordinary administrator row (username "admin") the first time the
+// new binary starts, carrying sessions and passkeys across so nobody is
+// logged out or locked out by the upgrade.
 db.exec(`
   CREATE TABLE IF NOT EXISTS admin_users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,6 +52,18 @@ db.exec(`
   );
 `);
 
+// Columns added in v1.5 (multi-admin). Idempotent for existing databases.
+try { db.exec("ALTER TABLE admin_users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"); } catch (_) {}
+try { db.exec("ALTER TABLE admin_users ADD COLUMN totp_secret TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE admin_users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0"); } catch (_) {}
+try { db.exec("ALTER TABLE admin_users ADD COLUMN totp_recovery_codes TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE admin_users ADD COLUMN totp_pending_secret TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE admin_users ADD COLUMN webauthn_user_handle TEXT"); } catch (_) {}
+// Who performed an audited action. NULL for pre-v1.5 rows and system events.
+try { db.exec("ALTER TABLE audit_log ADD COLUMN actor TEXT"); } catch (_) {}
+// Which account a pending 2FA token belongs to.
+try { db.exec("ALTER TABLE pending_2fa ADD COLUMN user_id INTEGER"); } catch (_) {}
+
 const USERNAME_PATTERN = /^[a-z0-9._-]{1,40}$/;
 
 export function normalizeUsername(username: string): string {
@@ -53,22 +79,142 @@ export function validateUsername(username: string): string {
   return normalized;
 }
 
-export function getAdminPasswordHash(): string | null {
-  const row = db.query("SELECT value FROM config WHERE key = 'admin_password_hash'").get() as { value: string } | null;
+function validatePassword(password: string): void {
+  if (!password || password.length < MIN_PASSWORD_LENGTH) {
+    throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+  }
+}
+
+async function hashPassword(password: string): Promise<string> {
+  return Bun.password.hash(password, ARGON2_OPTS);
+}
+
+// A real Argon2id hash of a random secret, verified against when a login names
+// a username that doesn't exist. Keeps the "no such user" path as slow as the
+// "wrong password" path so response timing doesn't enumerate usernames.
+let dummyHashPromise: Promise<string> | null = null;
+function dummyHash(): Promise<string> {
+  if (!dummyHashPromise) dummyHashPromise = hashPassword(randomBytes(32).toString("hex"));
+  return dummyHashPromise;
+}
+
+export interface Principal {
+  userId: number;
+  username: string;
+  isAdmin: boolean;
+}
+
+interface UserRow {
+  id: number;
+  username: string;
+  password_hash: string;
+  is_admin: number;
+  totp_secret: string | null;
+  totp_enabled: number;
+  totp_recovery_codes: string | null;
+  totp_pending_secret: string | null;
+  webauthn_user_handle: string | null;
+  created_at: string;
+  last_login: string | null;
+}
+
+function getUserRow(id: number): UserRow | null {
+  return db.query("SELECT * FROM admin_users WHERE id = ?").get(id) as UserRow | null;
+}
+
+function getUserRowByUsername(username: string): UserRow | null {
+  const normalized = normalizeUsername(username);
+  if (!normalized) return null;
+  return db.query("SELECT * FROM admin_users WHERE username = ?").get(normalized) as UserRow | null;
+}
+
+function toPrincipal(row: UserRow): Principal {
+  return { userId: row.id, username: row.username, isAdmin: row.is_admin === 1 };
+}
+
+export function getUser(id: number): Principal | null {
+  const row = getUserRow(id);
+  return row ? toPrincipal(row) : null;
+}
+
+export function getUserByUsername(username: string): Principal | null {
+  const row = getUserRowByUsername(username);
+  return row ? toPrincipal(row) : null;
+}
+
+export function countAdmins(): number {
+  const row = db.query("SELECT COUNT(*) as cnt FROM admin_users WHERE is_admin = 1").get() as { cnt: number };
+  return row.cnt;
+}
+
+// The platform is "set up" once at least one administrator exists.
+export function isSetup(): boolean {
+  return countAdmins() > 0;
+}
+
+// --- Legacy super-admin migration (pre-v1.5 databases) ---
+
+function getConfigValue(key: string): string | null {
+  const row = db.query("SELECT value FROM config WHERE key = ?").get(key) as { value: string } | null;
   return row?.value ?? null;
 }
 
-export async function setAdminPassword(password: string): Promise<void> {
-  const hash = await Bun.password.hash(password, { algorithm: "argon2id", memoryCost: 65536, timeCost: 3 });
-  db.run(
-    "INSERT INTO config (key, value) VALUES ('admin_password_hash', ?) ON CONFLICT(key) DO UPDATE SET value = ?",
-    hash, hash
-  );
+function deleteConfigValue(key: string): void {
+  db.run("DELETE FROM config WHERE key = ?", key);
 }
 
-export function isSetup(): boolean {
-  return getAdminPasswordHash() !== null;
+// Convert the anonymous config-table admin into an admin_users row. Runs at
+// startup and after a backup restore (older backups still carry the config
+// keys). No-op when there's nothing to migrate.
+export function migrateLegacyAdmin(): { migrated: boolean; username?: string } {
+  const legacyHash = getConfigValue("admin_password_hash");
+  if (!legacyHash) return { migrated: false };
+
+  const tx = db.transaction(() => {
+    // Prefer "admin"; only fall back if a site user already took that name.
+    let username = "admin";
+    if (getUserRowByUsername(username)) username = "platform-admin";
+    let suffix = 2;
+    while (getUserRowByUsername(username)) username = `platform-admin${suffix++}`;
+
+    const result = db.run(
+      `INSERT INTO admin_users
+         (username, password_hash, is_admin, totp_secret, totp_enabled, totp_recovery_codes, webauthn_user_handle)
+       VALUES (?, ?, 1, ?, ?, ?, ?)`,
+      username,
+      legacyHash,
+      getConfigValue("totp_secret"),
+      getConfigValue("totp_enabled") === "1" ? 1 : 0,
+      getConfigValue("totp_recovery_codes"),
+      getConfigValue("webauthn_user_handle")
+    );
+    const userId = Number(result.lastInsertRowid);
+
+    // Passkeys, live sessions, and in-flight challenges that belonged to the
+    // anonymous admin now belong to this account.
+    db.run("UPDATE webauthn_credentials SET user_id = ? WHERE user_id IS NULL", userId);
+    db.run("UPDATE sessions SET user_id = ? WHERE user_id IS NULL", userId);
+    db.run("UPDATE webauthn_challenges SET user_id = ? WHERE user_id IS NULL", userId);
+    db.run("UPDATE pending_2fa SET user_id = ? WHERE user_id IS NULL", userId);
+
+    for (const key of ["admin_password_hash", "totp_secret", "totp_enabled", "totp_recovery_codes", "totp_pending_secret", "webauthn_user_handle"]) {
+      deleteConfigValue(key);
+    }
+    db.run(
+      "INSERT INTO audit_log (action, detail, ip, actor) VALUES (?, ?, ?, ?)",
+      "legacy_admin_migrated", `Platform admin is now user '${username}'`, "system", null
+    );
+    return username;
+  });
+  const username = tx();
+  return { migrated: true, username };
 }
+
+// The webauthn table may not exist yet when this module loads (webauthn.ts
+// creates it), so the migration is invoked from index.ts after every module
+// has registered its schema — and again after a restore.
+
+// --- Login rate limiting (per IP) ---
 
 export function isRateLimited(ip: string): boolean {
   // Use SQL-side datetime arithmetic so the comparison stays in SQLite's native
@@ -89,16 +235,47 @@ export function recordLoginAttempt(ip: string, success: boolean): void {
   db.run("DELETE FROM login_attempts WHERE created_at < datetime('now', '-24 hours')");
 }
 
-export async function verifyPassword(password: string, ip: string): Promise<boolean> {
-  const hash = getAdminPasswordHash();
-  if (!hash) return false;
+// --- Password verification ---
 
-  const valid = await Bun.password.verify(password, hash);
+// Sign-in: username + password. Records the attempt against the per-IP
+// lockout. Returns the principal on success, null otherwise. Unknown usernames
+// still pay for an Argon2 verification so timing doesn't reveal which names
+// exist.
+export async function verifyUserPassword(username: string, password: string, ip: string): Promise<Principal | null> {
+  const user = getUserRowByUsername(username);
+  if (!user) {
+    await Bun.password.verify(password || "", await dummyHash());
+    recordLoginAttempt(ip, false);
+    return null;
+  }
+  const valid = await Bun.password.verify(password, user.password_hash);
+  recordLoginAttempt(ip, valid);
+  if (!valid) return null;
+  db.run("UPDATE admin_users SET last_login = datetime('now') WHERE id = ?", user.id);
+  return toPrincipal(user);
+}
+
+// Step-up: re-check the password of an already-authenticated account before a
+// sensitive change (disable 2FA, add/remove passkey, restore a backup). Failed
+// attempts count toward the same per-IP lockout as logins so a hijacked
+// session can't brute-force its way through.
+export async function verifyPasswordForUser(userId: number, password: string, ip: string): Promise<boolean> {
+  const user = getUserRow(userId);
+  if (!user) return false;
+  const valid = await Bun.password.verify(password || "", user.password_hash);
   recordLoginAttempt(ip, valid);
   return valid;
 }
 
-export function createSession(ip: string, userId: number | null = null): { sessionToken: string; csrfToken: string } {
+export async function setUserPassword(userId: number, password: string): Promise<void> {
+  validatePassword(password);
+  const hash = await hashPassword(password);
+  db.run("UPDATE admin_users SET password_hash = ? WHERE id = ?", hash, userId);
+}
+
+// --- Sessions ---
+
+export function createSession(ip: string, userId: number): { sessionToken: string; csrfToken: string } {
   const sessionToken = randomBytes(32).toString("hex");
   const csrfToken = randomBytes(32).toString("hex");
   // SQL-side datetime so expires_at is stored in the same format that
@@ -112,34 +289,31 @@ export function createSession(ip: string, userId: number | null = null): { sessi
   return { sessionToken, csrfToken };
 }
 
-// Resolve the principal behind a session. Returns null for an invalid/expired
-// token. userId === null means the platform super-admin; otherwise it's the
-// admin_users.id of a site-scoped user.
-export function getSessionUser(token: string | undefined): { userId: number | null; isSuperAdmin: boolean } | null {
+// Resolve the account behind a session. Returns null for an invalid or expired
+// token, or one whose account has since been deleted (the JOIN drops it).
+export function getSessionUser(token: string | undefined): Principal | null {
   if (!token) return null;
   const row = db.query(
-    "SELECT user_id FROM sessions WHERE token = ? AND expires_at > datetime('now')"
-  ).get(token) as { user_id: number | null } | null;
+    `SELECT u.id, u.username, u.is_admin
+     FROM sessions s JOIN admin_users u ON u.id = s.user_id
+     WHERE s.token = ? AND s.expires_at > datetime('now')`
+  ).get(token) as { id: number; username: string; is_admin: number } | null;
   if (!row) return null;
-  return { userId: row.user_id ?? null, isSuperAdmin: row.user_id == null };
+  return { userId: row.id, username: row.username, isAdmin: row.is_admin === 1 };
 }
 
-// Delete sessions belonging to one principal (super-admin when userId is null).
-// Used to rotate a single principal's session on login without evicting other
-// logged-in users (unlike destroyAllSessions).
-export function destroySessionsForUser(userId: number | null): void {
-  if (userId == null) {
-    db.run("DELETE FROM sessions WHERE user_id IS NULL");
-  } else {
-    db.run("DELETE FROM sessions WHERE user_id = ?", userId);
-  }
+// Delete sessions belonging to one account. Used to rotate a principal's
+// session on login without evicting other logged-in users.
+export function destroySessionsForUser(userId: number): void {
+  db.run("DELETE FROM sessions WHERE user_id = ?", userId);
 }
 
 export function validateSession(token: string | undefined, ip?: string): boolean {
   if (!token) return false;
   const row = db.query(
-    "SELECT token, ip FROM sessions WHERE token = ? AND expires_at > datetime('now')"
-  ).get(token) as { token: string; ip: string | null } | null;
+    `SELECT s.ip FROM sessions s JOIN admin_users u ON u.id = s.user_id
+     WHERE s.token = ? AND s.expires_at > datetime('now')`
+  ).get(token) as { ip: string | null } | null;
   if (!row) return false;
   // If IP is provided and session has a recorded IP, verify they match
   if (ip && row.ip && row.ip !== "unknown" && ip !== "unknown" && row.ip !== ip) {
@@ -171,9 +345,8 @@ export function destroySession(token: string): void {
   db.run("DELETE FROM sessions WHERE token = ?", token);
 }
 
-// Destroy every session — used on successful login and password change so a
-// previously-stolen-but-quietly-held cookie is invalidated. Hoster is single-
-// admin, so there's no other principal whose sessions we'd preserve.
+// Destroy every session — used after a backup restore, which replaces every
+// account's credentials.
 export function destroyAllSessions(): void {
   db.run("DELETE FROM sessions");
 }
@@ -210,8 +383,11 @@ export function sessionCookie(token: string, maxAge: number = SESSION_DURATION_H
 
 // --- Audit Logging ---
 
-export function auditLog(action: string, detail: string | null, ip: string): void {
-  db.run("INSERT INTO audit_log (action, detail, ip) VALUES (?, ?, ?)", action, detail, ip);
+const MAX_AUDIT_DETAIL = 500;
+
+export function auditLog(action: string, detail: string | null, ip: string, actor: string | null = null): void {
+  const trimmed = detail && detail.length > MAX_AUDIT_DETAIL ? detail.slice(0, MAX_AUDIT_DETAIL) + "…" : detail;
+  db.run("INSERT INTO audit_log (action, detail, ip, actor) VALUES (?, ?, ?, ?)", action, trimmed, ip, actor);
   // Prune entries older than 90 days. SQL-side datetime keeps formats aligned.
   db.run("DELETE FROM audit_log WHERE created_at < datetime('now', '-90 days')");
 }
@@ -220,29 +396,28 @@ export function getAuditLog(limit: number = 50): any[] {
   return db.query("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?").all(limit) as any[];
 }
 
-// --- TOTP 2FA ---
+// --- TOTP 2FA (per account) ---
 
-function getConfigValue(key: string): string | null {
-  const row = db.query("SELECT value FROM config WHERE key = ?").get(key) as { value: string } | null;
-  return row?.value ?? null;
+export function isTotpEnabled(userId: number): boolean {
+  const row = db.query("SELECT totp_enabled FROM admin_users WHERE id = ?").get(userId) as { totp_enabled: number } | null;
+  return row?.totp_enabled === 1;
 }
 
-function setConfigValue(key: string, value: string | null): void {
-  if (value === null) {
-    db.run("DELETE FROM config WHERE key = ?", key);
-  } else {
-    db.run("INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?", key, value, value);
-  }
+function totpFor(secret: string, label: string): OTPAuth.TOTP {
+  return new OTPAuth.TOTP({
+    issuer: TOTP_ISSUER,
+    label,
+    algorithm: "SHA1",
+    digits: 6,
+    period: 30,
+    secret: OTPAuth.Secret.fromBase32(secret),
+  });
 }
 
-export function isTotpEnabled(): boolean {
-  return getConfigValue("totp_enabled") === "1";
-}
-
-export function generateTotpSecret(): { secret: string; uri: string } {
+export function generateTotpSecret(label: string = "Admin"): { secret: string; uri: string } {
   const totp = new OTPAuth.TOTP({
     issuer: TOTP_ISSUER,
-    label: "Admin",
+    label,
     algorithm: "SHA1",
     digits: 6,
     period: 30,
@@ -256,36 +431,31 @@ export async function getTotpQrDataUrl(uri: string): Promise<string> {
 }
 
 export function verifyTotpCode(secret: string, code: string): boolean {
-  const totp = new OTPAuth.TOTP({
-    issuer: TOTP_ISSUER,
-    label: "Admin",
-    algorithm: "SHA1",
-    digits: 6,
-    period: 30,
-    secret: OTPAuth.Secret.fromBase32(secret),
-  });
   // Allow 1 window of drift (±30 seconds)
-  const delta = totp.validate({ token: code, window: 1 });
+  const delta = totpFor(secret, "Admin").validate({ token: code, window: 1 });
   return delta !== null;
 }
 
-export function getTotpSecret(): string | null {
-  return getConfigValue("totp_secret");
+export function getTotpSecret(userId: number): string | null {
+  const row = db.query("SELECT totp_secret FROM admin_users WHERE id = ?").get(userId) as { totp_secret: string | null } | null;
+  return row?.totp_secret ?? null;
 }
 
-export function enableTotp(secret: string, recoveryCodes: string[]): void {
-  setConfigValue("totp_secret", secret);
-  setConfigValue("totp_enabled", "1");
+export function enableTotp(userId: number, secret: string, recoveryCodes: string[]): void {
   // Store hashed recovery codes — originals are shown to user once, never stored
   const hashed = recoveryCodes.map(c => sha256(c.toLowerCase().replace(/[\s-]/g, "")));
-  setConfigValue("totp_recovery_codes", JSON.stringify(hashed));
+  db.run(
+    "UPDATE admin_users SET totp_secret = ?, totp_enabled = 1, totp_recovery_codes = ? WHERE id = ?",
+    secret, JSON.stringify(hashed), userId
+  );
 }
 
-export function disableTotp(): void {
-  setConfigValue("totp_secret", null);
-  setConfigValue("totp_enabled", null);
-  setConfigValue("totp_recovery_codes", null);
-  setConfigValue("totp_pending_secret", null);
+export function disableTotp(userId: number): void {
+  db.run(
+    `UPDATE admin_users SET totp_secret = NULL, totp_enabled = 0,
+       totp_recovery_codes = NULL, totp_pending_secret = NULL WHERE id = ?`,
+    userId
+  );
 }
 
 export function generateRecoveryCodes(): string[] {
@@ -298,10 +468,10 @@ export function generateRecoveryCodes(): string[] {
   return codes;
 }
 
-export function useRecoveryCode(code: string): boolean {
-  const raw = getConfigValue("totp_recovery_codes");
-  if (!raw) return false;
-  const hashes: string[] = JSON.parse(raw);
+export function useRecoveryCode(userId: number, code: string): boolean {
+  const row = db.query("SELECT totp_recovery_codes FROM admin_users WHERE id = ?").get(userId) as { totp_recovery_codes: string | null } | null;
+  if (!row?.totp_recovery_codes) return false;
+  const hashes: string[] = JSON.parse(row.totp_recovery_codes);
   const incoming = sha256(code.toLowerCase().replace(/[\s-]/g, ""));
   const incomingBuf = Buffer.from(incoming, "hex");
   // Constant-time comparison against all stored hashes
@@ -315,69 +485,82 @@ export function useRecoveryCode(code: string): boolean {
   if (foundIndex === -1) return false;
   // Remove used code
   hashes.splice(foundIndex, 1);
-  setConfigValue("totp_recovery_codes", JSON.stringify(hashes));
+  db.run("UPDATE admin_users SET totp_recovery_codes = ? WHERE id = ?", JSON.stringify(hashes), userId);
   return true;
 }
 
-export function getRemainingRecoveryCodes(): number {
-  const raw = getConfigValue("totp_recovery_codes");
-  if (!raw) return 0;
-  return JSON.parse(raw).length;
+export function getRemainingRecoveryCodes(userId: number): number {
+  const row = db.query("SELECT totp_recovery_codes FROM admin_users WHERE id = ?").get(userId) as { totp_recovery_codes: string | null } | null;
+  if (!row?.totp_recovery_codes) return 0;
+  return JSON.parse(row.totp_recovery_codes).length;
 }
 
 // Pending secret during setup (not yet confirmed)
-export function setPendingTotpSecret(secret: string): void {
-  setConfigValue("totp_pending_secret", secret);
+export function setPendingTotpSecret(userId: number, secret: string): void {
+  db.run("UPDATE admin_users SET totp_pending_secret = ? WHERE id = ?", secret, userId);
 }
 
-export function getPendingTotpSecret(): string | null {
-  return getConfigValue("totp_pending_secret");
+export function getPendingTotpSecret(userId: number): string | null {
+  const row = db.query("SELECT totp_pending_secret FROM admin_users WHERE id = ?").get(userId) as { totp_pending_secret: string | null } | null;
+  return row?.totp_pending_secret ?? null;
 }
 
-export function clearPendingTotpSecret(): void {
-  setConfigValue("totp_pending_secret", null);
+export function clearPendingTotpSecret(userId: number): void {
+  db.run("UPDATE admin_users SET totp_pending_secret = NULL WHERE id = ?", userId);
+}
+
+// Verify a TOTP or recovery code for one account. Used by the login 2FA step
+// and the OAuth consent screen.
+export function verifyTotpOrRecovery(userId: number, code: string): boolean {
+  const secret = getTotpSecret(userId);
+  if (!secret) return false;
+  const cleaned = (code || "").trim().replace(/\s/g, "");
+  if (!cleaned) return false;
+  return verifyTotpCode(secret, cleaned) || useRecoveryCode(userId, cleaned);
 }
 
 // Pending 2FA sessions — password verified but awaiting TOTP code.
 // SQL-side datetime keeps expires_at in the same format that the validate/consume
 // queries (datetime('now')) produce, so expiry comparisons actually work.
-export function createPending2faToken(ip: string): string {
+export function createPending2faToken(ip: string, userId: number): string {
   const token = randomBytes(32).toString("hex");
   const hash = sha256(token);
   db.run(
-    "INSERT INTO pending_2fa (token_hash, expires_at, ip) VALUES (?, datetime('now', '+5 minutes'), ?)",
-    hash, ip
+    "INSERT INTO pending_2fa (token_hash, expires_at, ip, user_id) VALUES (?, datetime('now', '+5 minutes'), ?, ?)",
+    hash, ip, userId
   );
   return token;
 }
 
-export function validatePending2faToken(token: string | undefined): boolean {
-  if (!token) return false;
-  const hash = sha256(token);
+// Look up (without consuming) the account a pending token belongs to, so the
+// 2FA step can check the code against the right secret.
+export function peekPending2faUser(token: string | undefined): number | null {
+  if (!token) return null;
   const row = db.query(
-    "SELECT token_hash FROM pending_2fa WHERE token_hash = ? AND expires_at > datetime('now')"
-  ).get(hash) as { token_hash: string } | null;
-  return row !== null;
+    "SELECT user_id FROM pending_2fa WHERE token_hash = ? AND expires_at > datetime('now')"
+  ).get(sha256(token)) as { user_id: number | null } | null;
+  return row?.user_id ?? null;
 }
 
-// Atomically validate and consume — prevents race conditions.
+// Atomically validate and consume — prevents race conditions. Returns the
+// account id the token was issued for, or null.
 // IP must match the IP that began the login (the password step). Otherwise a
 // stolen pending_token could complete 2FA from a different machine.
-export function consumePending2faToken(token: string, ip: string): boolean {
+export function consumePending2faToken(token: string, ip: string): number | null {
   const hash = sha256(token);
   // Select-then-delete in a transaction for atomicity
   const consume = db.transaction(() => {
     const row = db.query(
-      "SELECT token_hash, ip FROM pending_2fa WHERE token_hash = ? AND expires_at > datetime('now')"
-    ).get(hash) as { token_hash: string; ip: string | null } | null;
-    if (!row) return false;
+      "SELECT token_hash, ip, user_id FROM pending_2fa WHERE token_hash = ? AND expires_at > datetime('now')"
+    ).get(hash) as { token_hash: string; ip: string | null; user_id: number | null } | null;
+    if (!row || row.user_id == null) return null;
     // IP-binding: reject if the consume attempt comes from a different address.
     // 'unknown' on either side is treated as a mismatch (don't authorize without
     // a verifiable IP). This is conservative — legitimate IP changes mid-flow
     // (mobile/Wi-Fi handoff in 5 minutes) require restarting the login.
-    if (!row.ip || row.ip === "unknown" || ip === "unknown" || row.ip !== ip) return false;
+    if (!row.ip || row.ip === "unknown" || ip === "unknown" || row.ip !== ip) return null;
     db.run("DELETE FROM pending_2fa WHERE token_hash = ?", hash);
-    return true;
+    return row.user_id;
   });
   return consume();
 }
@@ -401,11 +584,14 @@ export function recordTotpAttempt(ip: string, success: boolean): void {
   db.run("DELETE FROM totp_attempts WHERE created_at < datetime('now', '-24 hours')");
 }
 
-// --- Admin user management (site-scoped accounts) ---
+// --- Account management ---
 
 export interface AdminUser {
   id: number;
   username: string;
+  is_admin: boolean;
+  totp_enabled: boolean;
+  passkey_count: number;
   created_at: string;
   last_login: string | null;
   sites: string[];
@@ -433,63 +619,84 @@ export function setUserSites(userId: number, slugs: string[]): void {
 
 export function listAdminUsers(): AdminUser[] {
   const rows = db.query(
-    "SELECT id, username, created_at, last_login FROM admin_users ORDER BY username"
-  ).all() as Omit<AdminUser, "sites">[];
-  return rows.map(r => ({ ...r, sites: getUserSiteSlugs(r.id) }));
+    `SELECT u.id, u.username, u.is_admin, u.totp_enabled, u.created_at, u.last_login,
+            (SELECT COUNT(*) FROM webauthn_credentials c WHERE c.user_id = u.id) AS passkey_count
+     FROM admin_users u ORDER BY u.is_admin DESC, u.username`
+  ).all() as Array<{ id: number; username: string; is_admin: number; totp_enabled: number; created_at: string; last_login: string | null; passkey_count: number }>;
+  return rows.map(r => ({
+    id: r.id,
+    username: r.username,
+    is_admin: r.is_admin === 1,
+    totp_enabled: r.totp_enabled === 1,
+    passkey_count: r.passkey_count,
+    created_at: r.created_at,
+    last_login: r.last_login,
+    sites: r.is_admin === 1 ? [] : getUserSiteSlugs(r.id),
+  }));
 }
 
-export function getAdminUserByUsername(username: string): { id: number; username: string; password_hash: string } | null {
-  const normalized = normalizeUsername(username);
-  if (!normalized) return null;
-  return db.query(
-    "SELECT id, username, password_hash FROM admin_users WHERE username = ?"
-  ).get(normalized) as { id: number; username: string; password_hash: string } | null;
-}
-
-export async function createAdminUser(username: string, password: string, slugs: string[]): Promise<number> {
+// Create an account. The very first administrator is created through the
+// unauthenticated setup endpoint; everything after that goes through an admin.
+export async function createAdminUser(
+  username: string, password: string, opts: { isAdmin?: boolean; sites?: string[] } = {}
+): Promise<number> {
   const normalized = validateUsername(username);
-  if (!password || password.length < 8) throw new Error("Password must be at least 8 characters");
-  if (getAdminUserByUsername(normalized)) throw new Error(`User '${normalized}' already exists`);
-  const hash = await Bun.password.hash(password, { algorithm: "argon2id", memoryCost: 65536, timeCost: 3 });
-  const result = db.run("INSERT INTO admin_users (username, password_hash) VALUES (?, ?)", normalized, hash);
+  validatePassword(password);
+  if (getUserRowByUsername(normalized)) throw new Error(`User '${normalized}' already exists`);
+  const hash = await hashPassword(password);
+  const result = db.run(
+    "INSERT INTO admin_users (username, password_hash, is_admin) VALUES (?, ?, ?)",
+    normalized, hash, opts.isAdmin ? 1 : 0
+  );
   const userId = Number(result.lastInsertRowid);
-  setUserSites(userId, slugs || []);
+  if (!opts.isAdmin) setUserSites(userId, opts.sites || []);
   return userId;
 }
 
-export async function updateAdminUser(id: number, opts: { password?: string; sites?: string[] }): Promise<boolean> {
-  const existing = db.query("SELECT id FROM admin_users WHERE id = ?").get(id) as { id: number } | null;
+export async function updateAdminUser(
+  id: number, opts: { password?: string; sites?: string[]; isAdmin?: boolean }
+): Promise<boolean> {
+  const existing = getUserRow(id);
   if (!existing) return false;
   if (opts.password !== undefined) {
-    if (opts.password.length < 8) throw new Error("Password must be at least 8 characters");
-    const hash = await Bun.password.hash(opts.password, { algorithm: "argon2id", memoryCost: 65536, timeCost: 3 });
-    db.run("UPDATE admin_users SET password_hash = ? WHERE id = ?", hash, id);
+    await setUserPassword(id, opts.password);
   }
-  if (opts.sites !== undefined) {
+  if (opts.isAdmin !== undefined) {
+    const wantAdmin = opts.isAdmin ? 1 : 0;
+    if (existing.is_admin === 1 && wantAdmin === 0 && countAdmins() <= 1) {
+      throw new Error("Cannot remove administrator rights from the last administrator");
+    }
+    db.run("UPDATE admin_users SET is_admin = ? WHERE id = ?", wantAdmin, id);
+    // Administrators see every site; a per-site grant list is meaningless for
+    // them and would be stale if they're later demoted.
+    if (wantAdmin === 1) db.run("DELETE FROM admin_user_sites WHERE user_id = ?", id);
+  }
+  const nowAdmin = opts.isAdmin !== undefined ? opts.isAdmin : existing.is_admin === 1;
+  if (opts.sites !== undefined && !nowAdmin) {
     setUserSites(id, opts.sites);
   }
   return true;
 }
 
 export function deleteAdminUser(id: number): boolean {
-  // admin_user_sites rows cascade via FK. Also drop the user's active sessions.
+  const existing = getUserRow(id);
+  if (!existing) return false;
+  if (existing.is_admin === 1 && countAdmins() <= 1) {
+    throw new Error("Cannot delete the last administrator");
+  }
+  // admin_user_sites rows cascade via FK. Also drop the user's active sessions,
+  // passkeys, and any pending login state.
   destroySessionsForUser(id);
+  db.run("DELETE FROM webauthn_credentials WHERE user_id = ?", id);
+  db.run("DELETE FROM webauthn_challenges WHERE user_id = ?", id);
+  db.run("DELETE FROM pending_2fa WHERE user_id = ?", id);
   const result = db.run("DELETE FROM admin_users WHERE id = ?", id);
   return result.changes > 0;
 }
 
-// Verify a site-user's credentials. Records the attempt against the shared
-// per-IP login rate limiter (same as the super-admin path). Returns the user
-// id on success, or null on failure.
-export async function verifyUserPassword(username: string, password: string, ip: string): Promise<number | null> {
-  const user = getAdminUserByUsername(username);
-  if (!user) {
-    recordLoginAttempt(ip, false);
-    return null;
-  }
-  const valid = await Bun.password.verify(password, user.password_hash);
-  recordLoginAttempt(ip, valid);
-  if (!valid) return null;
-  db.run("UPDATE admin_users SET last_login = datetime('now') WHERE id = ?", user.id);
-  return user.id;
+// Can this account act on this site? Admins: always. Site users: only if granted.
+export function userCanAccessSite(principal: Principal, slug: string): boolean {
+  if (principal.isAdmin) return true;
+  const row = db.query("SELECT 1 FROM admin_user_sites WHERE user_id = ? AND site_slug = ?").get(principal.userId, slug);
+  return !!row;
 }

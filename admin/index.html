@@ -13,8 +13,9 @@
     <div id="setup-screen" class="screen" hidden>
       <div class="auth-card">
         <div class="logo">HOSTER</div>
-        <p class="subtitle">Set your admin password to get started.</p>
+        <p class="subtitle">Create the first administrator account to get started.</p>
         <form id="setup-form">
+          <input type="text" id="setup-username" placeholder="Username" value="admin" pattern="[a-z0-9._\-]{1,40}" autocomplete="username" required>
           <input type="password" id="setup-password" placeholder="Choose a password (8+ chars)" autocomplete="new-password" required minlength="8">
           <input type="password" id="setup-confirm" placeholder="Confirm password" autocomplete="new-password" required>
           <button type="submit" class="btn btn-primary btn-block">Create Account</button>
@@ -44,7 +45,7 @@
           </div>
         </div>
         <form id="login-form">
-          <input type="text" id="login-username" placeholder="Username (leave blank for admin)" autocomplete="username">
+          <input type="text" id="login-username" placeholder="Username" autocomplete="username" required>
           <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" required>
           <button type="submit" class="btn btn-primary btn-block">Sign In</button>
           <div class="form-error" id="login-error"></div>
@@ -224,7 +225,7 @@
             <form id="blank-site-form">
               <label>
                 Slug (URL path)
-                <input type="text" id="blank-slug" placeholder="my-site" pattern="[a-z0-9][a-z0-9-]*[a-z0-9]?" required>
+                <input type="text" id="blank-slug" placeholder="my-site" pattern="[a-z0-9][a-z0-9\-]*[a-z0-9]?" required>
                 <small>Lowercase letters, numbers, hyphens. Becomes <code>sprylylabs.net/<strong>slug</strong></code></small>
               </label>
               <label>
@@ -248,7 +249,7 @@
             <form id="upload-form">
               <label>
                 Slug (URL path)
-                <input type="text" id="upload-slug" placeholder="my-site" pattern="[a-z0-9][a-z0-9-]*[a-z0-9]" required>
+                <input type="text" id="upload-slug" placeholder="my-site" pattern="[a-z0-9][a-z0-9\-]*[a-z0-9]" required>
                 <small>Lowercase letters, numbers, hyphens. Becomes <code>sprylylabs.net/<strong>slug</strong></code></small>
               </label>
               <label>
@@ -261,6 +262,14 @@
                   <input type="file" id="upload-file" accept=".zip" required>
                   <p>Drop a .zip file here or <strong>click to browse</strong></p>
                 </div>
+              </label>
+              <label>
+                Version label <small>(optional, e.g. "v2.1 — spring redesign")</small>
+                <input type="text" id="upload-label" maxlength="120" autocomplete="off">
+              </label>
+              <label>
+                Release notes <small>(optional — shown to admins in the Versions dialog)</small>
+                <textarea id="upload-notes" rows="3" maxlength="2000" placeholder="What changed in this deploy?"></textarea>
               </label>
               <div class="modal-actions">
                 <button type="button" class="btn btn-ghost" id="upload-cancel">Cancel</button>
@@ -351,16 +360,18 @@
           </div>
 
           <div class="settings-tabs settings-tabs-page" role="tablist">
-            <button type="button" class="settings-tab active" role="tab" data-settings-tab="access">Access</button>
-            <button type="button" class="settings-tab" role="tab" data-settings-tab="mcp">MCP</button>
-            <button type="button" class="settings-tab" role="tab" data-settings-tab="oauth">OAuth</button>
-            <button type="button" class="settings-tab" role="tab" data-settings-tab="security">Security</button>
-            <button type="button" class="settings-tab" role="tab" data-settings-tab="backup">Backup &amp; Restore</button>
-            <button type="button" class="settings-tab" role="tab" data-settings-tab="cms">CMS Library</button>
+            <button type="button" class="settings-tab active" role="tab" data-settings-tab="account">Account</button>
+            <button type="button" class="settings-tab" role="tab" data-settings-tab="users" data-admin-only>Users</button>
+            <button type="button" class="settings-tab" role="tab" data-settings-tab="mcp" data-admin-only>MCP</button>
+            <button type="button" class="settings-tab" role="tab" data-settings-tab="oauth" data-admin-only>OAuth</button>
+            <button type="button" class="settings-tab" role="tab" data-settings-tab="security" data-admin-only>Security</button>
+            <button type="button" class="settings-tab" role="tab" data-settings-tab="backup" data-admin-only>Backup &amp; Restore</button>
+            <button type="button" class="settings-tab" role="tab" data-settings-tab="cms" data-admin-only>CMS Library</button>
           </div>
 
-          <!-- Access tab: password + 2FA -->
-          <div class="settings-page-panel active" data-settings-panel="access">
+          <!-- Account tab: your own password, 2FA, passkeys (every account) -->
+          <div class="settings-page-panel active" data-settings-panel="account">
+            <p class="text-sm text-muted mb-2" id="account-intro"></p>
             <div class="card" style="max-width:480px">
               <h3>Change Password</h3>
               <form id="password-form">
@@ -392,17 +403,31 @@
               <div id="passkey-settings"></div>
             </div>
 
-            <div class="card mt-4" style="max-width:720px" id="users-card">
-              <h3>Site Admin Users</h3>
-              <p class="text-sm text-muted mb-2">Accounts scoped to specific sites. They sign in with their username and password and see the full admin panel for their assigned sites only — never this Settings screen, and they cannot create or delete sites.</p>
+          </div>
+
+          <!-- Users tab: every account on this Hoster (administrators only) -->
+          <div class="settings-page-panel" data-settings-panel="users" hidden data-admin-only>
+            <div class="card" style="max-width:860px" id="users-card">
+              <h3>Users</h3>
+              <p class="text-sm text-muted mb-2">
+                <strong>Administrators</strong> manage the whole platform: every site, these Settings, users, MCP/OAuth, and backups. There can be as many as you like; the last one can never be demoted or deleted.
+                <strong>Site users</strong> sign in the same way but see only the sites assigned to them and can't create or delete sites. Every account manages its own password, 2FA, and passkeys under <em>Account</em>.
+                Changes that touch an administrator account ask for <em>your</em> password again.
+              </p>
               <div id="users-list" class="mb-2"></div>
+              <h4 style="margin:16px 0 8px;font-size:0.9rem">Add an account</h4>
               <form id="user-add-form" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-                <input type="text" id="user-new-username" placeholder="username" pattern="[a-z0-9._-]{1,40}" autocomplete="off" style="flex:1;min-width:140px">
+                <input type="text" id="user-new-username" placeholder="username" pattern="[a-z0-9._\-]{1,40}" autocomplete="off" style="flex:1;min-width:140px">
                 <input type="password" id="user-new-password" placeholder="password (min 8 chars)" minlength="8" autocomplete="new-password" style="flex:1;min-width:160px">
+                <label style="display:inline-flex;align-items:center;gap:6px;font-weight:normal;margin:0">
+                  <input type="checkbox" id="user-new-admin" style="width:auto;margin:0"> Administrator
+                </label>
                 <button type="submit" class="btn btn-sm btn-primary">Add User</button>
               </form>
-              <div class="text-sm text-muted" style="margin-top:8px">Assign sites for the new user:</div>
-              <div id="user-new-sites" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px"></div>
+              <div id="user-new-sites-wrap">
+                <div class="text-sm text-muted" style="margin-top:8px">Sites this user may manage:</div>
+                <div id="user-new-sites" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px"></div>
+              </div>
               <div class="form-error" id="users-error" style="margin-top:6px"></div>
             </div>
           </div>
@@ -434,15 +459,23 @@
 
           <!-- Security tab: country restrictions + IP auto-blocking -->
           <div class="settings-page-panel" data-settings-panel="security" hidden>
-            <div class="card" style="max-width:480px">
+            <div class="card" style="max-width:560px">
               <h3>Country Restrictions</h3>
-              <p class="text-sm text-muted mb-2">Only allow requests from specific countries. Leave empty to allow all. Uses 2-letter ISO country codes (e.g., US, GB, CA). Admin panel is always accessible.</p>
+              <p class="text-sm text-muted mb-2">Only serve hosted sites to visitors from the countries you pick; everyone else (and any visitor whose country can't be determined) gets a 403. Leave the list empty to allow the whole world. The admin panel, MCP, and OAuth endpoints are never geo-blocked.</p>
               <form id="country-form">
-                <label>
-                  Allowed Countries
-                  <input type="text" id="allowed-countries" placeholder="US, GB, CA (empty = allow all)">
-                </label>
-                <button type="submit" class="btn btn-primary">Save</button>
+                <label for="country-search">Allowed countries</label>
+                <div class="chip-box" id="country-chips" aria-live="polite">
+                  <span class="text-sm text-muted" id="country-chips-empty">All countries allowed</span>
+                </div>
+                <div class="country-search-wrap">
+                  <input type="text" id="country-search" placeholder="Type a country name or code (e.g. Canada, CA)…" autocomplete="off" spellcheck="false">
+                  <div class="country-suggest" id="country-suggest" hidden></div>
+                </div>
+                <div id="country-recent" class="text-sm" style="margin-top:10px"></div>
+                <div style="display:flex;gap:8px;align-items:center;margin-top:14px">
+                  <button type="submit" class="btn btn-primary">Save</button>
+                  <button type="button" class="btn btn-ghost btn-sm" id="country-clear">Allow all countries</button>
+                </div>
                 <div class="form-error" id="country-error"></div>
                 <div class="form-success" id="country-success"></div>
               </form>

@@ -523,3 +523,69 @@ A total of 4 findings were identified. **All remediated.**
 - Settings tabs refactor is pure DOM restructuring; tab buttons use `type="button"` so they never trigger form submit, and click handlers are scoped to the modal instance.
 
 *May 2026 audit conducted against the working tree before commit. Fixes verified by `bun test` (56/56 pass) including a new test that exercises the symlinked-parent escape path.*
+
+---
+
+## September 2026 Review — Multi-Administrator Accounts, File Manager, Version Notes (v1.5.0)
+
+**Date:** 2026-09-07
+**Scope:** Changes for v1.5.0:
+- Replacement of the single anonymous "super-admin" (password in the `config` table, blank username) with a uniform account model: every principal is an `admin_users` row with an `is_admin` flag; any number of administrators; per-account TOTP and passkeys
+- Startup migration of the legacy admin into an ordinary account (`migrateLegacyAdmin`)
+- Administrator user management (create, promote/demote, reset password, disable 2FA, remove passkeys, delete) with step-up authentication
+- Admin file manager: delete (files and folders, bulk), rename/move, copy/duplicate, new folder (`POST /_admin/api/sites/:slug/files/{delete,rename,copy,mkdir}`)
+- Release notes on versions (deploy, snapshot, MCP `commit_version`, editable afterwards)
+- Country allow-list picker backed by a server-side ISO 3166-1 list with strict validation
+- OAuth consent screen authenticates by username (account or delegate)
+
+**Audited files:** `src/auth.ts`, `src/admin-api.ts`, `src/webauthn.ts`, `src/sites.ts`, `src/oauth.ts`, `src/backup.ts`, `src/countries.ts`, `admin/app.js`, `admin/index.html`, `test/*`
+
+### Threat model additions
+
+Moving from one administrator to many introduces two risks that did not exist before: **lateral takeover** (an administrator, or a hijacked administrator session, seizing a peer's account) and **lockout** (removing the only account that can still administer the platform). File management adds **destructive reach** to an already-authenticated admin session — a hijacked session can now erase a site's working copy in one request rather than merely add files. The mitigations below were designed against those three.
+
+### Design decisions (and why)
+
+| Area | Decision | Rationale |
+|---|---|---|
+| Identity | Blank-username login removed; every login names an account. | One code path for authentication and audit; no "special" principal that bypasses per-account checks. The legacy admin is migrated to a real row (`admin`) so nobody is locked out by the upgrade, and live sessions/passkeys are re-parented rather than dropped. |
+| Username enumeration | Unknown usernames still pay an Argon2id verification against a random dummy hash; the OAuth consent screen returns the same error for a bad account password and a bad delegate password. | Response timing and error text do not reveal which usernames exist. |
+| Step-up | Anything that touches an administrator account — creating one, changing `is_admin`, resetting an admin's password, disabling an admin's 2FA or passkeys, deleting an admin — requires the acting admin's own password (`confirm_password`), rate-limited through the login lockout. Backup restore, passkey add/remove, and 2FA disable already required it. | A briefly hijacked admin session cannot mint or capture a peer administrator and retain access after the session dies. Plain site-user changes carry no such risk and stay frictionless. |
+| Lockout | The last administrator can neither be demoted nor deleted (enforced in `auth.ts`, so the rule holds for every caller, not just the HTTP layer). Nobody can change their own role or delete their own account. | Prevents both accidental and malicious lock-out of the platform. |
+| Sessions | `getSessionUser` joins `admin_users`; a session whose account was deleted is rejected on the next request, and deleting an account also drops its sessions, passkeys, challenges, and pending 2FA tokens. | No zombie principals. |
+| 2FA | TOTP secret, recovery codes, and pending-setup secret live on the account row; pending 2FA tokens carry the `user_id` they were issued for and consumption checks it. | One user's recovery codes can never satisfy another user's login. |
+| Passkeys | Credentials already carried `user_id`; login now resolves the owner from the credential and refuses orphans. Deletion is scoped to the owner. User handles are per-account random values. | Discoverable-credential login without a username, with no way to use another account's key. |
+| Audit | `audit_log.actor` records the acting username on every entry (`NULL` for anonymous/system events). | With many admins, "who did this" is now answerable. |
+| File ops | All five mutations (upload, delete, rename, copy, mkdir) share `containedPath()`: normalized relative path, no `..`/NUL, logical containment under the content dir, and realpath containment for anything that exists — including the leaf, so a symlink pointing outside the site is refused even for deletion. Copies never dereference symlinks; deletes never follow them. Directories are never replaced by rename/copy. A directory cannot be moved or copied into itself. Bulk delete validates every path before deleting any. | Path traversal and symlink escape are the classic file-manager failures; one helper, one set of tests. |
+| File ops: blast radius | Operations honor the site's auto-snapshot setting: the first change to an untouched working version freezes it first, exactly like MCP writes. Copy is capped at 500 MB (the ZIP deploy limit). Every operation is audit-logged with actor, slug, and paths. | A destructive mistake or a hijacked session still leaves a rollback point when auto-snapshot is on, and cannot fill the disk with one copy. |
+| Country list | The allow-list only accepts codes present in the server's ISO 3166-1 list (plus Cloudflare's `XK`, `T1`, `XX`); anything else is rejected with the offending value named, and the previous list is left intact. | A typo previously produced an allow-list that matched nobody, silently 403-ing every visitor. |
+| Version notes | Labels ≤ 120 chars, notes ≤ 2000 chars, control characters stripped; rendered through the existing `esc()` helper. | Bounded, non-executable admin-supplied text. |
+
+### Findings
+
+#### N1. Test suite ran against a persistent database in the Bun install directory
+**Severity:** Medium (test integrity) | **Category:** Test Infrastructure
+**Location:** `test/preload.ts`
+**Issue:** The preload set `process.env.HOSTER_HOME` and then statically imported the source modules. ES imports are hoisted above the assignment, so `src/db.ts` resolved its data directory before the variable existed and fell back to `dirname(process.execPath)` — the Bun binary's directory. Every test run since March had been sharing one `hoster.db` and `sites/` tree there, so `CREATE TABLE IF NOT EXISTS` never applied newer schemas (the `pending_2fa` table still had the pre-R4 plaintext `token` column) and state leaked between runs.
+**Fix:** The preload now uses `await import()` for those modules. Verified that the suite's DB path is a fresh `mkdtemp` directory. The stale `data/` and `sites/` directories under the Bun install remain on the development machine and should be removed by hand.
+
+#### N2. Failed delegate logins on the OAuth consent screen were not rate-limited
+**Severity:** Low | **Category:** Brute Force
+**Location:** `src/oauth.ts` — `handleAuthorize`
+**Issue:** A wrong delegate password did not record a `login_attempts` row, so delegate passwords could be guessed faster than account passwords (the `isRateLimited` gate ran, but nothing fed it).
+**Fix:** Delegate failures now call `recordLoginAttempt(ip, false)`.
+
+#### N3. HTML `pattern` attributes invalid under the `v` regex flag
+**Severity:** Info | **Category:** UI Robustness
+**Location:** `admin/index.html`, `admin/app.js`
+**Issue:** Modern browsers compile `pattern` with the `v` flag, where an unescaped `-` inside a character class is a syntax error; the browser logged an error and skipped client-side validation for slug and username fields. Server-side validation was unaffected.
+**Fix:** Hyphens escaped in every affected pattern.
+
+### Residual risks
+
+- **Per-IP lockout only.** Login rate limiting remains per source IP (5 failures / 15 min). A distributed attacker with many addresses can spread guesses across accounts. Per-username lockout was considered and rejected for now because it hands an attacker a trivial denial-of-service against a named administrator. Strong passwords, TOTP, or passkeys on every administrator account are the mitigation.
+- **Administrators are peers.** Any administrator can (with their own password) demote, reset, or delete any other administrator. There is deliberately no "owner" tier; the audit log with `actor` is the accountability mechanism. If you need to protect a break-glass account, keep it as the only account whose password is stored offline and review `Settings → Audit` after granting admin rights.
+- **Delete is delete.** With auto-snapshot off, deleting files or folders through the file manager has no undo beyond an existing snapshot or backup. The confirmation dialog says so; consider enabling auto-snapshot on sites that people edit by hand.
+- **`prompt()`-based confirmations.** Step-up passwords in the Users panel are collected through the browser's native `prompt()`, which is not maskable. It is transmitted only over the existing authenticated HTTPS channel and never stored, but a shoulder-surfer could read it. A masked modal is a reasonable follow-up.
+
+*Verified by `bun test` (118 tests across 8 files, including new suites for accounts, file operations, version notes, and country validation) and by the compile-and-boot preflight in `build-pi.sh`.*
