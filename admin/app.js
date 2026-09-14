@@ -402,6 +402,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   // --- Country restriction form (chip picker; see loadCountryPicker) ---
   bindCountryPicker();
 
+  // --- Default landing page form ---
+  bindLandingForm();
+
   // --- Auto-block form ---
   document.getElementById("autoblock-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -458,6 +461,7 @@ async function loadSettings() {
 
   // Administrator-only tabs.
   loadCountryPicker();
+  loadLandingSettings();
 
   try {
     const config = await api("/settings/autoblock");
@@ -689,6 +693,65 @@ function bindUserAddForm() {
 
 // Settings page tabs — Access / MCP / OAuth / Security / Backup / CMS Library.
 // Bound once; the buttons live in the static view so this is idempotent.
+// --- Default landing page (Settings → Landing Page) ---
+// Mirrors /_admin/api/settings/default-site: target is "" (admin sign-in),
+// a site slug, or an absolute http(s) URL; footer toggles the admin bar.
+function landingModeFor(target) {
+  if (!target) return "admin";
+  return /^https?:\/\//i.test(target) ? "url" : "site";
+}
+
+function syncLandingRows() {
+  const mode = document.getElementById("landing-mode").value;
+  document.getElementById("landing-site-row").hidden = mode !== "site";
+  document.getElementById("landing-url-row").hidden = mode !== "url";
+  document.getElementById("landing-footer-row").hidden = mode !== "site";
+}
+
+function bindLandingForm() {
+  const form = document.getElementById("landing-form");
+  if (!form) return;
+  document.getElementById("landing-mode").addEventListener("change", syncLandingRows);
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const errEl = document.getElementById("landing-error");
+    const successEl = document.getElementById("landing-success");
+    errEl.textContent = "";
+    successEl.textContent = "";
+    const mode = document.getElementById("landing-mode").value;
+    let target = "";
+    if (mode === "site") target = document.getElementById("landing-site").value;
+    else if (mode === "url") target = document.getElementById("landing-url").value.trim();
+    if (mode !== "admin" && !target) {
+      errEl.textContent = mode === "site" ? "Pick a site" : "Enter a URL";
+      return;
+    }
+    try {
+      await api("/settings/default-site", {
+        method: "POST",
+        body: JSON.stringify({ target, footer: document.getElementById("landing-footer").checked }),
+      });
+      successEl.textContent = "Landing page saved";
+    } catch (err) { errEl.textContent = err.message; }
+  });
+}
+
+async function loadLandingSettings() {
+  const modeEl = document.getElementById("landing-mode");
+  if (!modeEl) return;
+  try {
+    const [config, { sites }] = await Promise.all([api("/settings/default-site"), api("/sites")]);
+    const siteEl = document.getElementById("landing-site");
+    siteEl.innerHTML = sites.map(s => `<option value="${esc(s.slug)}">${esc(s.name)} (/${esc(s.slug)}/)</option>`).join("");
+    const mode = landingModeFor(config.target);
+    modeEl.value = mode;
+    if (mode === "site") siteEl.value = config.target;
+    if (mode === "url") document.getElementById("landing-url").value = config.target;
+    document.getElementById("landing-footer").checked = config.footer !== false;
+    syncLandingRows();
+  } catch (_) {}
+}
+
 function bindSettingsTabs() {
   const tabs = document.querySelectorAll("#view-settings .settings-tab[data-settings-tab]");
   if (!tabs.length || tabs[0].dataset.bound) return;
@@ -2218,17 +2281,17 @@ async function loadSites() {
       </div>
       <div class="site-actions">
         <a href="/${esc(s.slug)}/${s.current_version ? "?_v=" + esc(s.current_version) : ""}" target="_blank" rel="noopener" class="btn btn-sm">Visit</a>
-        <button class="btn btn-sm" onclick="showSiteFiles('${esc(s.slug)}', '${esc(s.name)}', loadSites)">Files</button>
-        <button class="btn btn-sm" onclick="showSiteDetail('${esc(s.slug)}')">Versions</button>
-        <button class="btn btn-sm" onclick="redeploySite('${esc(s.slug)}', '${esc(s.name)}')">Update</button>
-        <button class="btn btn-sm" onclick="showUploadFile('${esc(s.slug)}', '${esc(s.name)}', loadSites)">Upload File</button>
+        <button class="btn btn-sm" onclick="showSiteFiles(${jsArg(s.slug)}, ${jsArg(s.name)}, loadSites)">Files</button>
+        <button class="btn btn-sm" onclick="showSiteDetail(${jsArg(s.slug)})">Versions</button>
+        <button class="btn btn-sm" onclick="redeploySite(${jsArg(s.slug)}, ${jsArg(s.name)})">Update</button>
+        <button class="btn btn-sm" onclick="showUploadFile(${jsArg(s.slug)}, ${jsArg(s.name)}, loadSites)">Upload File</button>
         <button class="btn btn-sm" data-settings="${esc(s.slug)}">Settings</button>
-        <button class="btn btn-sm" onclick="reloadSiteCache('${esc(s.slug)}', this)">Reload</button>
-        <button class="btn btn-sm" onclick="toggleSitePinned('${esc(s.slug)}', ${s.pinned_at ? "false" : "true"}).then(()=>loadSites())">${s.pinned_at ? "Unpin" : "Pin"}</button>
-        <button class="btn btn-sm ${s.active ? "btn-danger" : "btn-primary"}" onclick="toggleSiteActive('${esc(s.slug)}', ${!s.active})">
+        <button class="btn btn-sm" onclick="reloadSiteCache(${jsArg(s.slug)}, this)">Reload</button>
+        <button class="btn btn-sm" onclick="toggleSitePinned(${jsArg(s.slug)}, ${s.pinned_at ? "false" : "true"}).then(()=>loadSites())">${s.pinned_at ? "Unpin" : "Pin"}</button>
+        <button class="btn btn-sm ${s.active ? "btn-danger" : "btn-primary"}" onclick="toggleSiteActive(${jsArg(s.slug)}, ${!s.active})">
           ${s.active ? "Disable" : "Enable"}
         </button>
-        ${isSuperAdmin ? `<button class="btn btn-sm btn-danger" onclick="confirmDeleteSite('${esc(s.slug)}')">Delete</button>` : ""}
+        ${isSuperAdmin ? `<button class="btn btn-sm btn-danger" onclick="confirmDeleteSite(${jsArg(s.slug)})">Delete</button>` : ""}
       </div>
     </div>
   `).join("");
@@ -2466,8 +2529,8 @@ window.showSiteDetail = async function (slug) {
             <div class="version-actions">
               <button class="btn btn-sm btn-ghost version-edit-btn" title="Edit label and release notes">${v.notes || v.label ? "Edit notes" : "Add notes"}</button>
               ${v.version !== site.current_version ? `
-                <button class="btn btn-sm btn-primary" onclick="activateVersion('${slug}', '${v.version}')">Activate</button>
-                <button class="btn btn-sm btn-danger" onclick="deleteVersionBtn('${slug}', '${v.version}')">Delete</button>
+                <button class="btn btn-sm btn-primary" onclick="activateVersion(${jsArg(slug)}, ${jsArg(v.version)})">Activate</button>
+                <button class="btn btn-sm btn-danger" onclick="deleteVersionBtn(${jsArg(slug)}, ${jsArg(v.version)})">Delete</button>
               ` : '<span class="site-badge badge-active">Current</span>'}
             </div>
           </div>
@@ -3891,6 +3954,22 @@ function esc(s) {
   const d = document.createElement("div");
   d.textContent = s;
   return d.innerHTML;
+}
+
+// Encode a value as a JavaScript string literal safe to embed inside an
+// inline event-handler attribute. esc() alone is not enough there: it
+// HTML-escapes, but an apostrophe survives and terminates a single-quoted
+// JS string (a site named "David's Software Projects" broke every button
+// on its card). JSON.stringify yields a double-quoted literal with inner
+// quotes/backslashes escaped; the quotes are then entity-encoded here (esc()
+// can't do it — text-node serialization leaves quotes alone) so the attribute
+// parser decodes them back before the JS runs.
+function jsArg(v) {
+  return JSON.stringify(String(v ?? ""))
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 function fmt(n) {

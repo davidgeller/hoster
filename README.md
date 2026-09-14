@@ -377,6 +377,18 @@ You can create aliases so a site is reachable at multiple URL paths. For example
 
 Aliases share the same content, versions, and settings as the original site. They appear on the site card alongside the primary slug.
 
+### Default Landing Page
+
+By default, visiting the root of your Hoster hostname (`https://yourdomain.com/`) redirects to the admin sign-in. If you'd rather greet visitors with one of your sites — or send them somewhere else entirely — set a default landing page:
+
+1. Go to **Settings → Landing Page** (administrators only)
+2. Choose **A hosted site** and pick the site, or **An external URL** and enter any `http(s)` address
+3. Click **Save**
+
+The root then 302-redirects to `/<slug>/` (query strings are carried along) or to the URL. Custom domains mapped with host aliases are unaffected — they already serve their site at the domain root.
+
+When the landing page is a hosted site, a slim **admin footer bar** is added over the bottom of that site's pages on the canonical hostname, linking to `/_admin` so you can still find the panel once the root no longer points at it. Visitors can dismiss it for the page view, and you can turn it off with the checkbox on the same settings tab. The bar is never injected on host-aliased (custom domain) requests, where the admin panel is not reachable anyway. Deleting the default site resets the landing page to the admin sign-in.
+
 ### Host Aliases (Custom Domains)
 
 Map a custom domain to a site so visitors hit it at the domain root instead of under a path prefix. For example, if your site lives at `/spryly` on the canonical hostname, you can add `spryly.com` as a host alias and requests to `https://spryly.com/about` will serve the same content as `https://yourdomain.com/spryly/about`.
@@ -970,6 +982,11 @@ OAuth-issued tokens stored alongside static tokens (same hashing, expiration, an
 - IP reputation and threat intelligence
 - HTTP/2 and HTTP/3 support
 - Edge caching (configurable per-path)
+
+### Changes — v1.5.1
+
+- **Fix:** a site whose display name contained an apostrophe (e.g. *David's Software Projects*) broke every action button on its Sites card. Names embedded in inline event handlers were HTML-escaped but not JavaScript-escaped; they are now emitted as proper JS string literals.
+- **New:** default landing page (Settings → Landing Page) — send the hostname root to a hosted site or an external URL instead of the admin sign-in, with an optional admin footer bar over the default site.
 
 ### Security Hardening Log — v1.5.0
 

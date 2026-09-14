@@ -7,7 +7,7 @@ import {
   handleRegister, handleAuthorize, handleToken, handleRevoke,
 } from "./oauth";
 import { logRequest, extractRequestMeta, shouldTrack, isCountryAllowed, isIpBlocked, checkAndAutoBlock } from "./analytics";
-import { resolveSitePath, resolveAlias, resolveHostAlias, normalizeHost } from "./sites";
+import { resolveSitePath, resolveAlias, resolveHostAlias, normalizeHost, getDefaultSite, getDefaultSiteFooterSlug } from "./sites";
 import { serveCmsLibFile } from "./cms-lib";
 
 // Full header set for first-party surfaces we control: the admin UI (document
@@ -119,9 +119,39 @@ function checkNotModified(req: Request, etag: string | null): Response | null {
   return null;
 }
 
-async function serveHtml(filePath: string, basePath: string, req: Request, version?: string | null): Promise<Response> {
+// Where "/" on the canonical host goes. Unset → admin sign-in. A slug →
+// "/<slug>/" (path-based routing, so relative assets resolve). A URL → itself.
+// The query string is carried along for slug targets so links like
+// "/?utm_source=x" survive; for external URLs the admin's URL wins verbatim.
+function rootRedirectLocation(search: string): string {
+  const { target } = getDefaultSite();
+  if (!target) return "/_admin";
+  if (/^https?:\/\//i.test(target)) return target;
+  return `/${target}/${search}`;
+}
+
+// Slim bar pinned over the bottom of the default site's pages linking back to
+// the admin panel. Inline styles only (sites carry no CSP of their own, but
+// this keeps it self-contained); the id is namespaced to avoid colliding with
+// site CSS. The close button hides it for the page view only.
+const ADMIN_FOOTER_HTML = `<div id="hoster-admin-footer" style="position:fixed;left:0;right:0;bottom:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;gap:12px;padding:6px 12px;font:13px/1.4 system-ui,-apple-system,sans-serif;color:#e8e8e8;background:rgba(20,20,24,.92);box-shadow:0 -1px 4px rgba(0,0,0,.25)">` +
+  `<span style="opacity:.75">Hosted with Hoster</span>` +
+  `<a href="/_admin" style="color:#8ec5ff;text-decoration:none;font-weight:600">Admin panel &rarr;</a>` +
+  `<button type="button" aria-label="Hide" onclick="this.parentNode.remove()" style="margin-left:4px;border:0;background:transparent;color:#aaa;font-size:16px;line-height:1;cursor:pointer;padding:0 4px">&times;</button>` +
+  `</div>`;
+
+function injectAdminFooter(html: string): string {
+  const idx = html.search(/<\/body\s*>/i);
+  return idx === -1 ? html + ADMIN_FOOTER_HTML : html.slice(0, idx) + ADMIN_FOOTER_HTML + html.slice(idx);
+}
+
+async function serveHtml(filePath: string, basePath: string, req: Request, version?: string | null, adminFooter = false): Promise<Response> {
   try {
-    const etag = generateEtag(filePath, version);
+    // The footer changes the body, so it must change the ETag too — otherwise
+    // a browser that cached the page before the footer was enabled keeps
+    // getting 304s and never sees it.
+    const baseEtag = generateEtag(filePath, version);
+    const etag = baseEtag && adminFooter ? baseEtag.replace(/"$/, '-af"') : baseEtag;
     const notModified = checkNotModified(req, etag);
     if (notModified) return notModified;
 
@@ -131,6 +161,7 @@ async function serveHtml(filePath: string, basePath: string, req: Request, versi
     // serving prefix. For path-routed sites this is "/<slug>/"; for
     // host-aliased requests the site IS the host root, so it stays "/".
     html = html.replace(/<base\s+href="\/"\s*\/?>/i, `<base href="${basePath}">`);
+    if (adminFooter) html = injectAdminFooter(html);
     const headers: Record<string, string> = {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-cache",
@@ -381,9 +412,10 @@ export function createServer(port: number) {
           basePath = "/";
         } else {
           if (parts.length === 0) {
-            // Root on canonical host — redirect to admin.
+            // Root on canonical host — redirect to the configured default
+            // landing page (a hosted site or external URL), else to admin.
             status = 302;
-            const res = addSecurityHeaders(new Response(null, { status: 302, headers: { Location: "/_admin" } }));
+            const res = addSecurityHeaders(new Response(null, { status: 302, headers: { Location: rootRedirectLocation(url.search) } }));
             logReq(res);
             return res;
           }
@@ -435,7 +467,10 @@ export function createServer(port: number) {
           // For HTML files, rewrite <base href="/"> to the appropriate prefix:
           // path-based routing: "/<slug>/"; host-aliased: "/".
           if (resolved.filePath.endsWith(".html")) {
-            const res = addSiteHeaders(await serveHtml(resolved.filePath, basePath, req, resolved.version));
+            // The admin footer only appears on the canonical host: a custom
+            // domain must never advertise the admin panel (which is 404 there).
+            const withFooter = !hostAliasSlug && getDefaultSiteFooterSlug() === candidateSlug;
+            const res = addSiteHeaders(await serveHtml(resolved.filePath, basePath, req, resolved.version, withFooter));
             logReq(res);
             return res;
           }

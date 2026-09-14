@@ -571,6 +571,12 @@ export function deleteSite(slug: string): boolean {
   db.run("DELETE FROM requests WHERE site_slug = ?", slug);
   invalidateSiteCache(slug);
   invalidateHostAliasCache();
+  // A default landing page pointing at this site would now 404 on every
+  // root visit — fall back to the admin sign-in.
+  const landing = getDefaultSite();
+  if (landing.target && !/^https?:\/\//i.test(landing.target) && resolveAlias(landing.target) === slug) {
+    setDefaultSite({ target: "" });
+  }
   return true;
 }
 
@@ -1644,4 +1650,90 @@ export function rebuildCurrentSymlinks(): RebuildResult {
   }
 
   return result;
+}
+
+// --- Default landing page ---
+// Where a visitor lands when they hit the canonical hostname's root ("/").
+// Unset: redirect to the admin sign-in (the historical behavior). Set to a
+// site slug: redirect to that site. Set to an http(s) URL: redirect there.
+// `footer` shows a slim admin-link bar over the default site's pages so an
+// administrator can still find the panel once the root no longer points at it.
+// Stored as one JSON blob under config.default_site; the config table is
+// included wholesale in backups, so this survives restore automatically.
+
+export interface DefaultSiteConfig {
+  target: string;   // "" | site slug | absolute http(s) URL
+  footer: boolean;  // show the admin footer bar on the default site's pages
+}
+
+const DEFAULT_SITE_DEFAULTS: DefaultSiteConfig = { target: "", footer: true };
+
+// Cached like host aliases: the root-route and every HTML response consult it.
+let defaultSiteCache: DefaultSiteConfig | null = null;
+
+export function getDefaultSite(): DefaultSiteConfig {
+  if (defaultSiteCache) return { ...defaultSiteCache };
+  const row = db.query("SELECT value FROM config WHERE key = 'default_site'").get() as { value: string } | null;
+  let cfg = { ...DEFAULT_SITE_DEFAULTS };
+  if (row?.value) {
+    try {
+      const parsed = JSON.parse(row.value);
+      if (parsed && typeof parsed === "object") {
+        cfg = {
+          target: typeof parsed.target === "string" ? parsed.target : "",
+          footer: parsed.footer !== false,
+        };
+      }
+    } catch { /* corrupt value — fall back to defaults */ }
+  }
+  defaultSiteCache = cfg;
+  return { ...cfg };
+}
+
+export function invalidateDefaultSiteCache(): void {
+  defaultSiteCache = null;
+}
+
+// Validate and normalize a target. Returns "" (admin), a site slug, or an
+// absolute http(s) URL. Throws on anything else so a typo can't silently
+// send every root visit to a 404.
+export function normalizeDefaultSiteTarget(raw: unknown): string {
+  const target = typeof raw === "string" ? raw.trim() : "";
+  if (!target) return "";
+  if (/^https?:\/\//i.test(target)) {
+    let u: URL;
+    try { u = new URL(target); } catch { throw new Error("Default site URL is not valid"); }
+    if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("Default site URL must use http or https");
+    if (u.username || u.password) throw new Error("Default site URL must not contain credentials");
+    return u.toString();
+  }
+  if (!/^[a-z0-9-]+$/.test(target)) {
+    throw new Error("Default site must be a site slug (lowercase letters, digits, hyphens) or an http(s) URL");
+  }
+  // Accept the primary slug or any path alias of a real site.
+  if (!getSite(resolveAlias(target))) throw new Error(`Site '${target}' does not exist`);
+  return target;
+}
+
+export function setDefaultSite(input: Partial<DefaultSiteConfig>): DefaultSiteConfig {
+  const current = getDefaultSite();
+  const updated: DefaultSiteConfig = {
+    target: input.target === undefined ? current.target : normalizeDefaultSiteTarget(input.target),
+    footer: input.footer === undefined ? current.footer : !!input.footer,
+  };
+  const value = JSON.stringify(updated);
+  db.run(
+    "INSERT INTO config (key, value) VALUES ('default_site', ?) ON CONFLICT(key) DO UPDATE SET value = ?",
+    value, value
+  );
+  invalidateDefaultSiteCache();
+  return updated;
+}
+
+// The slug (alias-resolved) whose pages should carry the admin footer, or
+// null when the default target is unset, an external URL, or footer is off.
+export function getDefaultSiteFooterSlug(): string | null {
+  const cfg = getDefaultSite();
+  if (!cfg.footer || !cfg.target || /^https?:\/\//i.test(cfg.target)) return null;
+  return resolveAlias(cfg.target);
 }

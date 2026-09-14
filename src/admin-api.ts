@@ -39,6 +39,7 @@ import {
   getAutoBlockConfig, setAutoBlockConfig, getBlockedIps, unblockIp
 } from "./analytics";
 import { listCountries } from "./countries";
+import { getDefaultSite, setDefaultSite } from "./sites";
 import { createMcpToken, listMcpTokens, deleteMcpToken, getMcpAuditLog } from "./mcp";
 import {
   listOauthGrants, revokeOauthGrant, listOauthClients, deleteOauthClient,
@@ -989,6 +990,23 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     const updated = setAutoBlockConfig(body);
     audit("autoblock_updated", JSON.stringify(updated));
     return json({ ok: true, config: updated });
+  }
+
+  // --- Default landing page ---
+  // Root of the canonical host: admin sign-in (unset), a hosted site, or a URL.
+  if (path === "/_admin/api/settings/default-site" && req.method === "GET") {
+    return json(getDefaultSite());
+  }
+  if (path === "/_admin/api/settings/default-site" && req.method === "POST") {
+    const body = await readJsonBody<{ target?: string; footer?: boolean }>(req);
+    if (!body || typeof body !== "object") return json({ error: "Invalid request body" }, 400);
+    try {
+      const updated = setDefaultSite({ target: body.target, footer: body.footer });
+      audit("default_site_updated", JSON.stringify(updated));
+      return json({ ok: true, config: updated });
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
   }
 
   // --- Blocked IPs management ---
