@@ -42,6 +42,7 @@ In every case the Hoster binary itself is identical — only the front-end TLS l
 - **Site Explorer** — a three-pane admin view to browse every site, inspect version/size/alias/MCP status at a glance, and live-preview the active deployment without leaving the panel
 - **Version management** — each upload creates a new version; roll back instantly
 - **SPA support** — auto-detects Angular, React, and Vue builds (with deep root directory detection); rewrites `<base href>` for subpath hosting
+- **Default landing page** — send the hostname root to any hosted site or external URL instead of the admin sign-in, with an optional footer bar over the default site that links back to the admin panel
 - **Custom domains (host aliases)** — point any domain at a specific site so `spryly.com/about` serves the same content as `/spryly/about` on the canonical hostname, with no slug in the URL
 - **Configuration backup** — save and restore your entire hoster setup (settings, sites, versions) to a `.hoster` file with optional AES-256-GCM encryption for device migration; restore auto-rebuilds active-version symlinks and reports broken sites
 - **Self-healing site state** — `_current` symlinks rebuild at startup, after restore, or on demand from a database-driven repair pass; broken sites surface a red badge in the admin UI
@@ -983,10 +984,22 @@ OAuth-issued tokens stored alongside static tokens (same hashing, expiration, an
 - HTTP/2 and HTTP/3 support
 - Edge caching (configurable per-path)
 
-### Changes — v1.5.1
+### Release Notes — v2.0.0
 
-- **Fix:** a site whose display name contained an apostrophe (e.g. *David's Software Projects*) broke every action button on its Sites card. Names embedded in inline event handlers were HTML-escaped but not JavaScript-escaped; they are now emitted as proper JS string literals.
-- **New:** default landing page (Settings → Landing Page) — send the hostname root to a hosted site or an external URL instead of the admin sign-in, with an optional admin footer bar over the default site.
+v2.0.0 is the first release where a Hoster instance can present itself as a **website rather than an admin panel**: the root of your hostname can now be one of your sites (or any URL), and the admin panel becomes something you reach from a footer link or by typing `/_admin`. That shift in the default front door is why this is a major version — an upgrade changes nothing until you opt in, but the product's posture is different.
+
+**New**
+
+- **Default landing page** (Settings → Landing Page). Choose where `/` on the canonical hostname goes: the admin sign-in (default, unchanged), a hosted site (302 to `/<slug>/`, query string preserved), or an external `http(s)` URL. Path aliases are accepted as targets. See [Default Landing Page](#default-landing-page).
+- **Admin footer bar.** When the landing page is a hosted site, a slim bar is added over the bottom of that site's pages linking to `/_admin`, so the panel stays discoverable. Visitors can dismiss it per page; administrators can disable it. It is only ever injected on the canonical hostname — host-aliased custom domains never carry it — and it changes the page ETag so browsers that cached the page before you enabled it fetch a fresh copy.
+- **Safety nets.** Targets are validated when saved (unknown slugs, non-http schemes, and URLs with embedded credentials are rejected), and deleting the default site resets the landing page to the admin sign-in rather than leaving `/` pointing at a 404.
+- **Audit and backup.** Landing-page changes are recorded in the audit log, and the setting is included in configuration backups.
+
+**Fixed**
+
+- A site whose display name contained an apostrophe (e.g. *David's Software Projects*) broke every action button on its Sites card. Names embedded in inline event handlers were HTML-escaped but not JavaScript-escaped, so the apostrophe terminated the handler's string literal. Values are now emitted as properly quoted JS string literals; any name is safe.
+
+**Upgrading** needs no action. Existing instances keep redirecting `/` to the admin sign-in until an administrator picks a landing page.
 
 ### Security Hardening Log — v1.5.0
 
