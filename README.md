@@ -117,6 +117,21 @@ What a repository gives you:
 
 Repositories store data under `sites/<slug>/_repo/objects/` (content-addressed blobs) with the tree and history in SQLite (`repo_files`, `repo_versions`, `repo_blobs`).
 
+## Updating from a GitHub release
+
+Every release on the [Releases page](https://github.com/davidgeller/hoster/releases) carries ready-built installers (`hoster-x64.sh` for Intel/AMD servers, `hoster-arm64.sh` for Raspberry Pi and ARM VPSes). A running server can update itself in one command — no build machine needed:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/davidgeller/hoster/main/deploy/update-from-github.sh | bash
+```
+
+Run it on the server as the user that owns `~/hoster`. It detects the architecture, downloads the matching installer from the latest release, installs it (your `data/` database and `sites/` are preserved), restarts the `hoster` systemd service, and prints the running build. The script also copies itself to `~/hoster/update-from-github.sh`, so later updates are just `bash ~/hoster/update-from-github.sh`.
+
+- Pin a version: `HOSTER_VERSION=v2.0.1 bash ~/hoster/update-from-github.sh`
+- Install without restarting: `HOSTER_NO_RESTART=1 bash ~/hoster/update-from-github.sh`, then `sudo systemctl restart hoster` when convenient.
+
+Roll back by pinning the previous tag the same way. Take a configuration backup (Settings → Backup & Restore) before a major upgrade.
+
 ## Prerequisites
 
 - A Linux machine — Raspberry Pi, VPS (DigitalOcean, Linode, Hetzner, EC2, etc.), or anything that runs a static binary
