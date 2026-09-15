@@ -318,6 +318,23 @@
     return list;
   }
 
+  // Recursive contents of a folder: files (documents) and direct/nested folders.
+  function folderStats(dirPath) {
+    const prefix = dirPath + "/";
+    let files = 0, bytes = 0, dirs = 0;
+    for (const f of state.files) if (f.path.startsWith(prefix)) { files++; bytes += f.size || 0; }
+    for (const d of state.dirs) if (d.path.startsWith(prefix)) dirs++;
+    return { files, bytes, dirs };
+  }
+  function folderSummary(dirPath) {
+    const st = folderStats(dirPath);
+    if (!st.files && !st.dirs) return "Empty folder";
+    const parts = [];
+    if (st.files) parts.push(`${st.files} document${st.files === 1 ? "" : "s"}`);
+    if (st.dirs) parts.push(`${st.dirs} folder${st.dirs === 1 ? "" : "s"}`);
+    return parts.join(" · ");
+  }
+
   function render() {
     renderCrumbs();
     const listing = $("listing");
@@ -345,8 +362,8 @@
           <div class="check" data-check>${sel ? "✓" : ""}</div>
           ${thumb}
           <div class="info"><div class="name" title="${esc(f.path)}">${esc(label)}</div>
-          <div class="sub">${f.kind === "dir" ? "Folder" : `${fmtBytes(f.size)} · ${timeAgo(f.updated_at)}`}</div></div>
-          <div class="col col-size">${f.kind === "dir" ? "—" : fmtBytes(f.size)}</div>
+          <div class="sub">${f.kind === "dir" ? esc(folderSummary(f.path)) : `${fmtBytes(f.size)} · ${timeAgo(f.updated_at)}`}</div></div>
+          <div class="col col-size" title="${f.kind === "dir" ? esc(folderSummary(f.path)) : ""}">${f.kind === "dir" ? (() => { const st = folderStats(f.path); return st.files ? `${st.files} doc${st.files === 1 ? "" : "s"}` : "empty"; })() : fmtBytes(f.size)}</div>
           <div class="col col-mod" title="${esc(fmtDate(f.updated_at))}">${esc(fmtDate(f.updated_at))}</div>
           <div class="col col-by">${esc(f.updated_by || "")}</div>
           <div class="col col-v">${f.kind === "file" && f.version_no > 1 ? `<span class="vbadge">v${f.version_no}</span>` : ""}</div>
