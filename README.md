@@ -43,7 +43,7 @@ In every case the Hoster binary itself is identical — only the front-end TLS l
 - **Version management** — each upload creates a new version; roll back instantly
 - **SPA support** — auto-detects Angular, React, and Vue builds (with deep root directory detection); rewrites `<base href>` for subpath hosting
 - **Default landing page** — send the hostname root to any hosted site or external URL instead of the admin sign-in, with an optional footer bar over the default site that links back to the admin panel
-- **Repository sites** — a second site type: a document library with a built-in interface, no HTML to upload. Drag and drop files or whole folders, browse in grid or list view, preview images / video / audio / PDFs / text / Markdown, create and edit text and Markdown files in place, package any selection as a ZIP, and keep per-file version history with one-click restore. Deleted items sit in a trash for 30 days. Each repository has its own storage limit, versions-per-file cap, public or private visibility, optional banner image, and a self-contained backup archive
+- **Repository sites** — a second site type: a document library with a built-in interface, no HTML to upload. Drag and drop files or whole folders, browse in grid or list view, move and copy between folders, preview images / video / audio / PDFs / text / Markdown, create and edit text and Markdown files in place, package any selection as a ZIP, share files or folders with expiring links, and keep per-file version history with one-click restore. Deleted items sit in a trash for 30 days. Each repository has its own storage limit, versions-per-file cap, public or private visibility, optional banner image, per-site user grants, and a self-contained backup archive
 - **Per-site country restrictions** — every site (web or repository) can inherit the global allow-list, open itself to every country, or use its own list
 - **Custom domains (host aliases)** — point any domain at a specific site so `spryly.com/about` serves the same content as `/spryly/about` on the canonical hostname, with no slug in the URL
 - **Configuration backup** — save and restore your entire hoster setup (settings, sites, versions) to a `.hoster` file with optional AES-256-GCM encryption for device migration; restore auto-rebuilds active-version symlinks and reports broken sites
@@ -103,7 +103,8 @@ What a repository gives you:
 - **Per-file versions** — every upload or edit of an existing path records a version. Restore any version (the restore itself is a new version), download old versions, or delete one. The versions-per-file cap prunes the oldest automatically.
 - **Trash** — deletes are soft; restore from the trash for 30 days, or purge early.
 - **Storage limit** — a per-repository quota counted across every stored version (content-addressed, so re-uploads and restores are free).
-- **Banner + description** — set from Site Settings; shown across the top of the page.
+- **Share links** — *Share…* on any file or folder creates a link that works without an account, even on a private repository. Pick an expiry (1 hour to 90 days, or never), add a label, copy the link. A file link serves the current version (add `?dl=1` to force a download); a folder link opens a plain listing page with per-file links and a "download everything" ZIP. Links are random 256-bit tokens stored only as hashes, can be revoked at any time, and stop working if the item is moved, renamed, or deleted. The 🔗 button lists every link with its usage count.
+- **Banner + description** — set from Site Settings; shown across the top of the page (best at 5:1, e.g. 1600 × 320 px).
 - **Backup & restore** — *Settings → Backup* downloads a ZIP with every current document as plain files (`files/`) plus the full history (`objects/`, `repository.json`); an administrator can restore it into any repository. Repositories are also included in the platform-wide configuration backup.
 
 ### Access model
@@ -111,7 +112,8 @@ What a repository gives you:
 - **Readers**: everyone when the repository is *public*; otherwise only writers.
 - **Writers**: platform administrators and site users assigned to the repository. Grant or revoke access, or create a new site user, from the repository's own *Settings → Users* tab (every site has one); the platform-wide list under *Settings → Users* shows the same grants. Uploading, editing, renaming, deleting, and restoring always require signing in — the repository page has its own sign-in dialog that uses the same accounts, passwords, and TOTP as the admin panel.
 - Mutations require the session's CSRF token; raw file bytes are served with `nosniff`, a content-hash ETag, and — for HTML/SVG/XML — a `sandbox` Content-Security-Policy so a hostile document can never run script on the site's origin. Office documents and unknown types are always served as attachments.
-- Per-site country restrictions apply to repositories too.
+- **Share links** bypass visibility for exactly one path (and, for a folder, what's beneath it) until they expire or are revoked. Traversal outside a shared folder is refused, share pages carry a strict CSP and `noindex`, and creating or revoking links requires a writer session.
+- Per-site country restrictions apply to repositories too, including share links.
 
 Repositories store data under `sites/<slug>/_repo/objects/` (content-addressed blobs) with the tree and history in SQLite (`repo_files`, `repo_versions`, `repo_blobs`).
 

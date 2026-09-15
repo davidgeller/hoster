@@ -121,6 +121,7 @@ function exportDatabase(): Record<string, any[]> {
   tables.repo_files = db.prepare("SELECT * FROM repo_files").all();
   tables.repo_versions = db.prepare("SELECT * FROM repo_versions").all();
   tables.repo_blobs = db.prepare("SELECT * FROM repo_blobs").all();
+  tables.repo_shares = db.prepare("SELECT * FROM repo_shares").all();
 
   return tables;
 }
@@ -133,6 +134,7 @@ function importDatabase(tables: Record<string, any[]>) {
     db.exec("DELETE FROM repo_versions");
     db.exec("DELETE FROM repo_files");
     db.exec("DELETE FROM repo_blobs");
+    db.exec("DELETE FROM repo_shares");
     db.exec("DELETE FROM admin_users");
     db.exec("DELETE FROM site_aliases");
     db.exec("DELETE FROM site_versions");
@@ -159,7 +161,7 @@ function importDatabase(tables: Record<string, any[]>) {
         "site_type", "allowed_countries", "repo_quota_bytes", "repo_max_versions", "repo_visibility", "repo_description", "repo_banner"];
       const placeholders = cols.map(() => "?").join(", ");
       const stmt = db.prepare(`INSERT INTO sites (${cols.join(", ")}) VALUES (${placeholders})`);
-      // Pre-2.1 backups lack the site-type/repository columns; fill in the
+      // Pre-2.0.1 backups lack the site-type/repository columns; fill in the
       // defaults the schema would have applied.
       const defaults: Record<string, any> = { site_type: "web", repo_quota_bytes: 1073741824, repo_max_versions: 20, repo_visibility: "private" };
       for (const row of tables.sites) {
@@ -251,6 +253,15 @@ function importDatabase(tables: Record<string, any[]>) {
       for (const row of tables.repo_blobs) {
         const exists = db.query("SELECT 1 FROM sites WHERE slug = ?").get(row.site_slug);
         if (exists) stmt.run(row.site_slug, row.sha256, row.size ?? 0, row.refcount ?? 0);
+      }
+    }
+
+    if (tables.repo_shares) {
+      const cols = ["id", "site_slug", "token_hash", "path", "kind", "label", "created_by", "created_at", "expires_at", "revoked_at", "last_used_at", "uses"];
+      const stmt = db.prepare(`INSERT INTO repo_shares (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`);
+      for (const row of tables.repo_shares) {
+        const exists = db.query("SELECT 1 FROM sites WHERE slug = ?").get(row.site_slug);
+        if (exists) stmt.run(...cols.map(c => c === "uses" ? (row[c] ?? 0) : (row[c] ?? null)));
       }
     }
 

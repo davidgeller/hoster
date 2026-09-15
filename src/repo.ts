@@ -73,6 +73,23 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_repo_versions_site ON repo_versions(site_slug);
 
+  CREATE TABLE IF NOT EXISTS repo_shares (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_slug TEXT NOT NULL,
+    token_hash TEXT UNIQUE NOT NULL,
+    path TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    label TEXT,
+    created_by TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    expires_at TEXT,
+    revoked_at TEXT,
+    last_used_at TEXT,
+    uses INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (site_slug) REFERENCES sites(slug) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_repo_shares_site ON repo_shares(site_slug);
+
   CREATE TABLE IF NOT EXISTS repo_blobs (
     site_slug TEXT NOT NULL,
     sha256 TEXT NOT NULL,
@@ -1332,6 +1349,118 @@ export async function importRepoBackup(slug: string, archive: Buffer, actor?: st
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }
+}
+
+// --- Share links ---
+//
+// A share link grants anonymous read access to one file or one folder (and
+// everything beneath it) for a limited time, independent of the repository's
+// visibility. The URL carries a random token; only its SHA-256 is stored, so
+// a database leak doesn't hand out working links. Links follow the path, not
+// the row: if the item is renamed or deleted the link simply stops working.
+
+export interface RepoShare {
+  id: number;
+  path: string;
+  kind: "file" | "dir";
+  label: string | null;
+  created_by: string | null;
+  created_at: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+  last_used_at: string | null;
+  uses: number;
+  expired: boolean;
+  active: boolean;
+}
+
+const MAX_SHARE_HOURS = 24 * 365; // one year
+const MAX_ACTIVE_SHARES = 500;
+
+function shareRow(r: any): RepoShare {
+  const expired = !!r.expires_at && r.expires_at <= new Date().toISOString().replace("T", " ").slice(0, 19);
+  return {
+    id: r.id, path: r.path, kind: r.kind, label: r.label, created_by: r.created_by, created_at: r.created_at,
+    expires_at: r.expires_at, revoked_at: r.revoked_at, last_used_at: r.last_used_at, uses: r.uses,
+    expired, active: !expired && !r.revoked_at,
+  };
+}
+
+export function createRepoShare(slug: string, relPath: string, opts: { expires_in_hours?: number | null; label?: string | null; actor?: string | null } = {}): { share: RepoShare; token: string } {
+  requireRepoSite(slug);
+  const path = normalizeRepoPath(relPath);
+  const row = liveRow(slug, path);
+  if (!row) throw new Error(`'${path}' does not exist`);
+  let hours: number | null = null;
+  if (opts.expires_in_hours != null) {
+    const h = Number(opts.expires_in_hours);
+    if (!Number.isFinite(h) || h <= 0 || h > MAX_SHARE_HOURS) throw new Error("Expiry must be between 1 hour and 1 year");
+    hours = h;
+  }
+  const active = db.query("SELECT COUNT(*) AS n FROM repo_shares WHERE site_slug = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > datetime('now'))").get(slug) as { n: number };
+  if (active.n >= MAX_ACTIVE_SHARES) throw new Error(`This repository already has ${MAX_ACTIVE_SHARES} active share links — revoke some first`);
+  const token = randomBytes(32).toString("base64url");
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  const label = sanitizeNote(opts.label);
+  const ins = db.run(
+    `INSERT INTO repo_shares (site_slug, token_hash, path, kind, label, created_by, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ${hours === null ? "NULL" : "datetime('now', ?)"})`,
+    ...(hours === null
+      ? [slug, tokenHash, path, row.kind, label, sanitizeActor(opts.actor)]
+      : [slug, tokenHash, path, row.kind, label, sanitizeActor(opts.actor), `+${Math.round(hours * 60)} minutes`])
+  );
+  const share = shareRow(db.query("SELECT * FROM repo_shares WHERE id = ?").get(Number(ins.lastInsertRowid)));
+  return { share, token };
+}
+
+export function listRepoShares(slug: string, relPath?: string | null): RepoShare[] {
+  requireRepoSite(slug);
+  const rows = relPath != null
+    ? db.query("SELECT * FROM repo_shares WHERE site_slug = ? AND path = ? ORDER BY id DESC").all(slug, normalizeRepoPath(relPath))
+    : db.query("SELECT * FROM repo_shares WHERE site_slug = ? ORDER BY id DESC").all(slug);
+  return rows.map(shareRow);
+}
+
+export function revokeRepoShare(slug: string, id: number): boolean {
+  requireRepoSite(slug);
+  const r = db.run("UPDATE repo_shares SET revoked_at = datetime('now') WHERE site_slug = ? AND id = ? AND revoked_at IS NULL", slug, id);
+  return r.changes > 0;
+}
+
+// Resolve a presented token. Returns the share only when it is live and its
+// target still exists; touches last_used_at/uses on success.
+export function resolveRepoShare(slug: string, token: string): RepoShare | null {
+  if (typeof token !== "string" || !/^[A-Za-z0-9_-]{20,64}$/.test(token)) return null;
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  const r = db.query(
+    `SELECT * FROM repo_shares WHERE site_slug = ? AND token_hash = ? AND revoked_at IS NULL
+       AND (expires_at IS NULL OR expires_at > datetime('now'))`
+  ).get(slug, tokenHash) as any;
+  if (!r) return null;
+  const target = liveRow(slug, r.path);
+  if (!target || target.kind !== r.kind) return null;
+  db.run("UPDATE repo_shares SET last_used_at = datetime('now'), uses = uses + 1 WHERE id = ?", r.id);
+  return shareRow(r);
+}
+
+// Files visible through a folder share, with paths relative to the folder.
+export function listSharedFolder(slug: string, share: RepoShare): { files: RepoFile[]; dirs: RepoFile[] } {
+  const rows = db.query(
+    "SELECT * FROM repo_files WHERE site_slug = ? AND deleted_at IS NULL AND path LIKE ? ESCAPE '\\' ORDER BY path"
+  ).all(slug, escapeLike(share.path) + "/%") as FileRow[];
+  const files: RepoFile[] = [], dirs: RepoFile[] = [];
+  for (const r of rows) {
+    const f = toRepoFile(r);
+    f.path = r.path.slice(share.path.length + 1);
+    (r.kind === "dir" ? dirs : files).push(f);
+  }
+  return { files, dirs };
+}
+
+// Drop shares that expired or were revoked more than 30 days ago.
+export function purgeStaleRepoShares(): number {
+  const r = db.run("DELETE FROM repo_shares WHERE (revoked_at IS NOT NULL AND revoked_at < datetime('now', '-30 days')) OR (expires_at IS NOT NULL AND expires_at < datetime('now', '-30 days'))");
+  return r.changes;
 }
 
 // Used by the platform-wide backup to know which directories to include.

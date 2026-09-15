@@ -366,6 +366,7 @@
     if (!n) return;
     $("sel-count").textContent = `${n} selected`;
     $("sel-rename").hidden = !state.canWrite || n !== 1;
+    $("sel-share").hidden = !state.canWrite || n !== 1;
     $("sel-move").hidden = !state.canWrite;
     $("sel-copy").hidden = !state.canWrite;
     $("sel-delete").hidden = !state.canWrite;
@@ -453,6 +454,7 @@
   $("sel-download").addEventListener("click", () => downloadPaths([...state.selected]));
   $("sel-delete").addEventListener("click", () => confirmDelete([...state.selected]));
   $("sel-rename").addEventListener("click", () => { const p = [...state.selected][0]; if (p) promptRename(p); });
+  $("sel-share").addEventListener("click", () => { const p = [...state.selected][0]; if (p) openShareDialog(p); });
   $("sel-move").addEventListener("click", () => moveOrCopyDialog([...state.selected], "move"));
   $("sel-copy").addEventListener("click", () => moveOrCopyDialog([...state.selected], "copy"));
 
@@ -542,13 +544,14 @@
       ${kind !== "none" ? `<a class="btn btn-sm" href="${esc(fileUrl(path))}" target="_blank" rel="noopener">Open</a>` : ""}
       <button type="button" class="btn btn-sm" data-act="copy">Copy link</button>
       ${state.canWrite && isTextFile(f) ? `<button type="button" class="btn btn-sm btn-primary" data-act="edit">Edit</button>` : ""}
-      ${state.canWrite ? `<button type="button" class="btn btn-sm" data-act="rename">Rename</button><button type="button" class="btn btn-sm" data-act="move">Move to…</button><button type="button" class="btn btn-sm" data-act="copy">Copy to…</button><button type="button" class="btn btn-sm btn-danger" data-act="delete">Delete</button>` : ""}`;
+      ${state.canWrite ? `<button type="button" class="btn btn-sm" data-act="share">Share…</button><button type="button" class="btn btn-sm" data-act="rename">Rename</button><button type="button" class="btn btn-sm" data-act="move">Move to…</button><button type="button" class="btn btn-sm" data-act="copy">Copy to…</button><button type="button" class="btn btn-sm btn-danger" data-act="delete">Delete</button>` : ""}`;
     acts.querySelector('[data-act="copy"]').addEventListener("click", () => {
       const link = new URL(`?file=${encodeURIComponent(path)}`, document.baseURI).href;
       navigator.clipboard?.writeText(link).then(() => toast("Link copied")).catch(() => toast(link));
     });
     acts.querySelector('[data-act="edit"]')?.addEventListener("click", () => openEditor(f));
     acts.querySelector('[data-act="rename"]')?.addEventListener("click", () => promptRename(path));
+    acts.querySelector('[data-act="share"]')?.addEventListener("click", () => openShareDialog(path));
     acts.querySelector('[data-act="move"]')?.addEventListener("click", () => moveOrCopyDialog([path], "move"));
     acts.querySelector('[data-act="copy"]')?.addEventListener("click", () => moveOrCopyDialog([path], "copy"));
     acts.querySelector('[data-act="delete"]')?.addEventListener("click", () => confirmDelete([path]));
@@ -705,6 +708,75 @@
       await loadTree();
     } catch (e) { toast(e.message, true); }
   }
+
+  // ---------- Share links ----------
+  // With a path: create links for that file/folder and list its links.
+  // Without: list every link in the repository.
+  let shareCtxPath = null;
+  async function openShareDialog(path) {
+    shareCtxPath = path || null;
+    const f = path ? entryAt(path) : null;
+    if (path && !f) return;
+    $("share-title").textContent = path ? `Share ${f.kind === "dir" ? "folder" : "file"} "${f.name}"` : "Share links";
+    $("share-text").textContent = path
+      ? (f.kind === "dir"
+        ? "Anyone with the link can browse and download everything in this folder until it expires, even if the repository is private. The link stops working if the folder is moved, renamed, or deleted."
+        : "Anyone with the link can view or download this file until it expires, even if the repository is private. The link always serves the current version and stops working if the file is moved, renamed, or deleted.")
+      : "Every link created for this repository. Revoke any you no longer need.";
+    $("share-form").hidden = !path;
+    $("share-result").hidden = true;
+    $("share-url").value = "";
+    $("share-error").textContent = "";
+    $("share-label").value = "";
+    $("share-modal").hidden = false;
+    await loadShareList();
+  }
+  async function loadShareList() {
+    const list = $("share-list");
+    list.innerHTML = '<div class="share-item muted">Loading…</div>';
+    try {
+      const { shares } = await api(`shares${shareCtxPath ? `?path=${encodeURIComponent(shareCtxPath)}` : ""}`);
+      $("share-list-title").textContent = shareCtxPath ? `Links for this ${entryAt(shareCtxPath)?.kind === "dir" ? "folder" : "file"}` : "All links";
+      if (!shares.length) { list.innerHTML = '<div class="share-item muted">No links yet.</div>'; return; }
+      list.innerHTML = shares.map(sh => {
+        const status = sh.revoked_at ? "revoked" : sh.expired ? "expired" : sh.expires_at ? `expires ${fmtDate(sh.expires_at)}` : "never expires";
+        return `<div class="share-item${sh.active ? "" : " dead"}" data-id="${sh.id}">
+          <span>${sh.kind === "dir" ? "📁" : "📄"}</span>
+          <span class="p" title="${esc(sh.path)}">${esc(shareCtxPath ? (sh.label || "(no label)") : sh.path)}<small>${esc(shareCtxPath ? "" : (sh.label ? sh.label + " · " : ""))}created ${esc(timeAgo(sh.created_at))}${sh.created_by ? ` by ${esc(sh.created_by)}` : ""} · used ${sh.uses}×</small></span>
+          <span class="st">${esc(status)}</span>
+          ${sh.active ? `<button type="button" class="btn btn-sm btn-danger" data-revoke="${sh.id}">Revoke</button>` : ""}
+        </div>`;
+      }).join("");
+      list.querySelectorAll("[data-revoke]").forEach(b => b.addEventListener("click", async () => {
+        try { await api("share/revoke", { method: "POST", body: JSON.stringify({ id: Number(b.dataset.revoke) }) }); toast("Link revoked"); await loadShareList(); }
+        catch (e) { $("share-error").textContent = e.message; }
+      }));
+    } catch (e) { list.innerHTML = `<div class="share-item">${esc(e.message)}</div>`; }
+  }
+  $("share-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!shareCtxPath) return;
+    const btn = $("share-create");
+    btn.disabled = true;
+    $("share-error").textContent = "";
+    try {
+      const hours = $("share-expiry").value;
+      const r = await api("share", { method: "POST", body: JSON.stringify({ path: shareCtxPath, expires_in_hours: hours ? Number(hours) : null, label: $("share-label").value }) });
+      const full = new URL(r.url, location.href).href;
+      $("share-url").value = full;
+      $("share-result").hidden = false;
+      $("share-url").focus(); $("share-url").select();
+      navigator.clipboard?.writeText(full).then(() => toast("Link created and copied")).catch(() => toast("Link created"));
+      await loadShareList();
+    } catch (err) { $("share-error").textContent = err.message; }
+    finally { btn.disabled = false; }
+  });
+  $("share-copy").addEventListener("click", () => {
+    const v = $("share-url").value;
+    if (!v) return;
+    navigator.clipboard?.writeText(v).then(() => toast("Link copied")).catch(() => { $("share-url").select(); });
+  });
+  $("shares-btn").addEventListener("click", () => openShareDialog(null));
 
   // ---------- Move / copy to a chosen folder ----------
   function pickFolder({ title, text, ok, disabled = new Set(), initial = state.cwd }) {

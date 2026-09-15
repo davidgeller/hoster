@@ -13,7 +13,9 @@ import {
   deleteRepoVersion, createRepoFolder, renameRepoPath, deleteRepoPaths, listRepoTrash, restoreRepoTrash, purgeRepoTrash,
   repoStats, repoUsedBytes, zipRepoPaths, exportRepoBackup, importRepoBackup, setRepoBanner, repoBannerPath,
   normalizeRepoPath, mimeForName, previewKind, repoDir, purgeExpiredRepoTrash, moveRepoPaths, copyRepoPaths,
+  createRepoShare, listRepoShares, revokeRepoShare, resolveRepoShare,
 } from "../src/repo";
+import { renameRepoPath as renameRepoPathForTest } from "../src/repo";
 import { getSite, deleteSite, updateRepoSettings, setSiteAllowedCountries, deploySite, createBlankSite, checkSiteHealth, rebuildCurrentSymlinks } from "../src/sites";
 import { createAdminUser } from "../src/auth";
 import { isCountryAllowed, setAllowedCountries } from "../src/analytics";
@@ -318,6 +320,23 @@ describe("per-site country restrictions", () => {
   });
 });
 
+// Send an HTTP/1.1 GET with the path exactly as written (no client-side URL
+// normalization) and return the status code.
+function rawGet(port: number, path: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    let buf = "";
+    Bun.connect({
+      hostname: "127.0.0.1", port,
+      socket: {
+        open(sock) { sock.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`); },
+        data(_sock, data) { buf += data.toString(); },
+        close() { const m = /^HTTP\/1\.[01] (\d{3})/.exec(buf); m ? resolve(parseInt(m[1], 10)) : reject(new Error("no status: " + buf.slice(0, 80))); },
+        error(_sock, err) { reject(err); },
+      },
+    });
+  });
+}
+
 describe("repository HTTP surface", () => {
   const PORT = 39611 + Math.floor(Math.random() * 200);
   let server: ReturnType<typeof createServer>;
@@ -501,6 +520,65 @@ describe("repository HTTP surface", () => {
       body: JSON.stringify({ username: "repouser", password: "wrong" }),
     });
     expect(bad.status).toBe(401);
+  });
+
+  test("share links: anonymous access to a file or folder, expiry, revocation", async () => {
+    updateRepoSettings(SITE, { visibility: "private" });
+    const h = { Cookie: adminCookie, "X-CSRF-Token": adminCsrf, "Content-Type": "application/json" };
+    // Anonymous can't create links.
+    expect((await fetch(`${base()}/${SITE}/_repo/api/share`, { method: "POST", body: JSON.stringify({ path: "hello.txt" }) })).status).toBe(401);
+    const created = await (await fetch(`${base()}/${SITE}/_repo/api/share`, { method: "POST", headers: h, body: JSON.stringify({ path: "hello.txt", expires_in_hours: 24, label: "for Sam" }) })).json();
+    expect(created.url).toMatch(new RegExp(`^/${SITE}/_repo/s/[A-Za-z0-9_-]{40,}$`));
+    expect(created.share.label).toBe("for Sam");
+    expect(created.share.expires_at).not.toBeNull();
+    // The link works with no cookie on a private repository, serves inline, and downloads with ?dl=1.
+    const viaLink = await fetch(`${base()}${created.url}`);
+    expect(viaLink.status).toBe(200);
+    expect(await viaLink.text()).toBe("hello world");
+    expect((await fetch(`${base()}${created.url}?dl=1`)).headers.get("content-disposition")).toMatch(/^attachment/);
+    // Token is stored hashed; a wrong token yields the "gone" page, not an oracle.
+    expect(db.query("SELECT token_hash FROM repo_shares WHERE id = ?").get(created.share.id)).not.toEqual({ token_hash: created.url.split("/").pop() });
+    const bad = await fetch(`${base()}/${SITE}/_repo/s/${"x".repeat(43)}`);
+    expect(bad.status).toBe(404);
+    expect(await bad.text()).toContain("no longer available");
+    // Folder share: listing page, file inside it, zip of the folder, nothing outside.
+    const folder = await (await fetch(`${base()}/${SITE}/_repo/api/share`, { method: "POST", headers: h, body: JSON.stringify({ path: "d" }) })).json();
+    expect(folder.share.kind).toBe("dir");
+    expect(folder.share.expires_at).toBeNull();
+    const page = await fetch(`${base()}${folder.url}`);
+    expect(page.headers.get("content-type")).toContain("text/html");
+    expect(page.headers.get("content-security-policy")).toContain("default-src 'none'");
+    const pageHtml = await page.text();
+    expect(pageHtml).toContain("new.txt");
+    expect(pageHtml).not.toContain("evil.html"); // root-level file, outside the shared folder
+    expect(await (await fetch(`${base()}${folder.url}/new.txt`)).text()).toBe("edited in place");
+    // fetch() normalizes both ".." and "%2e%2e" away before sending, so use a
+    // raw socket to make sure the server itself refuses a traversal attempt.
+    // The server collapses the segment before routing (302 back to the
+    // repository root) or refuses it (404); it must never serve the file.
+    expect([302, 404]).toContain(await rawGet(PORT, `${folder.url}/%2e%2e/evil.html`));
+    expect([302, 404]).toContain(await rawGet(PORT, `${folder.url}/../evil.html`));
+    const zip = await fetch(`${base()}${folder.url}?dl=1`);
+    expect(zip.headers.get("content-type")).toBe("application/zip");
+    // Listing shows both; revoke kills the file link immediately.
+    const all = await (await fetch(`${base()}/${SITE}/_repo/api/shares`, { headers: { Cookie: adminCookie } })).json();
+    expect(all.shares.length).toBe(2);
+    expect(all.shares.find((x: any) => x.id === created.share.id).uses).toBeGreaterThanOrEqual(2);
+    const rev = await fetch(`${base()}/${SITE}/_repo/api/share/revoke`, { method: "POST", headers: h, body: JSON.stringify({ id: created.share.id }) });
+    expect(rev.status).toBe(200);
+    expect((await fetch(`${base()}${created.url}`)).status).toBe(404);
+    // Expiry is enforced; renaming the target breaks the link; invalid expiry refused.
+    db.run("UPDATE repo_shares SET expires_at = datetime('now', '-1 minute') WHERE id = ?", folder.share.id);
+    expect((await fetch(`${base()}${folder.url}`)).status).toBe(404);
+    expect(listRepoShares(SITE).find(x => x.id === folder.share.id)!.expired).toBe(true);
+    const { share: s3, token } = createRepoShare(SITE, "d/new.txt", { expires_in_hours: 1 });
+    expect(resolveRepoShare(SITE, token)!.id).toBe(s3.id);
+    renameRepoPathForTest(SITE, "d/new.txt", "d/renamed.txt");
+    expect(resolveRepoShare(SITE, token)).toBeNull();
+    expect(() => createRepoShare(SITE, "d/renamed.txt", { expires_in_hours: 0 })).toThrow(/Expiry/);
+    expect(() => createRepoShare(SITE, "nope", {})).toThrow(/does not exist/);
+    expect(revokeRepoShare(SITE, 999999)).toBe(false);
+    updateRepoSettings(SITE, { visibility: "public" });
   });
 
   test("per-site country override is enforced on the wire", async () => {

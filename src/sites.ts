@@ -612,6 +612,7 @@ export function deleteSite(slug: string): boolean {
   db.run("DELETE FROM requests WHERE site_slug = ?", slug);
   // Repository metadata (tables are created by repo.ts; they exist by the
   // time any site can be deleted because index.ts imports the module).
+  try { db.run("DELETE FROM repo_shares WHERE site_slug = ?", slug); } catch (_) {}
   try { db.run("DELETE FROM repo_versions WHERE site_slug = ?", slug); } catch (_) {}
   try { db.run("DELETE FROM repo_files WHERE site_slug = ?", slug); } catch (_) {}
   try { db.run("DELETE FROM repo_blobs WHERE site_slug = ?", slug); } catch (_) {}

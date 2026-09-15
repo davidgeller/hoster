@@ -4,7 +4,7 @@ import { cleanExpiredSessions, cleanExpiredPending2fa, migrateLegacyAdmin } from
 import { cleanExpiredChallenges } from "./webauthn";
 import { pruneExpired as pruneExpiredOauth } from "./oauth";
 import { rebuildCurrentSymlinks } from "./sites";
-import { purgeExpiredRepoTrash, cleanRepoTemp } from "./repo";
+import { purgeExpiredRepoTrash, cleanRepoTemp, purgeStaleRepoShares } from "./repo";
 
 export const VERSION = "__BUILD_VERSION__";
 const PORT = parseInt(process.env.PORT || "3500");
@@ -58,6 +58,7 @@ function runPeriodicCleanup() {
     // abandoned upload temp files.
     purgeExpiredRepoTrash();
     cleanRepoTemp();
+    purgeStaleRepoShares();
   } catch (e: any) {
     console.error("Periodic cleanup error:", e?.message || e);
   }

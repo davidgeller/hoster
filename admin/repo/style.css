@@ -259,6 +259,22 @@ label input { display: block; width: 100%; margin-top: 4px; }
 .modal-card > p { margin-bottom: 14px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 
+/* --- Share links --- */
+.share-card { max-width: 620px; }
+.share-row { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+.share-row label { margin-bottom: 0; }
+.share-row select { width: 100%; margin-top: 4px; display: block; }
+.share-result { display: flex; gap: 6px; margin-top: 12px; }
+.share-result input { flex: 1; font-family: var(--font-mono); font-size: 0.8rem; }
+.share-list-title { font-size: 0.75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); margin: 16px 0 6px; }
+.share-list { max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.share-item { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-bottom: 1px solid var(--border); font-size: 0.82rem; }
+.share-item:last-child { border-bottom: 0; }
+.share-item .p { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.share-item .p small { display: block; color: var(--text-muted); }
+.share-item.dead { opacity: .55; }
+.share-item .st { white-space: nowrap; color: var(--text-secondary); }
+
 /* --- Folder picker --- */
 .folder-tree { max-height: 320px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 4px; margin: 8px 0 4px; }
 .folder-tree button { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; border: 0; background: transparent; color: var(--text); font: inherit; font-size: 0.88rem; padding: 5px 8px; border-radius: var(--radius-sm); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

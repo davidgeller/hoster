@@ -25,11 +25,13 @@ import {
   type Principal,
 } from "./auth";
 import type { Site } from "./sites";
+import type { RepoFile } from "./repo";
 import {
   listRepoTree, readRepoContent, stageBlob, commitRepoFile, writeRepoText, createRepoFolder, renameRepoPath,
   deleteRepoPaths, moveRepoPaths, copyRepoPaths, listRepoTrash, restoreRepoTrash, purgeRepoTrash, listRepoVersions, restoreRepoVersion, deleteRepoVersion,
   zipRepoPaths, repoStats, repoBannerPath, setRepoBanner, clearRepoBanner, previewKind, isTextMime, mimeForName,
   REPO_MAX_FILE_BYTES, TRASH_TTL_DAYS, repoQuotaRemaining,
+  createRepoShare, listRepoShares, revokeRepoShare, resolveRepoShare, listSharedFolder, type RepoShare,
 } from "./repo";
 
 const BASE_DIR = process.env.HOSTER_HOME || dirname(process.execPath);
@@ -115,6 +117,43 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
     return new Response(Bun.file(banner.abs), {
       headers: { "Content-Type": banner.mime, "Cache-Control": "no-cache", "Content-Length": String(st.size), "ETag": `W/"${st.mtimeMs.toString(36)}-${st.size.toString(36)}"` },
     });
+  }
+
+  // --- Share links: anonymous read access to one file or folder ---
+  //   _repo/s/<token>              file → content; folder → listing page
+  //   _repo/s/<token>?dl=1         file download / folder as ZIP
+  //   _repo/s/<token>/<sub/path>   a file inside a shared folder
+  const shareMatch = reqPath.match(/^_repo\/s\/([A-Za-z0-9_-]{20,64})(?:\/(.*))?$/);
+  if (shareMatch) {
+    if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method not allowed", { status: 405 });
+    const share = resolveRepoShare(site.slug, shareMatch[1]);
+    const sub = shareMatch[2] ? decodeURIComponent(shareMatch[2]) : "";
+    if (!share) return shareGone(ctx.basePath);
+    const wantDl = url.searchParams.get("dl") === "1";
+    try {
+      if (share.kind === "file") {
+        if (sub) return shareGone(ctx.basePath);
+        const content = readRepoContent(site.slug, share.path);
+        if (!content) return shareGone(ctx.basePath);
+        return serveContent(req, content.abs, content.size, content.mime, content.name, content.sha256, wantDl);
+      }
+      // Folder share.
+      if (sub) {
+        const full = `${share.path}/${sub}`;
+        const content = readRepoContent(site.slug, full);
+        if (!content) return new Response("Not found", { status: 404 });
+        return serveContent(req, content.abs, content.size, content.mime, content.name, content.sha256, wantDl);
+      }
+      if (wantDl) {
+        const result = await zipRepoPaths(site.slug, [share.path], share.path.split("/").pop());
+        return new Response(result.file, {
+          headers: { "Content-Type": "application/zip", "Content-Disposition": contentDisposition("attachment", result.filename), "Content-Length": String(result.size), "Cache-Control": "no-store" },
+        });
+      }
+      return sharedFolderPage(site, share, shareMatch[1], ctx.basePath);
+    } catch (e: any) {
+      return new Response("Not found", { status: 404 });
+    }
   }
 
   if (!reqPath.startsWith("_repo/api/")) {
@@ -239,6 +278,12 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
     if (!auth.canWrite) return json({ error: "Forbidden" }, 403);
     return json({ entries: listRepoTrash(site.slug), ttl_days: TRASH_TTL_DAYS });
   }
+  if (api === "shares" && req.method === "GET") {
+    if (!auth.canWrite) return json({ error: "Forbidden" }, 403);
+    const forPath = url.searchParams.get("path");
+    try { return json({ shares: listRepoShares(site.slug, forPath || null) }); }
+    catch (e: any) { return json({ error: e.message }, 400); }
+  }
 
   // --- Writes: session + CSRF + write access ---
   if (req.method === "GET") return json({ error: "Not found" }, 404);
@@ -247,6 +292,22 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
   if (!auth.canWrite) return json({ error: "You can view this repository but not change it" }, 403);
 
   try {
+    if (api === "share" && req.method === "POST") {
+      const body = await readJson<{ path?: unknown; expires_in_hours?: unknown; label?: unknown }>(req);
+      if (!body || typeof body.path !== "string") return json({ error: "path is required" }, 400);
+      const hours = body.expires_in_hours == null || body.expires_in_hours === "" ? null : Number(body.expires_in_hours);
+      const { share, token } = createRepoShare(site.slug, body.path, { expires_in_hours: hours, label: typeof body.label === "string" ? body.label : null, actor });
+      audit("repo_share_created", `${site.slug}:${share.path} (${share.expires_at ? `until ${share.expires_at}` : "no expiry"})`);
+      return json({ ok: true, share, url: `${ctx.basePath}_repo/s/${token}` });
+    }
+    if (api === "share/revoke" && req.method === "POST") {
+      const body = await readJson<{ id?: unknown }>(req);
+      if (!body || !Number.isInteger(body.id)) return json({ error: "id is required" }, 400);
+      const ok = revokeRepoShare(site.slug, body.id as number);
+      if (ok) audit("repo_share_revoked", `${site.slug} share #${body.id}`);
+      return ok ? json({ ok: true }) : json({ error: "Link not found or already revoked" }, 404);
+    }
+
     if (api === "upload" && req.method === "POST") {
       const path = url.searchParams.get("path") || "";
       if (!path) return json({ error: "path is required" }, 400);
@@ -443,3 +504,65 @@ function serveContent(req: Request, abs: string, size: number, mime: string, nam
 }
 
 export { mimeForName };
+
+
+// --- Share link pages ---
+
+const SHARE_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+function htmlEsc(v: unknown): string {
+  return String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
+}
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+const SHARE_STYLE = `body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;margin:0;background:#f6f7f9;color:#1a1d23}
+main{max-width:860px;margin:40px auto;padding:0 20px}h1{font-size:1.3rem;margin:0 0 4px}.muted{color:#6b7280;font-size:.9rem}
+.card{background:#fff;border:1px solid #e1e4ea;border-radius:10px;margin-top:18px;overflow:hidden}
+.row{display:flex;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid #e1e4ea;font-size:.92rem}.row:last-child{border-bottom:0}
+.row a{color:#2f6fed;text-decoration:none;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.row a:hover{text-decoration:underline}
+.row .dir{color:#1a1d23;font-weight:600}.size{color:#6b7280;font-size:.82rem;white-space:nowrap}
+.btn{display:inline-block;padding:8px 14px;border-radius:6px;background:#2f6fed;color:#fff;text-decoration:none;font-weight:600;font-size:.9rem;margin-top:14px}
+@media(prefers-color-scheme:dark){body{background:#0f1116;color:#e6e8ec}.card{background:#171a21;border-color:#2b3040}.row{border-color:#2b3040}.row .dir{color:#e6e8ec}.muted,.size{color:#a3a9b6}}`;
+
+function shareGone(basePath: string): Response {
+  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Link unavailable</title><style>${SHARE_STYLE}</style></head>
+<body><main><h1>This link is no longer available</h1><p class="muted">It may have expired, been revoked, or the item it pointed to was moved or removed.</p><p><a class="btn" href="${htmlEsc(basePath)}">Open the repository</a></p></main></body></html>`;
+  return new Response(html, { status: 404, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Content-Security-Policy": SHARE_CSP, "Referrer-Policy": "no-referrer" } });
+}
+
+// Minimal, dependency-free listing for a shared folder. Every link stays
+// under the same token; nothing outside the shared folder is reachable.
+function sharedFolderPage(site: Site, share: RepoShare, token: string, basePath: string): Response {
+  const { files, dirs } = listSharedFolder(site.slug, share);
+  const folderName = share.path.split("/").pop()!;
+  const base = `${basePath}_repo/s/${token}`;
+  const encodePath = (p: string) => p.split("/").map(encodeURIComponent).join("/");
+  // Group by immediate parent so nested folders read naturally.
+  const sections = new Map<string, RepoFile[]>();
+  for (const f of files) {
+    const dir = f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/")) : "";
+    if (!sections.has(dir)) sections.set(dir, []);
+    sections.get(dir)!.push(f);
+  }
+  for (const d of dirs) if (!sections.has(d.path)) sections.set(d.path, []);
+  const ordered = [...sections.keys()].sort((a, b) => a.localeCompare(b));
+  const body = ordered.map(dir => `
+    ${dir ? `<div class="row"><span class="dir">📁 ${htmlEsc(dir)}</span></div>` : ""}
+    ${sections.get(dir)!.map(f => `<div class="row"><a href="${htmlEsc(`${base}/${encodePath(f.path)}`)}">📄 ${htmlEsc(f.path.split("/").pop())}</a><span class="size">${fmtBytes(f.size)}</span><a class="size" href="${htmlEsc(`${base}/${encodePath(f.path)}?dl=1`)}" style="flex:0">↓</a></div>`).join("")}
+    ${!sections.get(dir)!.length && dir ? `<div class="row muted">empty</div>` : ""}`).join("");
+  const expires = share.expires_at ? `Link expires ${htmlEsc(share.expires_at)} UTC.` : "";
+  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${htmlEsc(folderName)} — ${htmlEsc(site.name)}</title><style>${SHARE_STYLE}</style></head>
+<body><main>
+  <h1>📁 ${htmlEsc(folderName)}</h1>
+  <p class="muted">Shared from ${htmlEsc(site.name)} · ${files.length} file${files.length === 1 ? "" : "s"}. ${expires}</p>
+  <a class="btn" href="${htmlEsc(base)}?dl=1">Download everything (.zip)</a>
+  <div class="card">${body || '<div class="row muted">This folder is empty.</div>'}</div>
+</main></body></html>`;
+  return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "private, no-store", "Content-Security-Policy": SHARE_CSP, "Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex" } });
+}
