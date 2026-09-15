@@ -3000,7 +3000,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
             <small>Creates the account and grants it this ${isRepo ? "repository" : "site"} right away. They sign in with these credentials${isRepo ? " — on the repository page or at /_admin" : " at /_admin"}.</small>
           </label>
           <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:6px;align-items:center">
-            <input type="text" id="settings-user-new-name" placeholder="username" pattern="[a-z0-9._\\-]{1,40}" autocomplete="off">
+            <input type="text" id="settings-user-new-name" placeholder="username or email" pattern="[A-Za-z0-9._+\\-]{1,64}(@[A-Za-z0-9\\-]+(\\.[A-Za-z0-9\\-]+)+)?" title="A handle or an email address" autocomplete="off">
             <input type="password" id="settings-user-new-password" placeholder="password (min 8 chars)" minlength="8" autocomplete="new-password">
             <button type="button" class="btn btn-sm btn-primary" id="settings-user-add-btn">Add</button>
           </div>

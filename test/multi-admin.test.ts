@@ -308,3 +308,18 @@ describe("admin API authorization", () => {
     expect(root).toBeGreaterThan(0);
   });
 });
+
+describe("email addresses as usernames", () => {
+  test("accepts and normalizes emails, keeps handles, rejects junk", async () => {
+    const { validateUsername } = await import("../src/auth");
+    expect(validateUsername("Sam.Jones+docs@Example.COM")).toBe("sam.jones+docs@example.com");
+    expect(validateUsername("plain_handle-1")).toBe("plain_handle-1");
+    expect(() => validateUsername("no spaces@example.com")).toThrow(/handle .* email/);
+    expect(() => validateUsername("@example.com")).toThrow();
+    expect(() => validateUsername("sam@nodot")).toThrow();
+    expect(() => validateUsername("a".repeat(65) + "@example.com")).toThrow();
+    const id = await createAdminUser("Pat@Example.org", "pat-password-1", { isAdmin: false, sites: [] });
+    expect(getUserByUsername("PAT@example.org")!.userId).toBe(id);
+    expect((await verifyUserPassword("pat@EXAMPLE.org", "pat-password-1", "10.0.0.9"))!.userId).toBe(id);
+  });
+});

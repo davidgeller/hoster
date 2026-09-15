@@ -15,7 +15,7 @@
         <div class="logo">HOSTER</div>
         <p class="subtitle">Create the first administrator account to get started.</p>
         <form id="setup-form">
-          <input type="text" id="setup-username" placeholder="Username" value="admin" pattern="[a-z0-9._\-]{1,40}" autocomplete="username" required>
+          <input type="text" id="setup-username" placeholder="Username" value="admin" pattern="[A-Za-z0-9._+\-]{1,64}(@[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)+)?" title="A handle or an email address" autocomplete="username" required>
           <input type="password" id="setup-password" placeholder="Choose a password (8+ chars)" autocomplete="new-password" required minlength="8">
           <input type="password" id="setup-confirm" placeholder="Confirm password" autocomplete="new-password" required>
           <button type="submit" class="btn btn-primary btn-block">Create Account</button>
@@ -477,7 +477,7 @@
               <div id="users-list" class="mb-2"></div>
               <h4 style="margin:16px 0 8px;font-size:0.9rem">Add an account</h4>
               <form id="user-add-form" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-                <input type="text" id="user-new-username" placeholder="username" pattern="[a-z0-9._\-]{1,40}" autocomplete="off" style="flex:1;min-width:140px">
+                <input type="text" id="user-new-username" placeholder="username or email" pattern="[A-Za-z0-9._+\-]{1,64}(@[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)+)?" title="A handle or an email address" autocomplete="off" style="flex:1;min-width:140px">
                 <input type="password" id="user-new-password" placeholder="password (min 8 chars)" minlength="8" autocomplete="new-password" style="flex:1;min-width:160px">
                 <label style="display:inline-flex;align-items:center;gap:6px;font-weight:normal;margin:0">
                   <input type="checkbox" id="user-new-admin" style="width:auto;margin:0"> Administrator

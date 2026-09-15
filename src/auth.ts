@@ -64,7 +64,11 @@ try { db.exec("ALTER TABLE audit_log ADD COLUMN actor TEXT"); } catch (_) {}
 // Which account a pending 2FA token belongs to.
 try { db.exec("ALTER TABLE pending_2fa ADD COLUMN user_id INTEGER"); } catch (_) {}
 
-const USERNAME_PATTERN = /^[a-z0-9._-]{1,40}$/;
+// A plain handle (letters, digits, dot, dash, underscore, plus) or an email
+// address. Usernames are lowercased on save, so emails compare
+// case-insensitively — which is how mail providers treat them in practice.
+const USERNAME_PATTERN = /^[a-z0-9._+-]{1,64}(@[a-z0-9-]+(\.[a-z0-9-]+)+)?$/;
+const MAX_USERNAME_LENGTH = 254;
 
 export function normalizeUsername(username: string): string {
   return (username || "").trim().toLowerCase();
@@ -73,8 +77,8 @@ export function normalizeUsername(username: string): string {
 export function validateUsername(username: string): string {
   const normalized = normalizeUsername(username);
   if (!normalized) throw new Error("Username is required");
-  if (!USERNAME_PATTERN.test(normalized)) {
-    throw new Error("Username must be 1–40 chars: lowercase letters, digits, dot, dash, underscore");
+  if (normalized.length > MAX_USERNAME_LENGTH || !USERNAME_PATTERN.test(normalized)) {
+    throw new Error("Username must be a handle (letters, digits, dot, dash, underscore) or an email address");
   }
   return normalized;
 }

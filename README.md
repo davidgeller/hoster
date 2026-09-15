@@ -51,7 +51,7 @@ In every case the Hoster binary itself is identical — only the front-end TLS l
 - **Analytics dashboard** — request logs, visitor stats, countries, top pages, status codes, blocked request intelligence, min/avg/max response times
 - **Country allow-list with a real picker** — search countries by name or code, add them from a list of who actually visited last week, and never look up an ISO code again; the server validates every code it saves
 - **IP auto-blocking** — automatically block IPs that accumulate too many denied requests, with configurable thresholds and duration
-- **Multiple administrators and site users** — every person gets their own username and password; any number of accounts can be administrators, and site users see only the sites assigned to them. Every account can enable TOTP and register passkeys
+- **Multiple administrators and site users** — every person gets their own username (a handle or an email address) and password; any number of accounts can be administrators, and site users see only the sites assigned to them. Every account can enable TOTP and register passkeys
 - **Secure auth** — Argon2id password hashing, passkeys (WebAuthn) for passwordless sign-in, TOTP two-factor authentication, session tokens, CSRF protection, rate-limited login, step-up password checks for sensitive changes, per-actor audit log
 - **File manager** — browse, upload, create folders, rename/move, duplicate, and delete files or whole folders in a site's working version, with bulk selection and auto-snapshot before the first destructive change
 - **Release notes on versions** — attach a label and free-text notes to any deploy or snapshot (from the admin UI or MCP) and edit them later, so every admin can see what changed and why
