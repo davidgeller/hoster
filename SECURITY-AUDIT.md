@@ -620,6 +620,7 @@ Moving from one administrator to many introduces two risks that did not exist be
 - Raw content: `X-Content-Type-Options: nosniff`, strong content-hash ETag, `Content-Disposition` with RFC 5987 encoding. HTML/SVG/XML are only served inline under `Content-Security-Policy: sandbox` (opaque origin, no script), Markdown is served as `text/plain`, and office/unknown types are always attachments — a hostile document can't run script on the site's origin or read the admin cookie.
 - The built-in UI runs under `script-src 'self'` with no inline handlers; all user-controlled strings pass through `esc()`; the Markdown renderer escapes the whole input before pattern matching and rejects non-http(s)/mailto link schemes.
 - Per-site country lists are validated against the ISO table (`normalizeCountryCodes`), so a typo can't lock a site out silently.
+- Passkey sign-in on the repository page reuses the admin panel's WebAuthn implementation unchanged (same challenge store, same RP/origin binding, discoverable credentials so no credential IDs are disclosed before authentication, same per-IP lockout, session rotation on success). The ceremony is refused with a generic error until at least one passkey exists for the hostname.
 - Per-site user management reuses the existing `/users` endpoints (administrator-only, step-up for anything touching an administrator account).
 
 ### Known limitations / accepted risks

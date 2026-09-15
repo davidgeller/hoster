@@ -234,6 +234,9 @@
         ? `You're signed in as ${info.auth.username}, but this repository isn't shared with your account.`
         : "These documents are private. Sign in with your Hoster account to continue.";
       $("gate-signin").textContent = info.auth.authenticated ? "Switch account" : "Sign in";
+      $("gate-passkey").hidden = info.auth.authenticated || !passkeyAvailable();
+      $("gate-signin").classList.toggle("btn-primary", info.auth.authenticated || !passkeyAvailable());
+      $("gate-error").textContent = "";
     }
   }
 
@@ -1116,8 +1119,65 @@
     render();
   }
 
+  // ---------- Passkeys (WebAuthn) ----------
+  // Same wire format as the admin panel: the server speaks base64url JSON,
+  // the browser API wants ArrayBuffers.
+  function b64uToBuf(value) {
+    const b64 = value.replace(/-/g, "+").replace(/_/g, "/");
+    const bin = atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes.buffer;
+  }
+  function bufToB64u(buf) {
+    const bytes = new Uint8Array(buf);
+    let bin = "";
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  const passkeysInBrowser = () => typeof window.PublicKeyCredential !== "undefined" && !!(navigator.credentials && navigator.credentials.get);
+  function passkeyAvailable() { return !!state.info?.passkey_enabled && passkeysInBrowser(); }
+  async function signInWithPasskey(errEl, btn) {
+    errEl.textContent = "";
+    btn.disabled = true;
+    try {
+      const options = await api("auth/passkey/options", { method: "POST", body: "{}" });
+      const assertion = await navigator.credentials.get({
+        publicKey: {
+          ...options,
+          challenge: b64uToBuf(options.challenge),
+          allowCredentials: (options.allowCredentials || []).map(c => ({ ...c, id: b64uToBuf(c.id) })),
+        },
+      });
+      if (!assertion) throw new Error("No passkey selected");
+      const r = assertion.response;
+      const result = await api("auth/passkey/verify", {
+        method: "POST",
+        body: JSON.stringify({ response: {
+          id: assertion.id, rawId: bufToB64u(assertion.rawId), type: assertion.type,
+          clientExtensionResults: assertion.getClientExtensionResults(),
+          authenticatorAttachment: assertion.authenticatorAttachment || undefined,
+          response: {
+            clientDataJSON: bufToB64u(r.clientDataJSON), authenticatorData: bufToB64u(r.authenticatorData),
+            signature: bufToB64u(r.signature), userHandle: r.userHandle ? bufToB64u(r.userHandle) : undefined,
+          },
+        } }),
+      });
+      closeModals();
+      state.csrf = result.csrf_token;
+      await boot();
+      toast(`Signed in as ${result.username}`);
+    } catch (err) {
+      // NotAllowedError is the user dismissing the OS prompt — not worth an error.
+      errEl.textContent = err.name === "NotAllowedError" ? "" : err.message;
+    } finally { btn.disabled = false; }
+  }
+  $("signin-passkey-btn").addEventListener("click", () => signInWithPasskey($("signin-error"), $("signin-passkey-btn")));
+  $("gate-passkey").addEventListener("click", () => signInWithPasskey($("gate-error"), $("gate-passkey")));
+
   // ---------- Sign in / out ----------
   function openSignIn() {
+    $("signin-passkey-block").hidden = !passkeyAvailable();
     $("signin-error").textContent = "";
     $("signin-code-row").hidden = true;
     $("signin-code").value = "";

@@ -25,6 +25,8 @@ import {
   type Principal,
 } from "./auth";
 import type { Site } from "./sites";
+import { getRpContext, beginLogin as beginPasskeyLogin, finishLogin as finishPasskeyLogin, hasCredentialsForRp } from "./webauthn";
+import { getUser, recordLoginAttempt } from "./auth";
 import type { RepoFile } from "./repo";
 import {
   listRepoTree, readRepoContent, stageBlob, commitRepoFile, writeRepoText, createRepoFolder, renameRepoPath,
@@ -166,6 +168,7 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
   // --- Public info: what the page needs to render its shell ---
   if (api === "info" && req.method === "GET") {
     const stats = auth.canRead ? repoStats(site.slug) : null;
+    const rp = getRpContext(req);
     return json({
       slug: site.slug,
       name: site.name,
@@ -178,6 +181,10 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
       base_path: ctx.basePath,
       max_file_bytes: REPO_MAX_FILE_BYTES,
       trash_ttl_days: TRASH_TTL_DAYS,
+      // Passkeys are bound to the hostname, so both flags are answered for
+      // the host this request arrived on.
+      passkey_supported: rp !== null,
+      passkey_enabled: rp !== null && hasCredentialsForRp(rp.rpId),
       auth: {
         authenticated: !!auth.principal,
         username: auth.principal?.username ?? null,
@@ -222,6 +229,42 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
       200, { "Set-Cookie": sessionCookie(sessionToken) }
     );
   }
+  // --- Passkey sign-in (same credentials as the admin panel) ---
+  // A passkey is possession + user verification in one step, so it replaces
+  // the password/TOTP flow entirely. The credential identifies the account.
+  if (api === "auth/passkey/options" && req.method === "POST") {
+    if (isRateLimited(ctx.ip)) return json({ error: "Too many attempts. Try again later." }, 429);
+    const rp = getRpContext(req);
+    if (!rp) return json({ error: "Passkeys require HTTPS (or localhost)" }, 400);
+    try { return json(await beginPasskeyLogin(rp, ctx.ip)); }
+    catch (e: any) { return json({ error: e?.message || "Could not start passkey sign-in" }, 400); }
+  }
+  if (api === "auth/passkey/verify" && req.method === "POST") {
+    if (isRateLimited(ctx.ip)) return json({ error: "Too many attempts. Try again later." }, 429);
+    const rp = getRpContext(req);
+    if (!rp) return json({ error: "Passkeys require HTTPS (or localhost)" }, 400);
+    const body = await readJson<{ response?: any }>(req);
+    if (!body?.response) return json({ error: "Passkey response required" }, 400);
+    try {
+      const credential = await finishPasskeyLogin(rp, ctx.ip, body.response);
+      const owner = credential.user_id != null ? getUser(credential.user_id) : null;
+      if (!owner) throw new Error("Unrecognized passkey");
+      recordLoginAttempt(ctx.ip, true);
+      destroySessionsForUser(owner.userId);
+      const { sessionToken, csrfToken } = createSession(ctx.ip, owner.userId);
+      auditLog("repo_login_passkey", `${site.slug} (${credential.label})`, ctx.ip, owner.username);
+      const canWrite = userCanAccessSite(owner, site.slug);
+      return json(
+        { ok: true, csrf_token: csrfToken, username: owner.username, can_write: canWrite, can_read: site.repo_visibility === "public" || canWrite },
+        200, { "Set-Cookie": sessionCookie(sessionToken) }
+      );
+    } catch (e: any) {
+      recordLoginAttempt(ctx.ip, false);
+      auditLog("repo_login_passkey_failed", `${site.slug} ${e?.message || ""}`.trim(), ctx.ip, null);
+      return json({ error: e?.message || "Passkey sign-in failed" }, 401);
+    }
+  }
+
   if (api === "auth/logout" && req.method === "POST") {
     if (auth.token) destroySession(auth.token);
     return json({ ok: true }, 200, { "Set-Cookie": sessionCookie("deleted", 0) });

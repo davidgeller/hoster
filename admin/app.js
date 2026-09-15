@@ -2976,6 +2976,12 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
       <form id="site-settings-form">
         ${repoGeneralPanel}
         <div class="settings-tab-panel" data-panel="access">
+          ${isRepo ? `
+          <label>
+            Signing in on the repository page
+            <small>The repository's own sign-in accepts every Hoster account: username and password (plus the account's authentication code when 2FA is on), or a <strong>passkey</strong>. A "Sign in with a passkey" button appears automatically on the sign-in dialog and on the private-repository gate whenever an account has registered a passkey for this hostname (Settings → Account → Passkeys). Passkeys are bound to the hostname, so register one on each address you use — including any custom domain aliased to this repository.</small>
+          </label>
+          <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">` : ""}
           <div id="settings-access-countries"></div>
         </div>
         ${isSuperAdmin ? `

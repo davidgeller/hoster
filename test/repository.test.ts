@@ -581,6 +581,26 @@ describe("repository HTTP surface", () => {
     updateRepoSettings(SITE, { visibility: "public" });
   });
 
+  test("passkey sign-in endpoints are exposed on the repository page", async () => {
+    // Loopback counts as a secure context, so the RP resolves; no passkeys
+    // are registered yet, so the page must not offer the button.
+    const info = await (await fetch(`${base()}/${SITE}/_repo/api/info`)).json();
+    expect(info.passkey_supported).toBe(true);
+    expect(info.passkey_enabled).toBe(false);
+    // …and the server refuses to start a ceremony until one exists (the
+    // same rule the admin panel applies), rather than leaking which do.
+    const options = await fetch(`${base()}/${SITE}/_repo/api/auth/passkey/options`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    expect(options.status).toBe(400);
+    expect((await options.json()).error).toMatch(/No passkeys registered/);
+    // Garbage assertion is refused without a session and counts as a failed attempt.
+    const verify = await fetch(`${base()}/${SITE}/_repo/api/auth/passkey/verify`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ response: { id: "x", rawId: "eA", type: "public-key", response: {} } }) });
+    expect(verify.status).toBe(401);
+    expect(verify.headers.get("set-cookie")).toBeNull();
+    // A non-secure origin gets a clear error rather than a broken flow.
+    const insecure = await fetch(`${base()}/${SITE}/_repo/api/auth/passkey/options`, { method: "POST", headers: { Origin: "http://example.com" }, body: "{}" });
+    expect(insecure.status).toBe(400);
+  });
+
   test("per-site country override is enforced on the wire", async () => {
     setAllowedCountries(["US"]);
     try {
