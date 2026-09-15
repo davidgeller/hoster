@@ -2927,7 +2927,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
           <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
           <label>
             Banner image
-            <small>Shown as a full-width strip across the top of the repository page. <strong>Best at a 5:1 aspect ratio — 1600 × 320 px, or 2400 × 480 px for sharp high-DPI screens.</strong> The image is scaled to the page width and cropped from the centre on narrow screens, so keep the subject in the middle. PNG, JPEG, WebP, or GIF up to 8 MB.</small>
+            <small>Shown as a full-width strip across the top of the repository page. <strong>Best at a 5:1 aspect ratio — 1600 × 320 px, or 2400 × 480 px for sharp high-DPI screens.</strong> The image always spans the full page width; on very wide or very narrow screens a little of the top and bottom is cropped (from the centre), so keep the subject in the middle. PNG, JPEG, WebP, or GIF up to 8 MB.</small>
           </label>
           <div id="settings-banner-preview" style="margin-bottom:8px">${siteRecord.repo_banner ? `<img src="/${esc(slug)}/_repo/banner?t=${Date.now()}" alt="" style="max-width:100%;max-height:120px;border-radius:6px;border:1px solid var(--border)">` : '<span class="text-sm text-muted">No banner set.</span>'}</div>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">

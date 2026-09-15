@@ -27,6 +27,8 @@ import {
 import type { Site } from "./sites";
 import { getRpContext, beginLogin as beginPasskeyLogin, finishLogin as finishPasskeyLogin, hasCredentialsForRp } from "./webauthn";
 import { getUser, recordLoginAttempt } from "./auth";
+import { buildWebLink, serializeWebLink, webLinkFileName, fetchLinkPreview, WEBLINK_MIME } from "./weblink";
+import { putRepoFile } from "./repo";
 import type { RepoFile } from "./repo";
 import {
   listRepoTree, readRepoContent, stageBlob, commitRepoFile, writeRepoText, createRepoFolder, renameRepoPath,
@@ -43,7 +45,7 @@ const REPO_UI_DIR = join(BASE_DIR, "admin", "repo");
 // UI bundle (no inline handlers), media/images/frames from this origin so the
 // previews work, and frame-ancestors 'self' so the admin Site Explorer can
 // embed the page.
-const UI_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; " +
+const UI_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; " +
   "media-src 'self' blob:; frame-src 'self'; object-src 'self'; connect-src 'self'; font-src 'self'; " +
   "base-uri 'self'; form-action 'self'; frame-ancestors 'self'";
 
@@ -369,6 +371,38 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
       return json({ ok: true, ...result });
     }
 
+    // --- Web links (stored as .weblink JSON files) ---
+    if (api === "link-preview" && req.method === "POST") {
+      const body = await readJson<{ url?: unknown }>(req);
+      if (!body || typeof body.url !== "string") return json({ error: "url is required" }, 400);
+      try {
+        const preview = await fetchLinkPreview(body.url);
+        return json({ ok: true, preview });
+      } catch (e: any) {
+        return json({ error: `Couldn't fetch that page: ${e?.message || "unknown error"}` }, 400);
+      }
+    }
+    if (api === "link" && req.method === "POST") {
+      const body = await readJson<{ path?: unknown; dir?: unknown; url?: unknown; title?: unknown; description?: unknown; image?: unknown; site_name?: unknown; fetched_at?: unknown; note?: unknown }>(req);
+      if (!body) return json({ error: "Invalid request body" }, 400);
+      const link = buildWebLink(body);
+      // Either update an existing link file (`path`) or create a new one in `dir`.
+      let target: string;
+      let replace: boolean;
+      if (typeof body.path === "string" && body.path) { target = body.path; replace = true; }
+      else {
+        const dir = typeof body.dir === "string" ? body.dir.replace(/^\/+|\/+$/g, "") : "";
+        target = (dir ? dir + "/" : "") + webLinkFileName(link.title);
+        replace = false;
+      }
+      if (!target.endsWith(".weblink")) return json({ error: "Links must be .weblink files" }, 400);
+      const result = await putRepoFile(site.slug, target, serializeWebLink(link), {
+        actor, replace, mime: WEBLINK_MIME, note: typeof body.note === "string" ? body.note : (replace ? null : "Link created"),
+      });
+      audit("repo_link_saved", `${site.slug}:${result.file.path} -> ${link.url}`);
+      return json({ ok: true, ...result, link });
+    }
+
     if (api === "text" && req.method === "POST") {
       const body = await readJson<{ path?: unknown; content?: unknown; note?: unknown; create?: unknown }>(req);
       if (!body || typeof body.path !== "string" || typeof body.content !== "string") return json({ error: "path and content are required" }, 400);
@@ -522,6 +556,7 @@ function serveContent(req: Request, abs: string, size: number, mime: string, nam
   // Markdown previews are rendered client-side from the text; the raw route
   // serves it as plain text so nothing tries to interpret it.
   if (mime === "text/markdown") headers["Content-Type"] = "text/plain; charset=utf-8";
+  if (mime === "application/x-hoster-weblink") headers["Content-Type"] = "application/json; charset=utf-8";
 
   const file = Bun.file(abs);
   const range = req.headers.get("range");

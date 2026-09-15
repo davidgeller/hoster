@@ -178,6 +178,7 @@ const MIME: Record<string, string> = {
   ".odt": "application/vnd.oasis.opendocument.text", ".ods": "application/vnd.oasis.opendocument.spreadsheet",
   ".odp": "application/vnd.oasis.opendocument.presentation", ".rtf": "application/rtf", ".epub": "application/epub+zip",
   ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf", ".otf": "font/otf",
+  ".weblink": "application/x-hoster-weblink",
 };
 
 export function mimeForName(name: string): string {
@@ -190,8 +191,9 @@ export function mimeForName(name: string): string {
 // navigation: a hostile document served inline on the site's origin could run
 // script with the visitor's cookies. SVG is still fine inside an <img>, which
 // is how the UI previews it (see repo-site.ts for the sandboxed raw route).
-export function previewKind(mime: string | null): "image" | "video" | "audio" | "pdf" | "text" | "markdown" | "none" {
+export function previewKind(mime: string | null): "image" | "video" | "audio" | "pdf" | "text" | "markdown" | "link" | "none" {
   if (!mime) return "none";
+  if (mime === "application/x-hoster-weblink") return "link";
   if (mime.startsWith("image/")) return "image";
   if (mime.startsWith("video/")) return "video";
   if (mime.startsWith("audio/")) return "audio";

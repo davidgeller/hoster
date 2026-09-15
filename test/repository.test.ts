@@ -20,6 +20,7 @@ import { getSite, deleteSite, updateRepoSettings, setSiteAllowedCountries, deplo
 import { createAdminUser } from "../src/auth";
 import { isCountryAllowed, setAllowedCountries } from "../src/analytics";
 import { createServer } from "../src/server";
+import { buildWebLink, parseWebLink, serializeWebLink, webLinkFileName, extractOpenGraph, normalizeLinkUrl } from "../src/weblink";
 import db from "../src/db";
 
 const SLUG = "docs-test";
@@ -288,6 +289,39 @@ describe("repository storage", () => {
     deleteSite("docs-gone");
     expect(existsSync(repoDir("docs-gone"))).toBe(false);
     expect(db.query("SELECT COUNT(*) AS n FROM repo_files WHERE site_slug = 'docs-gone'").get()).toEqual({ n: 0 });
+  });
+});
+
+describe("web links", () => {
+  test("URL normalization and validation", () => {
+    expect(normalizeLinkUrl("example.com/a b")).toBe("https://example.com/a%20b");
+    expect(normalizeLinkUrl(" HTTP://Example.com/x ")).toBe("http://example.com/x");
+    expect(() => normalizeLinkUrl("javascript:alert(1)")).toThrow(/http/);
+    expect(() => normalizeLinkUrl("https://user:pw@example.com/")).toThrow(/credentials/);
+    expect(() => normalizeLinkUrl("")).toThrow(/required/);
+  });
+  test("link documents round-trip and get safe file names", () => {
+    const link = buildWebLink({ url: "https://example.com/docs", title: "  Example <Docs> ", description: "x\u0000y", image: "javascript:evil", site_name: "Example" });
+    expect(link.title).toBe("Example <Docs>");
+    expect(link.description).toBe("xy");
+    expect(link.image).toBeNull();
+    expect(parseWebLink(serializeWebLink(link))).toEqual(link);
+    expect(parseWebLink("not json")).toBeNull();
+    expect(buildWebLink({ url: "https://www.example.com/" }).title).toBe("example.com");
+    expect(webLinkFileName('Q3: "Plan" / Notes?')).toBe("Q3- -Plan- - Notes-.weblink");
+  });
+  test("Open Graph extraction tolerates attribute order and relative images", () => {
+    const html = `<html><head><title>Fallback &amp; Title</title>
+      <meta content="OG Title" property="og:title">
+      <meta name="description" content="Meta desc">
+      <meta property='og:image' content='/img/hero.png'>
+      <meta property="og:site_name" content="Example Site"></head><body></body></html>`;
+    const og = extractOpenGraph(html, "https://example.com/post/1");
+    expect(og.title).toBe("OG Title");
+    expect(og.description).toBe("Meta desc");
+    expect(og.image).toBe("https://example.com/img/hero.png");
+    expect(og.site_name).toBe("Example Site");
+    expect(extractOpenGraph("<title>Only &#39;title&#39;</title>", "https://a.b/").title).toBe("Only 'title'");
   });
 });
 
@@ -579,6 +613,28 @@ describe("repository HTTP surface", () => {
     expect(() => createRepoShare(SITE, "nope", {})).toThrow(/does not exist/);
     expect(revokeRepoShare(SITE, 999999)).toBe(false);
     updateRepoSettings(SITE, { visibility: "public" });
+  });
+
+  test("web links are stored as versioned .weblink files; previews reject private targets", async () => {
+    const h = { Cookie: adminCookie, "X-CSRF-Token": adminCsrf, "Content-Type": "application/json" };
+    const created = await (await fetch(`${base()}/${SITE}/_repo/api/link`, { method: "POST", headers: h, body: JSON.stringify({ dir: "d", url: "example.com/page", title: "Example page", description: "A page" }) })).json();
+    expect(created.file.path).toBe("d/Example page.weblink");
+    expect(created.file.mime).toBe("application/x-hoster-weblink");
+    expect(created.link.url).toBe("https://example.com/page");
+    const raw = await fetch(`${base()}/${SITE}/_repo/api/file?path=${encodeURIComponent(created.file.path)}`, { headers: { Cookie: adminCookie } });
+    expect(raw.headers.get("content-type")).toContain("application/json");
+    expect((await raw.json()).url).toBe("https://example.com/page");
+    // Editing an existing link makes a new version of the same file.
+    const edited = await (await fetch(`${base()}/${SITE}/_repo/api/link`, { method: "POST", headers: h, body: JSON.stringify({ path: created.file.path, url: "https://example.com/page2", title: "Example page" }) })).json();
+    expect(edited.file.version_no).toBe(2);
+    // Bad input and non-link paths are refused; readers can't create links.
+    expect((await fetch(`${base()}/${SITE}/_repo/api/link`, { method: "POST", headers: h, body: JSON.stringify({ dir: "", url: "ftp://x" }) })).status).toBe(400);
+    expect((await fetch(`${base()}/${SITE}/_repo/api/link`, { method: "POST", headers: h, body: JSON.stringify({ path: "hello.txt", url: "https://x.y" }) })).status).toBe(400);
+    expect((await fetch(`${base()}/${SITE}/_repo/api/link`, { method: "POST", body: JSON.stringify({ dir: "", url: "https://x.y" }) })).status).toBe(401);
+    // The preview fetcher never reaches private/loopback addresses.
+    const priv = await fetch(`${base()}/${SITE}/_repo/api/link-preview`, { method: "POST", headers: h, body: JSON.stringify({ url: `http://127.0.0.1:${PORT}/` }) });
+    expect(priv.status).toBe(400);
+    expect((await priv.json()).error).toMatch(/not allowed|non-public|Port/);
   });
 
   test("passkey sign-in endpoints are exposed on the repository page", async () => {

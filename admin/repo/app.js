@@ -67,9 +67,23 @@
   }
   function extOf(name) { const m = /\.([a-z0-9]+)$/i.exec(name); return m ? m[1].toLowerCase() : ""; }
 
+  const isLink = (f) => f && f.kind === "file" && f.mime === "application/x-hoster-weblink";
+  const displayName = (f) => isLink(f) ? f.name.replace(/\.weblink$/i, "") : f.name;
+  // Link files are tiny JSON docs; fetched lazily and cached per version so
+  // cards can show the page's title/image without a round trip per render.
+  const linkCache = new Map();
+  async function loadLink(f) {
+    const key = `${f.path}@${f.version_no}`;
+    if (linkCache.has(key)) return linkCache.get(key);
+    const p = fetch(fileUrl(f.path) + `&_v=${f.version_no}`, { credentials: "same-origin" })
+      .then(r => r.ok ? r.json() : null).then(d => (d && typeof d.url === "string") ? d : null).catch(() => null);
+    linkCache.set(key, p);
+    return p;
+  }
   function iconFor(file) {
     if (file.kind === "dir") return "📁";
     const m = file.mime || "";
+    if (m === "application/x-hoster-weblink") return "🔗";
     if (m.startsWith("image/")) return "🖼️";
     if (m.startsWith("video/")) return "🎬";
     if (m.startsWith("audio/")) return "🎵";
@@ -84,6 +98,7 @@
   }
   function previewKind(mime) {
     if (!mime) return "none";
+    if (mime === "application/x-hoster-weblink") return "link";
     if (mime.startsWith("image/")) return "image";
     if (mime.startsWith("video/")) return "video";
     if (mime.startsWith("audio/")) return "audio";
@@ -323,8 +338,8 @@
         const sel = state.selected.has(f.path);
         const thumb = f.kind === "file" && (f.mime || "").startsWith("image/")
           ? `<div class="thumb"><img src="${esc(fileUrl(f.path))}" alt="" loading="lazy"></div>`
-          : `<div class="thumb${f.kind === "dir" ? " dir" : ""}">${iconFor(f)}</div>`;
-        const label = searching ? f.path : f.name;
+          : `<div class="thumb${f.kind === "dir" ? " dir" : isLink(f) ? " link" : ""}">${iconFor(f)}</div>`;
+        const label = searching ? f.path : displayName(f);
         return `<div class="item${sel ? " selected" : ""}" data-path="${esc(f.path)}" data-kind="${f.kind}" tabindex="0" role="button" draggable="${state.canWrite ? "true" : "false"}">
           <div class="check" data-check>${sel ? "✓" : ""}</div>
           ${thumb}
@@ -340,6 +355,21 @@
         ? `<div class="head"><div></div><div></div><div>Name</div><div>Size</div><div class="col-mod">Modified</div><div class="col-by">By</div><div class="col-v">Ver.</div></div>`
         : "";
       listing.innerHTML = head + rows.join("");
+      // Fill in link cards (image + site) once their JSON arrives.
+      for (const f of entries.filter(isLink)) {
+        loadLink(f).then(link => {
+          if (!link) return;
+          const item = listing.querySelector(`.item[data-path="${CSS.escape(f.path)}"]`);
+          if (!item) return;
+          const thumb = item.querySelector(".thumb");
+          if (link.image && thumb) thumb.innerHTML = `<img class="og" src="${esc(link.image)}" alt="" loading="lazy" referrerpolicy="no-referrer">`;
+          const sub = item.querySelector(".sub");
+          if (sub) sub.textContent = link.site_name || new URL(link.url).hostname.replace(/^www\./, "");
+          const nameEl = item.querySelector(".name");
+          if (nameEl && !state.search.trim()) nameEl.textContent = link.title;
+          item.title = link.url;
+        });
+      }
     }
     renderSelbar();
     document.querySelectorAll(".seg [data-view]").forEach(b => b.classList.toggle("active", b.dataset.view === state.view));
@@ -429,6 +459,7 @@
     const item = e.target.closest(".item");
     if (!item || item.dataset.kind !== "file") return;
     const f = entryAt(item.dataset.path);
+    if (f && isLink(f)) { loadLink(f).then(l => { if (l) window.open(l.url, "_blank", "noopener,noreferrer"); }); return; }
     if (f && state.canWrite && isTextFile(f)) openEditor(f);
     else if (f) window.open(fileUrl(f.path, { dl: previewKind(f.mime) === "none" }), "_blank", "noopener");
   });
@@ -516,7 +547,7 @@
     if (!keep) history.replaceState(null, "", `?file=${encodeURIComponent(path)}`);
     const pane = $("preview");
     pane.hidden = false;
-    $("preview-title").textContent = f.name;
+    $("preview-title").textContent = displayName(f);
     const body = $("preview-body");
     const kind = previewKind(f.mime);
     const url = fileUrl(path) + `&_v=${f.version_no}`;
@@ -524,6 +555,20 @@
     else if (kind === "video") body.innerHTML = `<video controls preload="metadata" src="${esc(url)}"></video>`;
     else if (kind === "audio") body.innerHTML = `<audio controls preload="metadata" src="${esc(url)}"></audio>`;
     else if (kind === "pdf") body.innerHTML = `<iframe src="${esc(url)}" title="${esc(f.name)}"></iframe>`;
+    else if (kind === "link") {
+      body.innerHTML = `<div class="linkbox muted">Loading…</div>`;
+      loadLink(f).then(link => {
+        if (state.previewPath !== path) return;
+        if (!link) { body.innerHTML = `<div class="none">This link file couldn't be read.</div>`; return; }
+        $("preview-title").textContent = link.title;
+        body.innerHTML = `<div class="linkbox">
+          ${link.image ? `<img src="${esc(link.image)}" alt="" referrerpolicy="no-referrer">` : ""}
+          <div class="lt">${esc(link.title)}</div>
+          ${link.description ? `<div class="ld">${esc(link.description)}</div>` : ""}
+          <div class="lu"><a href="${esc(link.url)}" target="_blank" rel="noopener noreferrer">${esc(link.url)}</a></div>
+        </div>`;
+      });
+    }
     else if (kind === "text" || kind === "markdown") {
       body.innerHTML = `<pre class="muted">Loading…</pre>`;
       if (f.size > 2 * 1024 * 1024) body.innerHTML = `<div class="none"><div class="big">${iconFor(f)}</div>Too large to preview here.</div>`;
@@ -543,8 +588,9 @@
       <dt>Version</dt><dd>${f.version_no}</dd>`;
     const acts = $("preview-actions");
     acts.innerHTML = `
-      <a class="btn btn-sm" href="${esc(fileUrl(path, { dl: true }))}">Download</a>
-      ${kind !== "none" ? `<a class="btn btn-sm" href="${esc(fileUrl(path))}" target="_blank" rel="noopener">Open</a>` : ""}
+      ${kind === "link" ? `<button type="button" class="btn btn-sm btn-primary" data-act="open-link">Open link ↗</button>` : `<a class="btn btn-sm" href="${esc(fileUrl(path, { dl: true }))}">Download</a>`}
+      ${kind !== "none" && kind !== "link" ? `<a class="btn btn-sm" href="${esc(fileUrl(path))}" target="_blank" rel="noopener">Open</a>` : ""}
+      ${kind === "link" && state.canWrite ? `<button type="button" class="btn btn-sm" data-act="edit-link">Edit link</button>` : ""}
       <button type="button" class="btn btn-sm" data-act="copy">Copy link</button>
       ${state.canWrite && isTextFile(f) ? `<button type="button" class="btn btn-sm btn-primary" data-act="edit">Edit</button>` : ""}
       ${state.canWrite ? `<button type="button" class="btn btn-sm" data-act="share">Share…</button><button type="button" class="btn btn-sm" data-act="rename">Rename</button><button type="button" class="btn btn-sm" data-act="move">Move to…</button><button type="button" class="btn btn-sm" data-act="copy">Copy to…</button><button type="button" class="btn btn-sm btn-danger" data-act="delete">Delete</button>` : ""}`;
@@ -553,6 +599,8 @@
       navigator.clipboard?.writeText(link).then(() => toast("Link copied")).catch(() => toast(link));
     });
     acts.querySelector('[data-act="edit"]')?.addEventListener("click", () => openEditor(f));
+    acts.querySelector('[data-act="open-link"]')?.addEventListener("click", async () => { const l = await loadLink(f); if (l) window.open(l.url, "_blank", "noopener,noreferrer"); });
+    acts.querySelector('[data-act="edit-link"]')?.addEventListener("click", async () => { const l = await loadLink(f); if (l) openLinkDialog({ path: f.path, link: l }); });
     acts.querySelector('[data-act="rename"]')?.addEventListener("click", () => promptRename(path));
     acts.querySelector('[data-act="share"]')?.addEventListener("click", () => openShareDialog(path));
     acts.querySelector('[data-act="move"]')?.addEventListener("click", () => moveOrCopyDialog([path], "move"));
@@ -1018,6 +1066,74 @@
       </div>`).join("");
   }
   $("uploads-close").addEventListener("click", () => { $("uploads").hidden = true; });
+
+  // ---------- Web links ----------
+  $("new-link-btn").addEventListener("click", () => openLinkDialog({}));
+  function openLinkDialog({ path = null, link = null }) {
+    $("link-title").textContent = path ? "Edit link" : "New link";
+    $("link-path").value = path || "";
+    $("link-url").value = link ? link.url : "";
+    $("link-name").value = link ? link.title : "";
+    $("link-desc").value = link ? (link.description || "") : "";
+    $("link-image").value = link ? (link.image || "") : "";
+    $("link-site-name").value = link ? (link.site_name || "") : "";
+    $("link-fetched-at").value = link ? (link.fetched_at || "") : "";
+    $("link-error").textContent = "";
+    updateLinkPreviewBox();
+    $("link-modal").hidden = false;
+    setTimeout(() => $("link-url").focus(), 0);
+  }
+  function updateLinkPreviewBox() {
+    const img = $("link-image").value.trim();
+    const site = $("link-site-name").value.trim();
+    const box = $("link-preview-box");
+    box.hidden = !img && !site;
+    $("link-preview-img").hidden = !img;
+    if (img) $("link-preview-img").src = img;
+    $("link-preview-site").textContent = site;
+  }
+  $("link-image").addEventListener("input", updateLinkPreviewBox);
+  $("link-fetch").addEventListener("click", async () => {
+    const btn = $("link-fetch");
+    const errEl = $("link-error");
+    errEl.textContent = "";
+    const url = $("link-url").value.trim();
+    if (!url) { errEl.textContent = "Enter a URL first"; return; }
+    btn.disabled = true; btn.textContent = "Fetching…";
+    try {
+      const { preview } = await api("link-preview", { method: "POST", body: JSON.stringify({ url }) });
+      $("link-url").value = preview.url;
+      if (preview.title && !$("link-name").value.trim()) $("link-name").value = preview.title;
+      else if (preview.title && $("link-name").value.trim() === "") $("link-name").value = preview.title;
+      if (preview.description && !$("link-desc").value.trim()) $("link-desc").value = preview.description;
+      if (preview.image) $("link-image").value = preview.image;
+      $("link-site-name").value = preview.site_name || "";
+      $("link-fetched-at").value = preview.fetched_at;
+      updateLinkPreviewBox();
+      if (!preview.title && !preview.description && !preview.image) toast("The page didn't offer any details — fill them in by hand");
+    } catch (e) { errEl.textContent = e.message; }
+    finally { btn.disabled = false; btn.textContent = "Fetch details"; }
+  });
+  $("link-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const errEl = $("link-error");
+    errEl.textContent = "";
+    const path = $("link-path").value;
+    const body = {
+      url: $("link-url").value.trim(), title: $("link-name").value.trim(), description: $("link-desc").value.trim(),
+      image: $("link-image").value.trim(), site_name: $("link-site-name").value, fetched_at: $("link-fetched-at").value || null,
+    };
+    if (path) body.path = path; else body.dir = state.cwd;
+    $("link-save").disabled = true;
+    try {
+      const r = await api("link", { method: "POST", body: JSON.stringify(body) });
+      $("link-modal").hidden = true;
+      toast(path ? "Link updated" : "Link saved");
+      await loadTree();
+      showPreview(r.file.path);
+    } catch (err) { errEl.textContent = err.message; }
+    finally { $("link-save").disabled = false; }
+  });
 
   // ---------- Text editor ----------
   const editor = { file: null, create: false, dirty: false };

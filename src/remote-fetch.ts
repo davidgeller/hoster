@@ -26,6 +26,7 @@ import dnsPromises from "node:dns/promises";
 import { isIP } from "node:net";
 
 export const MAX_BYTES = 50 * 1024 * 1024;
+const DEFAULT_MAX_BYTES = MAX_BYTES;
 const MAX_REDIRECTS = 5;
 const PER_REQUEST_TIMEOUT_MS = 15_000;
 const TOTAL_TIMEOUT_MS = 30_000;
@@ -140,7 +141,14 @@ export interface RemoteFetchResult {
   redirects: number;
 }
 
-export async function fetchRemoteMedia(rawUrl: string): Promise<RemoteFetchResult> {
+export interface RemoteFetchOptions {
+  maxBytes?: number;   // default MAX_BYTES (50 MB)
+  accept?: string;     // Accept header
+  userAgent?: string;
+}
+
+export async function fetchRemoteMedia(rawUrl: string, opts: RemoteFetchOptions = {}): Promise<RemoteFetchResult> {
+  const MAX_BYTES = opts.maxBytes ?? DEFAULT_MAX_BYTES;
   const startedAt = Date.now();
   let currentUrl = rawUrl;
   let redirects = 0;
@@ -161,8 +169,8 @@ export async function fetchRemoteMedia(rawUrl: string): Promise<RemoteFetchResul
         redirect: "manual",
         signal: controller.signal,
         headers: {
-          "User-Agent": "Hoster-MCP/1.0 (+remote-media-fetch)",
-          "Accept": "image/*, audio/*, video/*, */*;q=0.5",
+          "User-Agent": opts.userAgent || "Hoster-MCP/1.0 (+remote-media-fetch)",
+          "Accept": opts.accept || "image/*, audio/*, video/*, */*;q=0.5",
         },
       });
     } catch (e: any) {

@@ -53,6 +53,7 @@
         <span class="writer-only" hidden>
           <button type="button" class="btn" id="new-folder-btn">New folder</button>
           <button type="button" class="btn" id="new-text-btn">New text file</button>
+          <button type="button" class="btn" id="new-link-btn">New link</button>
           <button type="button" class="btn btn-primary" id="upload-btn">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17,8 12,3 7,8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             Upload
@@ -169,6 +170,34 @@
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" data-close>Cancel</button>
         <button type="submit" class="btn btn-primary" id="prompt-ok">OK</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Web link (create / edit) -->
+  <div class="modal" id="link-modal" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <form class="modal-card link-card" id="link-form">
+      <h2 id="link-title">New link</h2>
+      <p class="muted">Save a web address in this folder. Hoster can fetch the page's title, description, and preview image for you.</p>
+      <label>URL
+        <div class="link-url-row">
+          <input type="url" id="link-url" placeholder="https://example.com/article" spellcheck="false" required>
+          <button type="button" class="btn" id="link-fetch">Fetch details</button>
+        </div>
+      </label>
+      <div class="link-preview" id="link-preview-box" hidden>
+        <img id="link-preview-img" alt="" hidden>
+        <div class="link-preview-text"><div id="link-preview-site" class="muted"></div></div>
+      </div>
+      <label>Title <input type="text" id="link-name" maxlength="200" placeholder="Shown as the item's name"></label>
+      <label>Description <textarea id="link-desc" rows="3" maxlength="1000" placeholder="Optional"></textarea></label>
+      <label>Preview image URL <input type="url" id="link-image" placeholder="Optional — filled in by Fetch details" spellcheck="false"></label>
+      <input type="hidden" id="link-site-name"><input type="hidden" id="link-fetched-at"><input type="hidden" id="link-path">
+      <div class="form-error" id="link-error"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+        <button type="submit" class="btn btn-primary" id="link-save">Save link</button>
       </div>
     </form>
   </div>

@@ -95,9 +95,12 @@ label input { display: block; width: 100%; margin-top: 4px; }
 
 /* --- Hero / banner --- */
 .hero { background: var(--bg-card); border-bottom: 1px solid var(--border); }
-/* Full-width strip at 5:1 (e.g. 1600×320). The image covers the strip and is
-   cropped from the centre, so keep the subject in the middle. */
-.hero-banner { aspect-ratio: 5 / 1; max-height: 240px; background-size: cover; background-position: center; }
+/* Full-width strip whose height follows the viewport width (≈5:1 on typical
+   screens). No aspect-ratio here on purpose: combined with max-height the
+   browser transfers the clamp back into the width and the strip stops
+   spanning the page. The image covers the strip and is cropped from the
+   centre, so keep the subject in the middle. */
+.hero-banner { width: 100%; height: clamp(120px, 18vw, 320px); background-size: cover; background-position: center; }
 .hero-body { max-width: 1400px; margin: 0 auto; padding: 22px 28px 18px; display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; flex-wrap: wrap; }
 .hero h1 { font-size: 1.55rem; font-weight: 700; letter-spacing: -0.01em; }
 .hero-text p { margin-top: 4px; max-width: 720px; white-space: pre-line; }
@@ -262,6 +265,23 @@ label input { display: block; width: 100%; margin-top: 4px; }
 .modal-card > p { margin-bottom: 14px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 
+/* --- Web links --- */
+.link-card { max-width: 560px; }
+.link-url-row { display: flex; gap: 6px; margin-top: 4px; }
+.link-url-row input { flex: 1; margin-top: 0; }
+.link-preview { display: flex; gap: 12px; align-items: center; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px; margin-bottom: 12px; background: var(--bg-hover); }
+.link-preview img { width: 96px; height: 64px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
+.link-preview-text { font-size: 0.8rem; min-width: 0; }
+.link-card textarea { width: 100%; margin-top: 4px; display: block; }
+.listing.grid .thumb.link { background: var(--accent-bg); color: var(--accent); }
+.listing .thumb img.og { object-fit: cover; }
+.preview-body .linkbox { width: 100%; padding: 14px; background: var(--bg-card); }
+.preview-body .linkbox img { width: 100%; max-height: 240px; object-fit: cover; border-radius: var(--radius-sm); margin-bottom: 10px; }
+.preview-body .linkbox .lt { font-weight: 600; font-size: 1rem; margin-bottom: 4px; }
+.preview-body .linkbox .ld { color: var(--text-secondary); font-size: 0.88rem; margin-bottom: 8px; }
+.preview-body .linkbox .lu { font-size: 0.78rem; overflow-wrap: anywhere; }
+.preview-body .linkbox .lu a { color: var(--text-secondary); }
+
 /* --- Share links --- */
 .share-card { max-width: 620px; }
 .share-row { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
@@ -323,7 +343,7 @@ label input { display: block; width: 100%; margin-top: 4px; }
 @media (max-width: 640px) {
   .hero-body, .toolbar, .selbar, .main, .trash-view { padding-left: 16px; padding-right: 16px; }
   .search input { width: 160px; }
-  .hero-banner { max-height: 140px; }
+  .hero-banner { height: clamp(100px, 26vw, 160px); }
 }
 
 /* --- Password reveal --- */

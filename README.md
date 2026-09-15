@@ -99,6 +99,7 @@ What a repository gives you:
 - **Move and copy** — *Move to…* / *Copy to…* on any selection open a folder picker; or drag items onto a folder or breadcrumb (hold Alt/Option to copy). Moves keep each file's version history; copies share the stored content, so they use no extra space and get a "… copy" name if the target name is taken.
 - **Previews** — images, video, audio, PDFs, plain text, and rendered Markdown in a side pane; everything else is offered as a download.
 - **Packaging** — select any mix of files and folders and download them as one ZIP with the folder structure preserved.
+- **Web links** — *New link* saves a URL as an item in the folder. *Fetch details* pulls the page's title, description, and preview image (Open Graph) server-side through the same SSRF-hardened fetcher MCP uses; you can edit any of it before saving. Links render as cards with the preview image, open in a new tab, and are ordinary versioned `.weblink` files underneath, so they can be shared, moved, copied, and restored like anything else.
 - **In-place editing** — create and edit `.md`, `.txt`, `.csv`, `.json` and other text files in a built-in editor with live Markdown preview; every save is a new version with an optional note.
 - **Per-file versions** — every upload or edit of an existing path records a version. Restore any version (the restore itself is a new version), download old versions, or delete one. The versions-per-file cap prunes the oldest automatically.
 - **Trash** — deletes are soft; restore from the trash for 30 days, or purge early.
