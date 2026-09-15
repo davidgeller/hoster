@@ -12,7 +12,7 @@ import {
   createRepositorySite, putRepoFile, writeRepoText, listRepoTree, readRepoContent, listRepoVersions, restoreRepoVersion,
   deleteRepoVersion, createRepoFolder, renameRepoPath, deleteRepoPaths, listRepoTrash, restoreRepoTrash, purgeRepoTrash,
   repoStats, repoUsedBytes, zipRepoPaths, exportRepoBackup, importRepoBackup, setRepoBanner, repoBannerPath,
-  normalizeRepoPath, mimeForName, previewKind, repoDir, purgeExpiredRepoTrash,
+  normalizeRepoPath, mimeForName, previewKind, repoDir, purgeExpiredRepoTrash, moveRepoPaths, copyRepoPaths,
 } from "../src/repo";
 import { getSite, deleteSite, updateRepoSettings, setSiteAllowedCountries, deploySite, createBlankSite, checkSiteHealth, rebuildCurrentSymlinks } from "../src/sites";
 import { createAdminUser } from "../src/auth";
@@ -149,6 +149,39 @@ describe("repository storage", () => {
     // History followed the file.
     expect(listRepoVersions(SLUG, "archive/reports/q1/summary.txt").length).toBe(2);
     expect(() => renameRepoPath(SLUG, "copy.txt", "big.bin")).toThrow(/already exists/);
+  });
+
+  test("move keeps names and history; copy shares blobs and auto-renames on conflict", async () => {
+    createRepoFolder(SLUG, "inbox");
+    await putRepoFile(SLUG, "inbox/a.txt", text("A1"));
+    await putRepoFile(SLUG, "inbox/a.txt", text("A2"));
+    createRepoFolder(SLUG, "outbox");
+    const mv = moveRepoPaths(SLUG, ["inbox/a.txt", "empty"], "outbox", "alice");
+    expect(mv.moved.map(m => m.to)).toEqual(["outbox/a.txt", "outbox/empty"]);
+    expect(listRepoVersions(SLUG, "outbox/a.txt").length).toBe(2);
+    expect(() => moveRepoPaths(SLUG, ["outbox"], "outbox/empty")).toThrow(/inside itself/);
+    expect(() => moveRepoPaths(SLUG, ["outbox/a.txt"], "nope")).toThrow(/does not exist/);
+    // Move to the root.
+    moveRepoPaths(SLUG, ["outbox/empty"], "");
+    expect(listRepoTree(SLUG).dirs.some(d => d.path === "empty")).toBe(true);
+
+    const before = repoUsedBytes(SLUG);
+    const cp = copyRepoPaths(SLUG, ["outbox/a.txt", "outbox"], "inbox", "alice");
+    expect(cp.copied.map(c => c.to)).toEqual(["inbox/a.txt", "inbox/outbox"]);
+    expect(cp.files).toBe(2);
+    expect(repoUsedBytes(SLUG)).toBe(before); // same blob, no new bytes
+    expect(await Bun.file(readRepoContent(SLUG, "inbox/outbox/a.txt")!.abs).text()).toBe("A2");
+    expect(listRepoVersions(SLUG, "inbox/a.txt").length).toBe(1);
+    expect(listRepoVersions(SLUG, "inbox/a.txt")[0].note).toMatch(/Copied from outbox\/a.txt/);
+    // Same-folder copy gets a "copy" suffix; a second one "copy 2".
+    expect(copyRepoPaths(SLUG, ["outbox/a.txt"], "outbox").copied[0].to).toBe("outbox/a copy.txt");
+    expect(copyRepoPaths(SLUG, ["outbox/a.txt"], "outbox").copied[0].to).toBe("outbox/a copy 2.txt");
+    expect(() => copyRepoPaths(SLUG, ["outbox"], "outbox")).toThrow(/into itself/);
+    // The copied file is independent: editing it doesn't touch the original.
+    await putRepoFile(SLUG, "inbox/a.txt", text("A3"));
+    expect(await Bun.file(readRepoContent(SLUG, "outbox/a.txt")!.abs).text()).toBe("A2");
+    deleteRepoPaths(SLUG, ["inbox", "outbox"]);
+    purgeRepoTrash(SLUG);
   });
 
   test("delete is soft: trash, restore (with conflict renaming), purge frees space", async () => {
@@ -391,6 +424,19 @@ describe("repository HTTP surface", () => {
     expect(zip.headers.get("content-type")).toBe("application/zip");
     const trash = await fetch(`${base()}/${SITE}/_repo/api/trash`);
     expect(trash.status).toBe(403); // anonymous can't see the trash even on a public repo
+    // Move and copy endpoints.
+    const mv = await fetch(`${base()}/${SITE}/_repo/api/move`, {
+      method: "POST", headers: { Cookie: adminCookie, "X-CSRF-Token": adminCsrf, "Content-Type": "application/json" },
+      body: JSON.stringify({ paths: ["hello.txt"], to: "d" }),
+    });
+    expect((await mv.json()).moved[0].to).toBe("d/hello.txt");
+    const cp = await fetch(`${base()}/${SITE}/_repo/api/copy`, {
+      method: "POST", headers: { Cookie: adminCookie, "X-CSRF-Token": adminCsrf, "Content-Type": "application/json" },
+      body: JSON.stringify({ paths: ["d/hello.txt"], to: "" }),
+    });
+    expect((await cp.json()).copied[0].to).toBe("hello.txt");
+    const anonMove = await fetch(`${base()}/${SITE}/_repo/api/move`, { method: "POST", body: JSON.stringify({ paths: ["hello.txt"], to: "d" }) });
+    expect(anonMove.status).toBe(401);
   });
 
   test("a site user without a grant can sign in but not write; private repos hide everything", async () => {

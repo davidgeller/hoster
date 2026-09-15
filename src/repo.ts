@@ -668,6 +668,111 @@ export function renameRepoPath(slug: string, fromPath: string, toPath: string, a
   return { from, to, kind: src.kind, moved };
 }
 
+export interface BatchMoveResult { moved: { from: string; to: string; kind: "file" | "dir" }[] }
+
+// Move several items into a destination folder (keeps their names). Validates
+// the whole batch before touching anything.
+export function moveRepoPaths(slug: string, relPaths: string[], destDir: string, actor?: string | null): BatchMoveResult {
+  requireRepoSite(slug);
+  if (!Array.isArray(relPaths) || relPaths.length === 0) throw new Error("No paths given");
+  if (relPaths.length > 5000) throw new Error("Too many paths in one request (max 5000)");
+  const dest = normalizeRepoPath(destDir, { allowEmpty: true });
+  if (dest) {
+    const d = liveRow(slug, dest);
+    if (!d) throw new Error(`Folder '${dest}' does not exist`);
+    if (d.kind !== "dir") throw new Error(`'${dest}' is a file, not a folder`);
+  }
+  const plan: { from: string; to: string; kind: "file" | "dir" }[] = [];
+  for (const raw of relPaths) {
+    const from = normalizeRepoPath(raw);
+    const src = liveRow(slug, from);
+    if (!src) throw new Error(`'${from}' does not exist`);
+    const to = dest ? `${dest}/${basename(from)}` : basename(from);
+    if (to === from) continue;
+    if (src.kind === "dir" && (dest === from || dest.startsWith(from + "/"))) throw new Error(`Cannot move '${from}' inside itself`);
+    if (liveRow(slug, to)) throw new Error(`'${to}' already exists`);
+    if (plan.some(p => p.to === to)) throw new Error(`Two items would both become '${to}'`);
+    plan.push({ from, to, kind: src.kind });
+  }
+  const tx = db.transaction(() => { for (const p of plan) renameRepoPath(slug, p.from, p.to, actor); });
+  tx();
+  return { moved: plan };
+}
+
+export interface CopyResult { copied: { from: string; to: string; kind: "file" | "dir" }[]; files: number }
+
+// Copy files/folders into a destination folder. Copies share the original's
+// blob (content-addressed), so they cost no extra storage; each copy starts
+// its own history at version 1.
+export function copyRepoPaths(slug: string, relPaths: string[], destDir: string, actor?: string | null): CopyResult {
+  requireRepoSite(slug);
+  if (!Array.isArray(relPaths) || relPaths.length === 0) throw new Error("No paths given");
+  if (relPaths.length > 5000) throw new Error("Too many paths in one request (max 5000)");
+  const dest = normalizeRepoPath(destDir, { allowEmpty: true });
+  if (dest) {
+    const d = liveRow(slug, dest);
+    if (!d) throw new Error(`Folder '${dest}' does not exist`);
+    if (d.kind !== "dir") throw new Error(`'${dest}' is a file, not a folder`);
+  }
+  const who = sanitizeActor(actor);
+  // Plan: expand folders into every live descendant, and pick a free name
+  // for each top-level item ("name copy", "name copy 2", …) when needed.
+  const plan: { from: string; to: string; kind: "file" | "dir" }[] = [];
+  const claimed = new Set<string>();
+  const freeName = (want: string, kind: "file" | "dir"): string => {
+    if (!liveRow(slug, want) && !claimed.has(want)) return want;
+    const dir = parentOf(want), name = basename(want);
+    const dot = kind === "file" ? name.lastIndexOf(".") : -1;
+    const stem = dot > 0 ? name.slice(0, dot) : name, ext = dot > 0 ? name.slice(dot) : "";
+    for (let n = 1; ; n++) {
+      const candidate = (dir ? dir + "/" : "") + `${stem} copy${n > 1 ? " " + n : ""}${ext}`;
+      if (!liveRow(slug, candidate) && !claimed.has(candidate)) return candidate;
+    }
+  };
+  for (const raw of relPaths) {
+    const from = normalizeRepoPath(raw);
+    const src = liveRow(slug, from);
+    if (!src) throw new Error(`'${from}' does not exist`);
+    if (src.kind === "dir" && (dest === from || dest.startsWith(from + "/"))) throw new Error(`Cannot copy '${from}' into itself`);
+    const to = freeName(dest ? `${dest}/${basename(from)}` : basename(from), src.kind);
+    claimed.add(to);
+    plan.push({ from, to, kind: src.kind });
+  }
+  let files = 0;
+  const tx = db.transaction(() => {
+    for (const p of plan) {
+      const rows: FileRow[] = [liveRow(slug, p.from)!];
+      if (p.kind === "dir") {
+        rows.push(...(db.query(
+          "SELECT * FROM repo_files WHERE site_slug = ? AND deleted_at IS NULL AND path LIKE ? ESCAPE '\\' ORDER BY path"
+        ).all(slug, escapeLike(p.from) + "/%") as FileRow[]));
+      }
+      for (const r of rows) {
+        const target = p.to + r.path.slice(p.from.length);
+        ensureParents(slug, target, who);
+        if (r.kind === "dir") {
+          if (!liveRow(slug, target)) db.run("INSERT INTO repo_files (site_slug, path, kind, created_by, updated_by) VALUES (?, ?, 'dir', ?, ?)", slug, target, who, who);
+          continue;
+        }
+        if (!r.sha256) continue;
+        const ins = db.run(
+          `INSERT INTO repo_files (site_slug, path, kind, size, mime, sha256, version_no, created_by, updated_by) VALUES (?, ?, 'file', ?, ?, ?, 1, ?, ?)`,
+          slug, target, r.size, r.mime, r.sha256, who, who
+        );
+        db.run(
+          `INSERT INTO repo_versions (file_id, site_slug, version_no, sha256, size, mime, note, created_by) VALUES (?, ?, 1, ?, ?, ?, ?, ?)`,
+          Number(ins.lastInsertRowid), slug, r.sha256, r.size, r.mime, `Copied from ${r.path}`, who
+        );
+        blobRetain(slug, r.sha256, r.size);
+        files++;
+      }
+    }
+  });
+  tx();
+  syncSiteStats(slug);
+  return { copied: plan, files };
+}
+
 function escapeLike(s: string): string {
   return s.replace(/[\\%_]/g, ch => "\\" + ch);
 }

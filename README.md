@@ -95,7 +95,8 @@ Besides classic web sites, Hoster can host **repositories**: document libraries 
 What a repository gives you:
 
 - **Uploads** — drag files or entire folders anywhere on the page, or use the Upload button (Shift-click to pick a folder). Uploads stream to disk and are hashed; identical content is stored once.
-- **Browsing** — folders, breadcrumbs, grid and list views, sorting, search across the whole tree, multi-select, drag-to-move between folders, shareable `?path=` / `?file=` links.
+- **Browsing** — folders, breadcrumbs, grid and list views, sorting, search across the whole tree, multi-select, shareable `?path=` / `?file=` links.
+- **Move and copy** — *Move to…* / *Copy to…* on any selection open a folder picker; or drag items onto a folder or breadcrumb (hold Alt/Option to copy). Moves keep each file's version history; copies share the stored content, so they use no extra space and get a "… copy" name if the target name is taken.
 - **Previews** — images, video, audio, PDFs, plain text, and rendered Markdown in a side pane; everything else is offered as a download.
 - **Packaging** — select any mix of files and folders and download them as one ZIP with the folder structure preserved.
 - **In-place editing** — create and edit `.md`, `.txt`, `.csv`, `.json` and other text files in a built-in editor with live Markdown preview; every save is a new version with an optional note.

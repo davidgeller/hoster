@@ -27,7 +27,7 @@ import {
 import type { Site } from "./sites";
 import {
   listRepoTree, readRepoContent, stageBlob, commitRepoFile, writeRepoText, createRepoFolder, renameRepoPath,
-  deleteRepoPaths, listRepoTrash, restoreRepoTrash, purgeRepoTrash, listRepoVersions, restoreRepoVersion, deleteRepoVersion,
+  deleteRepoPaths, moveRepoPaths, copyRepoPaths, listRepoTrash, restoreRepoTrash, purgeRepoTrash, listRepoVersions, restoreRepoVersion, deleteRepoVersion,
   zipRepoPaths, repoStats, repoBannerPath, setRepoBanner, clearRepoBanner, previewKind, isTextMime, mimeForName,
   REPO_MAX_FILE_BYTES, TRASH_TTL_DAYS,
 } from "./repo";
@@ -276,6 +276,21 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
       if (!body || typeof body.from !== "string" || typeof body.to !== "string") return json({ error: "from and to are required" }, 400);
       const result = renameRepoPath(site.slug, body.from, body.to, actor);
       audit("repo_renamed", `${site.slug}: ${result.from} -> ${result.to}`);
+      return json({ ok: true, ...result });
+    }
+
+    if ((api === "move" || api === "copy") && req.method === "POST") {
+      const body = await readJson<{ paths?: unknown; to?: unknown }>(req);
+      const paths = Array.isArray(body?.paths) ? body!.paths.filter((p): p is string => typeof p === "string") : [];
+      if (!paths.length) return json({ error: "paths is required" }, 400);
+      const to = typeof body?.to === "string" ? body!.to : "";
+      if (api === "move") {
+        const result = moveRepoPaths(site.slug, paths, to, actor);
+        audit("repo_moved", `${site.slug}: ${result.moved.length} item(s) -> /${to}`);
+        return json({ ok: true, ...result });
+      }
+      const result = copyRepoPaths(site.slug, paths, to, actor);
+      audit("repo_copied", `${site.slug}: ${result.copied.length} item(s) (${result.files} files) -> /${to}`);
       return json({ ok: true, ...result });
     }
 

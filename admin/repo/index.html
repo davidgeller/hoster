@@ -67,7 +67,9 @@
     <div class="selbar" id="selbar" hidden>
       <span id="sel-count"></span>
       <button type="button" class="btn btn-sm" id="sel-download">Download</button>
-      <button type="button" class="btn btn-sm writer-only" id="sel-rename" hidden>Rename / Move</button>
+      <button type="button" class="btn btn-sm writer-only" id="sel-move" hidden>Move to…</button>
+      <button type="button" class="btn btn-sm writer-only" id="sel-copy" hidden>Copy to…</button>
+      <button type="button" class="btn btn-sm writer-only" id="sel-rename" hidden>Rename</button>
       <button type="button" class="btn btn-sm btn-danger writer-only" id="sel-delete" hidden>Delete</button>
       <button type="button" class="btn btn-sm btn-ghost" id="sel-clear">Clear</button>
     </div>
@@ -156,6 +158,21 @@
         <button type="submit" class="btn btn-primary" id="prompt-ok">OK</button>
       </div>
     </form>
+  </div>
+
+  <!-- Folder picker (move / copy destination) -->
+  <div class="modal" id="folder-modal" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-card">
+      <h2 id="folder-title"></h2>
+      <p class="muted" id="folder-text"></p>
+      <div class="folder-tree" id="folder-tree"></div>
+      <div class="form-error" id="folder-error"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+        <button type="button" class="btn btn-primary" id="folder-ok">Move</button>
+      </div>
+    </div>
   </div>
 
   <!-- Confirm dialog -->

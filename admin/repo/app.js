@@ -165,7 +165,7 @@
         out.push(`<pre><code>${esc(buf.join("\n"))}</code></pre>`);
         continue;
       }
-      if ((m = /^(#{1,6})\s+(.+?)\s*#*$/.exec(line))) { out.push(`<h${m[1].length}>${inline(m[2])}</h${m[1].length}>`); i++; continue; }
+      if ((m = /^(#{1,6})(?:\s+(.*?))?\s*#*$/.exec(line))) { out.push(`<h${m[1].length}>${inline(m[2] || "")}</h${m[1].length}>`); i++; continue; }
       if (/^(\s*[-*_]){3,}\s*$/.test(line)) { out.push("<hr>"); i++; continue; }
       if (/^>/.test(line)) {
         const buf = [];
@@ -194,8 +194,11 @@
         out.push(`<${ordered ? "ol" : "ul"}>${items.join("")}</${ordered ? "ol" : "ul"}>`);
         continue;
       }
-      const buf = [];
-      while (i < lines.length && !/^\s*$/.test(lines[i]) && !/^(#{1,6}\s|>|`{3}|~{3}|\s*([-*+]|\d+[.)])\s)/.test(lines[i])) buf.push(lines[i++]);
+      // Paragraph: always consume the current line (even if it looks like the
+      // start of another block that didn't fully match, e.g. "## " while a
+      // heading is still being typed) so the loop can never stall.
+      const buf = [lines[i++]];
+      while (i < lines.length && !/^\s*$/.test(lines[i]) && !/^(#{1,6}(\s|$)|>|`{3}|~{3}|\s*([-*+]|\d+[.)])\s)/.test(lines[i])) buf.push(lines[i++]);
       out.push(`<p>${inline(buf.join("\n")).replace(/ {2}\n/g, "<br>").replace(/\n/g, " ")}</p>`);
     }
     return out.join("\n");
@@ -363,6 +366,8 @@
     if (!n) return;
     $("sel-count").textContent = `${n} selected`;
     $("sel-rename").hidden = !state.canWrite || n !== 1;
+    $("sel-move").hidden = !state.canWrite;
+    $("sel-copy").hidden = !state.canWrite;
     $("sel-delete").hidden = !state.canWrite;
   }
 
@@ -448,6 +453,8 @@
   $("sel-download").addEventListener("click", () => downloadPaths([...state.selected]));
   $("sel-delete").addEventListener("click", () => confirmDelete([...state.selected]));
   $("sel-rename").addEventListener("click", () => { const p = [...state.selected][0]; if (p) promptRename(p); });
+  $("sel-move").addEventListener("click", () => moveOrCopyDialog([...state.selected], "move"));
+  $("sel-copy").addEventListener("click", () => moveOrCopyDialog([...state.selected], "copy"));
 
   document.addEventListener("keydown", (e) => {
     if (e.target.matches("input, textarea, select")) return;
@@ -535,13 +542,15 @@
       ${kind !== "none" ? `<a class="btn btn-sm" href="${esc(fileUrl(path))}" target="_blank" rel="noopener">Open</a>` : ""}
       <button type="button" class="btn btn-sm" data-act="copy">Copy link</button>
       ${state.canWrite && isTextFile(f) ? `<button type="button" class="btn btn-sm btn-primary" data-act="edit">Edit</button>` : ""}
-      ${state.canWrite ? `<button type="button" class="btn btn-sm" data-act="rename">Rename</button><button type="button" class="btn btn-sm btn-danger" data-act="delete">Delete</button>` : ""}`;
+      ${state.canWrite ? `<button type="button" class="btn btn-sm" data-act="rename">Rename</button><button type="button" class="btn btn-sm" data-act="move">Move to…</button><button type="button" class="btn btn-sm" data-act="copy">Copy to…</button><button type="button" class="btn btn-sm btn-danger" data-act="delete">Delete</button>` : ""}`;
     acts.querySelector('[data-act="copy"]').addEventListener("click", () => {
       const link = new URL(`?file=${encodeURIComponent(path)}`, document.baseURI).href;
       navigator.clipboard?.writeText(link).then(() => toast("Link copied")).catch(() => toast(link));
     });
     acts.querySelector('[data-act="edit"]')?.addEventListener("click", () => openEditor(f));
     acts.querySelector('[data-act="rename"]')?.addEventListener("click", () => promptRename(path));
+    acts.querySelector('[data-act="move"]')?.addEventListener("click", () => moveOrCopyDialog([path], "move"));
+    acts.querySelector('[data-act="copy"]')?.addEventListener("click", () => moveOrCopyDialog([path], "copy"));
     acts.querySelector('[data-act="delete"]')?.addEventListener("click", () => confirmDelete([path]));
 
     const vEl = $("preview-versions");
@@ -665,8 +674,8 @@
     const f = entryAt(path);
     if (!f) return;
     const to = await promptDialog({
-      title: f.kind === "dir" ? "Rename or move folder" : "Rename or move file",
-      text: "Edit the name, or give a full path (e.g. archive/2025/report.pdf) to move it into another folder.",
+      title: f.kind === "dir" ? "Rename folder" : "Rename file",
+      text: "Edit the name. You can also type a full path (e.g. archive/2025/report.pdf) to move it at the same time.",
       label: "Path", value: path, ok: "Save",
       validate: (v) => (!v ? "Path is required" : v === path ? "Unchanged" : null),
     });
@@ -697,29 +706,88 @@
     } catch (e) { toast(e.message, true); }
   }
 
+  // ---------- Move / copy to a chosen folder ----------
+  function pickFolder({ title, text, ok, disabled = new Set(), initial = state.cwd }) {
+    return new Promise((resolve) => {
+      const modal = $("folder-modal");
+      $("folder-title").textContent = title;
+      $("folder-text").textContent = text || "";
+      $("folder-ok").textContent = ok;
+      $("folder-error").textContent = "";
+      const tree = $("folder-tree");
+      let chosen = initial;
+      const dirs = [...state.dirs].sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true, sensitivity: "base" }));
+      const rows = [{ path: "", depth: 0, name: state.info.name }].concat(dirs.map(d => ({ path: d.path, depth: d.path.split("/").length, name: d.name })));
+      tree.innerHTML = rows.map(r => {
+        const off = disabled.has(r.path) || [...disabled].some(d => d && r.path.startsWith(d + "/"));
+        return `<button type="button" data-path="${esc(r.path)}" style="padding-left:${8 + r.depth * 18}px" ${off ? "disabled" : ""} class="${r.path === chosen ? "active" : ""}">${r.path === "" ? "🏠" : "📁"} ${esc(r.name)}</button>`;
+      }).join("");
+      if (!tree.querySelector(`button.active`) || tree.querySelector(`button.active`).disabled) { chosen = ""; tree.querySelector('[data-path=""]').classList.add("active"); }
+      tree.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
+        chosen = b.dataset.path;
+        tree.querySelectorAll("button").forEach(x => x.classList.toggle("active", x === b));
+      }));
+      tree.querySelectorAll("button").forEach(b => b.addEventListener("dblclick", () => { if (!b.disabled) onOk(); }));
+      modal.hidden = false;
+      const okBtn = $("folder-ok");
+      const onOk = () => { cleanup(); resolve(chosen); };
+      const onClose = () => { cleanup(); resolve(null); };
+      const cleanup = () => { okBtn.removeEventListener("click", onOk); modal.querySelectorAll("[data-close]").forEach(x => x.removeEventListener("click", onClose)); modal.hidden = true; };
+      okBtn.addEventListener("click", onOk);
+      modal.querySelectorAll("[data-close]").forEach(x => x.addEventListener("click", onClose));
+    });
+  }
+
+  async function moveOrCopyDialog(paths, op) {
+    if (!paths.length) return;
+    const isMove = op === "move";
+    // A folder can't be moved/copied into itself; when moving, the current
+    // parent is pointless too.
+    const disabled = new Set(paths.filter(p => entryAt(p)?.kind === "dir"));
+    const dest = await pickFolder({
+      title: isMove ? `Move ${paths.length === 1 ? `"${baseName(paths[0])}"` : `${paths.length} items`} to…` : `Copy ${paths.length === 1 ? `"${baseName(paths[0])}"` : `${paths.length} items`} to…`,
+      text: isMove ? "Choose the destination folder. Version history moves with each file." : "Choose the destination folder. Copies share stored content, so they use no extra space; if a name is taken the copy is named “… copy”.",
+      ok: isMove ? "Move here" : "Copy here",
+      disabled,
+      initial: paths.length && parentOf(paths[0]) === state.cwd ? "" : state.cwd,
+    });
+    if (dest === null) return;
+    await performMoveCopy(paths, dest, op);
+  }
+
+  async function performMoveCopy(paths, dest, op) {
+    try {
+      const r = await api(op, { method: "POST", body: JSON.stringify({ paths, to: dest }) });
+      state.selected.clear();
+      const n = op === "move" ? r.moved.length : r.copied.length;
+      const where = dest ? `"${baseName(dest)}"` : "the top level";
+      toast(op === "move" ? (n ? `Moved ${n} item${n === 1 ? "" : "s"} to ${where}` : "Nothing to move") : `Copied ${n} item${n === 1 ? "" : "s"} to ${where}`);
+      if (op === "move" && state.previewPath) {
+        const hit = r.moved.find(m => state.previewPath === m.from || state.previewPath.startsWith(m.from + "/"));
+        if (hit) state.previewPath = hit.to + state.previewPath.slice(hit.from.length);
+      }
+      await loadTree();
+    } catch (e) { toast(e.message, true); }
+  }
+
   // Move via drag-and-drop within the listing (onto folders or breadcrumbs).
+  // Hold Alt/Option while dropping to copy instead.
   let dragPaths = null;
   $("listing").addEventListener("dragstart", (e) => {
     const item = e.target.closest(".item");
     if (!item || !state.canWrite) return;
     const p = item.dataset.path;
     dragPaths = state.selected.has(p) ? [...state.selected] : [p];
-    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.effectAllowed = "copyMove";
     e.dataTransfer.setData("text/x-repo-paths", JSON.stringify(dragPaths));
   });
   $("listing").addEventListener("dragend", () => { dragPaths = null; document.querySelectorAll(".drop-target").forEach(el => el.classList.remove("drop-target")); });
   function internalDrag(e) { return dragPaths && e.dataTransfer.types.includes("text/x-repo-paths"); }
-  async function moveInto(targetDir) {
-    const paths = dragPaths || [];
+  async function moveInto(targetDir, copy = false) {
+    const paths = (dragPaths || []).filter(p => !(joinPath(targetDir, baseName(p)) === p || targetDir === p || targetDir.startsWith(p + "/")));
     dragPaths = null;
-    let moved = 0;
-    for (const p of paths) {
-      const dest = joinPath(targetDir, baseName(p));
-      if (dest === p || targetDir === p || targetDir.startsWith(p + "/")) continue;
-      try { await api("rename", { method: "POST", body: JSON.stringify({ from: p, to: dest }) }); moved++; }
-      catch (e) { toast(e.message, true); }
-    }
-    if (moved) { state.selected.clear(); toast(`Moved ${moved} item${moved === 1 ? "" : "s"}`); await loadTree(); }
+    if (!paths.length) return;
+    await performMoveCopy(paths, targetDir, copy ? "copy" : "move");
   }
   for (const [container, selector] of [[$("listing"), ".item[data-kind='dir']"], [$("crumbs"), "a[data-path]"]]) {
     container.addEventListener("dragover", (e) => {
@@ -728,7 +796,7 @@
       container.querySelectorAll(".drop-target").forEach(el => el.classList.remove("drop-target"));
       if (!t) return;
       e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
+      e.dataTransfer.dropEffect = e.altKey ? "copy" : "move";
       t.classList.add("drop-target");
     });
     container.addEventListener("drop", (e) => {
@@ -738,7 +806,7 @@
       e.preventDefault();
       e.stopPropagation();
       t.classList.remove("drop-target");
-      moveInto(t.dataset.path);
+      moveInto(t.dataset.path, e.altKey);
     });
   }
 
