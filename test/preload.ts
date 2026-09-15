@@ -6,13 +6,16 @@
 // — which is wherever the Bun binary lives. That leaks site/data files into
 // the user's Bun install directory.
 
-import { mkdtempSync, mkdirSync, rmSync } from "fs";
-import { join } from "path";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "fs";
+import { join, resolve } from "path";
 import { tmpdir } from "os";
 
 if (!process.env.HOSTER_HOME) {
   const home = mkdtempSync(join(tmpdir(), "hoster-test-"));
   mkdirSync(join(home, "admin"), { recursive: true });
+  // Repository sites serve their built-in UI from <home>/admin/repo; point
+  // the test home at the real files so the HTTP tests can fetch them.
+  try { symlinkSync(resolve(import.meta.dir, "..", "admin", "repo"), join(home, "admin", "repo")); } catch (_) {}
   process.env.HOSTER_HOME = home;
 
   // Clean up at process exit, not in each test file's afterAll — the suite

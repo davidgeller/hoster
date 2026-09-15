@@ -1,4 +1,5 @@
 import db from "./db";
+import { getSite, effectiveAllowedCountries } from "./sites";
 import { normalizeCountryCodes } from "./countries";
 
 export interface RequestLog {
@@ -151,8 +152,15 @@ export function setAllowedCountries(countries: string[]): void {
   );
 }
 
-export function isCountryAllowed(country: string | null): boolean {
-  const allowed = getAllowedCountries();
+// Is a visitor from `country` allowed? With a site slug, the site's own
+// allow-list (if it has one) takes precedence over the global list — a site
+// can be opened to the world while the platform default stays restricted, or
+// locked down tighter than the default. Without a slug (OAuth discovery,
+// unknown paths) the global list applies.
+export function isCountryAllowed(country: string | null, siteSlug?: string | null): boolean {
+  const globalList = getAllowedCountries();
+  const site = siteSlug ? getSite(siteSlug) : null;
+  const allowed = effectiveAllowedCountries(site, globalList);
   if (allowed.length === 0) return true; // no restriction
   if (!country) return false; // unknown country blocked when restrictions are active
   return allowed.includes(country.toUpperCase());

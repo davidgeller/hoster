@@ -115,6 +115,13 @@ function exportDatabase(): Record<string, any[]> {
   // losing them on restore would lock the admin out of passwordless login.
   tables.webauthn_credentials = db.prepare("SELECT * FROM webauthn_credentials").all();
 
+  // Repository sites: file tree, per-file history, and blob refcounts. The
+  // blobs themselves live under sites/<slug>/_repo/objects and ride along
+  // with the site files.
+  tables.repo_files = db.prepare("SELECT * FROM repo_files").all();
+  tables.repo_versions = db.prepare("SELECT * FROM repo_versions").all();
+  tables.repo_blobs = db.prepare("SELECT * FROM repo_blobs").all();
+
   return tables;
 }
 
@@ -123,6 +130,9 @@ function importDatabase(tables: Record<string, any[]>) {
     // Clear existing data in import order (respecting foreign keys)
     db.exec("DELETE FROM admin_user_sites");
     db.exec("DELETE FROM webauthn_credentials");
+    db.exec("DELETE FROM repo_versions");
+    db.exec("DELETE FROM repo_files");
+    db.exec("DELETE FROM repo_blobs");
     db.exec("DELETE FROM admin_users");
     db.exec("DELETE FROM site_aliases");
     db.exec("DELETE FROM site_versions");
@@ -145,11 +155,15 @@ function importDatabase(tables: Record<string, any[]>) {
 
     // Import sites
     if (tables.sites) {
-      const cols = ["slug", "name", "created_at", "updated_at", "size_bytes", "file_count", "active", "current_version", "root_dir", "spa", "mcp_enabled", "mcp_read_only", "mcp_auto_commit", "cms_enabled", "cms_lib_version", "pinned_at"];
+      const cols = ["slug", "name", "created_at", "updated_at", "size_bytes", "file_count", "active", "current_version", "root_dir", "spa", "mcp_enabled", "mcp_read_only", "mcp_auto_commit", "cms_enabled", "cms_lib_version", "pinned_at",
+        "site_type", "allowed_countries", "repo_quota_bytes", "repo_max_versions", "repo_visibility", "repo_description", "repo_banner"];
       const placeholders = cols.map(() => "?").join(", ");
       const stmt = db.prepare(`INSERT INTO sites (${cols.join(", ")}) VALUES (${placeholders})`);
+      // Pre-2.1 backups lack the site-type/repository columns; fill in the
+      // defaults the schema would have applied.
+      const defaults: Record<string, any> = { site_type: "web", repo_quota_bytes: 1073741824, repo_max_versions: 20, repo_visibility: "private" };
       for (const row of tables.sites) {
-        stmt.run(...cols.map(c => row[c] ?? null));
+        stmt.run(...cols.map(c => row[c] ?? defaults[c] ?? null));
       }
     }
 
@@ -210,6 +224,33 @@ function importDatabase(tables: Record<string, any[]>) {
         // Skip rows whose site no longer exists in the imported set.
         const exists = db.query("SELECT 1 FROM sites WHERE slug = ?").get(row.site_slug);
         if (exists) stmt.run(row.user_id, row.site_slug);
+      }
+    }
+
+    // Repository metadata. Rows reference sites by slug (already imported) and
+    // versions reference files by the file id, which we preserve verbatim —
+    // ids are only unique within a backup, and the tables were emptied above.
+    if (tables.repo_files) {
+      const cols = ["id", "site_slug", "path", "kind", "size", "mime", "sha256", "version_no", "created_at", "updated_at", "created_by", "updated_by", "deleted_at", "deleted_by"];
+      const stmt = db.prepare(`INSERT INTO repo_files (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`);
+      for (const row of tables.repo_files) {
+        const exists = db.query("SELECT 1 FROM sites WHERE slug = ?").get(row.site_slug);
+        if (exists) stmt.run(...cols.map(c => row[c] ?? null));
+      }
+    }
+    if (tables.repo_versions) {
+      const cols = ["id", "file_id", "site_slug", "version_no", "sha256", "size", "mime", "note", "created_at", "created_by"];
+      const stmt = db.prepare(`INSERT INTO repo_versions (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`);
+      for (const row of tables.repo_versions) {
+        const exists = db.query("SELECT 1 FROM repo_files WHERE id = ?").get(row.file_id);
+        if (exists) stmt.run(...cols.map(c => row[c] ?? null));
+      }
+    }
+    if (tables.repo_blobs) {
+      const stmt = db.prepare("INSERT INTO repo_blobs (site_slug, sha256, size, refcount) VALUES (?, ?, ?, ?)");
+      for (const row of tables.repo_blobs) {
+        const exists = db.query("SELECT 1 FROM sites WHERE slug = ?").get(row.site_slug);
+        if (exists) stmt.run(row.site_slug, row.sha256, row.size ?? 0, row.refcount ?? 0);
       }
     }
 
@@ -298,6 +339,20 @@ export async function createBackup(password?: string, allVersions = false): Prom
 
           // Find current version from DB data
           const siteRecord = dbData.sites?.find((s: any) => s.slug === slug);
+
+          // Repository sites keep everything (all file versions) under _repo/.
+          if (siteRecord?.site_type === "repository") {
+            const repoDir = join(siteDir, "_repo");
+            if (!existsSync(repoDir)) continue;
+            const zipRepo = Bun.spawn(["zip", "-r", "-q", zipPath, join("sites", slug, "_repo"), "-x", "*/_repo/tmp/*"], {
+              cwd: dirname(SITES_DIR),
+              stdout: "ignore",
+              stderr: "pipe",
+            });
+            await zipRepo.exited;
+            continue;
+          }
+
           const currentVersion = siteRecord?.current_version;
           if (!currentVersion) continue;
 

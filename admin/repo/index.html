@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <base href="/">
+  <title>Documents</title>
+  <link rel="stylesheet" href="_repo/ui/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📁</text></svg>">
+</head>
+<body>
+  <div id="app" class="app" data-state="loading">
+    <header class="hero" id="hero">
+      <div class="hero-banner" id="hero-banner" hidden></div>
+      <div class="hero-body">
+        <div class="hero-text">
+          <h1 id="repo-title">Documents</h1>
+          <p id="repo-description" class="muted" hidden></p>
+        </div>
+        <div class="hero-side">
+          <div id="storage-meter" class="storage" hidden>
+            <div class="storage-bar"><div class="storage-fill" id="storage-fill"></div></div>
+            <div class="storage-label" id="storage-label"></div>
+          </div>
+          <div class="who" id="who">
+            <button type="button" class="btn btn-primary" id="signin-btn">Sign in</button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div class="toolbar" id="toolbar">
+      <nav class="crumbs" id="crumbs" aria-label="Folder path"></nav>
+      <div class="toolbar-actions">
+        <div class="search">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input type="search" id="search" placeholder="Search this repository…" autocomplete="off" spellcheck="false">
+        </div>
+        <select id="sort" aria-label="Sort by">
+          <option value="name">Name</option>
+          <option value="modified">Modified</option>
+          <option value="size">Size</option>
+          <option value="kind">Type</option>
+        </select>
+        <div class="seg" role="group" aria-label="View">
+          <button type="button" data-view="grid" class="active" title="Grid view" aria-label="Grid view">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          </button>
+          <button type="button" data-view="list" title="List view" aria-label="List view">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg>
+          </button>
+        </div>
+        <span class="writer-only" hidden>
+          <button type="button" class="btn" id="new-folder-btn">New folder</button>
+          <button type="button" class="btn" id="new-text-btn">New text file</button>
+          <button type="button" class="btn btn-primary" id="upload-btn">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17,8 12,3 7,8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            Upload
+          </button>
+          <input type="file" id="upload-input" multiple hidden>
+          <input type="file" id="upload-folder-input" webkitdirectory directory hidden>
+        </span>
+        <button type="button" class="btn btn-ghost writer-only" id="trash-btn" hidden title="Deleted items">🗑 <span id="trash-count"></span></button>
+      </div>
+    </div>
+
+    <div class="selbar" id="selbar" hidden>
+      <span id="sel-count"></span>
+      <button type="button" class="btn btn-sm" id="sel-download">Download</button>
+      <button type="button" class="btn btn-sm writer-only" id="sel-rename" hidden>Rename / Move</button>
+      <button type="button" class="btn btn-sm btn-danger writer-only" id="sel-delete" hidden>Delete</button>
+      <button type="button" class="btn btn-sm btn-ghost" id="sel-clear">Clear</button>
+    </div>
+
+    <main class="main" id="main">
+      <section class="browser" id="browser">
+        <div class="dropzone-hint" id="dropzone-hint" hidden>
+          <div>Drop files or folders to upload here</div>
+        </div>
+        <div id="listing" class="listing grid"></div>
+        <div id="empty" class="empty" hidden></div>
+      </section>
+      <aside class="preview" id="preview" hidden>
+        <div class="preview-head">
+          <div class="preview-title" id="preview-title"></div>
+          <button type="button" class="icon-btn" id="preview-close" aria-label="Close preview">✕</button>
+        </div>
+        <div class="preview-body" id="preview-body"></div>
+        <dl class="preview-meta" id="preview-meta"></dl>
+        <div class="preview-actions" id="preview-actions"></div>
+        <div class="preview-versions" id="preview-versions"></div>
+      </aside>
+    </main>
+
+    <section class="trash-view" id="trash-view" hidden>
+      <div class="trash-head">
+        <h2>Deleted items</h2>
+        <p class="muted" id="trash-note"></p>
+        <div class="trash-actions">
+          <button type="button" class="btn" id="trash-back">← Back to files</button>
+          <button type="button" class="btn btn-danger" id="trash-empty">Empty trash</button>
+        </div>
+      </div>
+      <div id="trash-list" class="trash-list"></div>
+    </section>
+
+    <div class="gate" id="gate" hidden>
+      <div class="gate-card">
+        <div class="gate-icon">🔒</div>
+        <h2 id="gate-title">Sign in to view this repository</h2>
+        <p class="muted" id="gate-text">These documents are private.</p>
+        <button type="button" class="btn btn-primary" id="gate-signin">Sign in</button>
+      </div>
+    </div>
+
+    <div class="uploads" id="uploads" hidden>
+      <div class="uploads-head">
+        <span id="uploads-title">Uploading…</span>
+        <button type="button" class="icon-btn" id="uploads-close" aria-label="Hide">✕</button>
+      </div>
+      <div id="uploads-list"></div>
+    </div>
+
+    <footer class="foot muted">
+      <span>Powered by Hoster</span>
+    </footer>
+  </div>
+
+  <!-- Sign-in dialog -->
+  <div class="modal" id="signin-modal" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <form class="modal-card" id="signin-form" autocomplete="on">
+      <h2>Sign in</h2>
+      <p class="muted">Use your Hoster account.</p>
+      <label>Username <input type="text" id="signin-username" autocomplete="username" required></label>
+      <label>Password <input type="password" id="signin-password" autocomplete="current-password" required></label>
+      <label id="signin-code-row" hidden>Authentication code <input type="text" id="signin-code" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code or recovery code"></label>
+      <div class="form-error" id="signin-error"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+        <button type="submit" class="btn btn-primary">Sign in</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Prompt dialog (new folder / rename / new file name) -->
+  <div class="modal" id="prompt-modal" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <form class="modal-card" id="prompt-form">
+      <h2 id="prompt-title"></h2>
+      <p class="muted" id="prompt-text"></p>
+      <label><span id="prompt-label">Name</span> <input type="text" id="prompt-input" autocomplete="off" spellcheck="false" required></label>
+      <div class="form-error" id="prompt-error"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+        <button type="submit" class="btn btn-primary" id="prompt-ok">OK</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Confirm dialog -->
+  <div class="modal" id="confirm-modal" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-card">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-text"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+        <button type="button" class="btn btn-danger" id="confirm-ok">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Text editor -->
+  <div class="modal editor-modal" id="editor-modal" hidden>
+    <div class="modal-backdrop"></div>
+    <div class="modal-card editor-card">
+      <div class="editor-head">
+        <h2 id="editor-title"></h2>
+        <div class="editor-tools">
+          <div class="seg" id="editor-mode" hidden>
+            <button type="button" data-mode="edit" class="active">Edit</button>
+            <button type="button" data-mode="split">Split</button>
+            <button type="button" data-mode="preview">Preview</button>
+          </div>
+          <span class="muted" id="editor-status"></span>
+        </div>
+      </div>
+      <div class="editor-body" id="editor-body" data-mode="edit">
+        <textarea id="editor-text" spellcheck="true"></textarea>
+        <div class="md-preview" id="editor-preview"></div>
+      </div>
+      <div class="editor-foot">
+        <input type="text" id="editor-note" placeholder="What changed? (optional note kept with this version)" maxlength="500">
+        <div class="form-error" id="editor-error"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" id="editor-cancel">Cancel</button>
+          <button type="button" class="btn btn-primary" id="editor-save">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="_repo/ui/app.js"></script>
+</body>
+</html>

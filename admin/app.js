@@ -31,7 +31,7 @@ function applyAuthScoping() {
   document.body.classList.toggle("scoped-user", !isSuperAdmin);
   document.querySelectorAll("[data-admin-only]").forEach(el => { el.hidden = !isSuperAdmin; });
   // Provisioning controls (deploy / create blank site) — administrators only.
-  ["upload-btn", "blank-site-btn"].forEach(id => {
+  ["upload-btn", "blank-site-btn", "new-repo-btn"].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.hidden = !isSuperAdmin;
   });
@@ -298,6 +298,45 @@ document.addEventListener("DOMContentLoaded", async () => {
         body: JSON.stringify({ slug, name }),
       });
       closeBlankModal();
+      navigateTo("sites");
+    } catch (err) {
+      errEl.textContent = err.message;
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+
+  // --- New Repository Modal ---
+  const repoModal = document.getElementById("repo-site-modal");
+  const closeRepoModal = () => {
+    repoModal.hidden = true;
+    document.getElementById("repo-site-form").reset();
+    document.getElementById("repo-error").textContent = "";
+  };
+  document.getElementById("new-repo-btn").addEventListener("click", () => { repoModal.hidden = false; });
+  document.getElementById("repo-cancel").addEventListener("click", closeRepoModal);
+  repoModal.querySelector(".modal-backdrop").addEventListener("click", closeRepoModal);
+  document.getElementById("repo-site-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const slug = document.getElementById("repo-slug").value.toLowerCase().trim();
+    const errEl = document.getElementById("repo-error");
+    const submitBtn = document.getElementById("repo-submit");
+    errEl.textContent = "";
+    if (!slug) { errEl.textContent = "Slug is required"; return; }
+    submitBtn.disabled = true;
+    try {
+      await api("/sites/repository", {
+        method: "POST",
+        body: JSON.stringify({
+          slug,
+          name: document.getElementById("repo-name").value.trim() || slug,
+          description: document.getElementById("repo-description").value.trim(),
+          quota_bytes: parseInt(document.getElementById("repo-quota").value, 10),
+          max_versions: parseInt(document.getElementById("repo-max-versions").value, 10) || 0,
+          visibility: document.getElementById("repo-visibility").value,
+        }),
+      });
+      closeRepoModal();
       navigateTo("sites");
     } catch (err) {
       errEl.textContent = err.message;
@@ -2252,7 +2291,7 @@ async function loadSites() {
     return;
   }
 
-  el.innerHTML = sites.map((s) => `
+  el.innerHTML = sites.map((s) => s.site_type === "repository" ? renderRepositoryCard(s) : `
     <div class="site-card" data-slug="${esc(s.slug)}">
       <div class="site-card-header">
         <div>
@@ -2263,6 +2302,7 @@ async function loadSites() {
             ${s.root_dir ? ` · root: <code>${esc(s.root_dir)}</code>` : ""}
             ${s.spa ? " · SPA" : ""}
             ${s.mcp_enabled ? (s.mcp_read_only ? " · MCP (read-only)" : s.mcp_auto_commit ? " · MCP (auto-snapshot)" : " · MCP") : ""}
+            ${s.allowed_countries !== null && s.allowed_countries !== undefined ? ` · countries: ${s.allowed_countries === "" ? "all" : esc(s.allowed_countries)}` : ""}
           </div>
         </div>
         <div class="site-card-badges">
@@ -2304,7 +2344,63 @@ async function loadSites() {
       if (site) showSiteSettings(slug, site.root_dir, site.spa, site.mcp_enabled, site.mcp_read_only, site.mcp_auto_commit, site.cms_enabled);
     });
   });
+  el.querySelectorAll("[data-repo-backup]").forEach((btn) => {
+    btn.addEventListener("click", () => downloadRepositoryBackup(btn.dataset.repoBackup));
+  });
 }
+
+// Card for a repository site (document library). No versions/deploy/file
+// manager — those concepts live inside the repository's own UI.
+function renderRepositoryCard(s) {
+  const quota = s.repo_quota_bytes > 0 ? ` of ${formatBytes(s.repo_quota_bytes)}` : "";
+  const pct = s.repo_quota_bytes > 0 ? Math.min(100, Math.round((s.size_bytes / s.repo_quota_bytes) * 100)) : 0;
+  return `
+    <div class="site-card site-card-repo" data-slug="${esc(s.slug)}">
+      <div class="site-card-header">
+        <div>
+          <h2>${s.pinned_at ? '📌 ' : ''}${esc(s.name)}</h2>
+          <div class="site-slug">/${esc(s.slug)}${s.aliases && s.aliases.length ? ` <span class="text-muted text-sm">(also: ${s.aliases.map(a => "/" + esc(a)).join(", ")})</span>` : ""}${s.host_aliases && s.host_aliases.length ? ` <span class="text-muted text-sm">· host: ${s.host_aliases.map(h => esc(h)).join(", ")}</span>` : ""}</div>
+          <div class="site-version-info">
+            Repository · ${s.repo_visibility === "public" ? "public" : "private"}
+            ${s.allowed_countries !== null && s.allowed_countries !== undefined ? ` · countries: ${s.allowed_countries === "" ? "all" : esc(s.allowed_countries)}` : ""}
+          </div>
+        </div>
+        <div class="site-card-badges">
+          <span class="site-badge badge-repo">Repository</span>
+          <span class="site-badge ${s.active ? "badge-active" : "badge-inactive"}">${s.active ? "Active" : "Inactive"}</span>
+          ${s.health && s.health !== "ok" ? `<span class="site-badge badge-broken" title="${esc(s.health_detail || s.health)}">Broken</span>` : ""}
+        </div>
+      </div>
+      <div class="site-meta">
+        <span>${formatBytes(s.size_bytes)}${quota}</span>
+        <span>${s.file_count} files</span>
+        <span>${timeAgo(s.updated_at)}</span>
+      </div>
+      ${s.repo_quota_bytes > 0 ? `<div class="repo-quota-bar" title="${pct}% of storage used"><div class="repo-quota-fill${pct >= 98 ? " full" : pct >= 85 ? " warn" : ""}" style="width:${pct}%"></div></div>` : ""}
+      <div class="site-actions">
+        <a href="/${esc(s.slug)}/" target="_blank" rel="noopener" class="btn btn-sm btn-primary">Open</a>
+        <button class="btn btn-sm" data-settings="${esc(s.slug)}">Settings</button>
+        <button class="btn btn-sm" data-repo-backup="${esc(s.slug)}">Backup</button>
+        <button class="btn btn-sm" onclick="toggleSitePinned(${jsArg(s.slug)}, ${s.pinned_at ? "false" : "true"}).then(()=>loadSites())">${s.pinned_at ? "Unpin" : "Pin"}</button>
+        <button class="btn btn-sm ${s.active ? "btn-danger" : "btn-primary"}" onclick="toggleSiteActive(${jsArg(s.slug)}, ${!s.active})">
+          ${s.active ? "Disable" : "Enable"}
+        </button>
+        ${isSuperAdmin ? `<button class="btn btn-sm btn-danger" onclick="confirmDeleteSite(${jsArg(s.slug)})">Delete</button>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+// Download a repository's full backup archive (current files + every stored
+// version + metadata). A GET, so the session cookie authorizes it.
+window.downloadRepositoryBackup = function (slug) {
+  const a = document.createElement("a");
+  a.href = `${API}/sites/${slug}/repo/backup`;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+};
 
 // --- Site Explorer (experimental three-column layout) ---
 let explorerSites = [];
@@ -2358,6 +2454,7 @@ function renderExplorerList() {
   listEl.innerHTML = filtered.map(s => {
     const dotClass = !s.active ? "" : (s.health && s.health !== "ok" ? "broken" : "active");
     const tags = [];
+    if (s.site_type === "repository") tags.push("Repository");
     if (s.spa) tags.push("SPA");
     if (s.mcp_enabled) tags.push(s.mcp_read_only ? "MCP·RO" : "MCP");
     return `
@@ -2392,6 +2489,7 @@ function selectExplorerSite(slug) {
 
 function renderExplorerActions(site) {
   const el = document.getElementById("explorer-actions");
+  if (site.site_type === "repository") { renderExplorerRepositoryActions(site, el); return; }
   const aliasLine = (site.aliases && site.aliases.length)
     ? site.aliases.map(a => `/${esc(a)}`).join(", ")
     : '<span class="text-muted">none</span>';
@@ -2452,6 +2550,125 @@ function renderExplorerActions(site) {
     await confirmDeleteSite(slug);
     loadExplorer();
   });
+}
+
+function renderExplorerRepositoryActions(site, el) {
+  const slug = site.slug;
+  const aliasLine = (site.aliases && site.aliases.length) ? site.aliases.map(a => `/${esc(a)}`).join(", ") : '<span class="text-muted">none</span>';
+  const hostLine = (site.host_aliases && site.host_aliases.length) ? site.host_aliases.map(h => esc(h)).join(", ") : '<span class="text-muted">none</span>';
+  const countries = site.allowed_countries === null || site.allowed_countries === undefined ? "global list" : (site.allowed_countries === "" ? "all" : esc(site.allowed_countries));
+  el.innerHTML = `
+    <h2>${esc(site.name)}
+      <span class="site-badge badge-repo" style="margin-left:6px;vertical-align:middle">Repository</span>
+      <span class="site-badge ${site.active ? "badge-active" : "badge-inactive"}" style="margin-left:4px;vertical-align:middle">${site.active ? "Active" : "Inactive"}</span>
+    </h2>
+    <div class="slug-line">/${esc(site.slug)}</div>
+    <dl class="meta-grid">
+      <dt>Storage</dt><dd>${formatBytes(site.size_bytes)}${site.repo_quota_bytes > 0 ? ` of ${formatBytes(site.repo_quota_bytes)}` : " (no limit)"} · ${site.file_count} files</dd>
+      <dt>Visibility</dt><dd>${site.repo_visibility === "public" ? "public" : "private (sign-in required)"}</dd>
+      <dt>Versions</dt><dd>${site.repo_max_versions > 0 ? `${site.repo_max_versions} per file` : "unlimited"}</dd>
+      <dt>Countries</dt><dd>${countries}</dd>
+      <dt>Updated</dt><dd>${timeAgo(site.updated_at)}</dd>
+      <dt>Aliases</dt><dd>${aliasLine}</dd>
+      <dt>Hosts</dt><dd>${hostLine}</dd>
+    </dl>
+    <div class="action-group">
+      <a href="/${esc(site.slug)}/" target="_blank" rel="noopener" class="btn btn-sm btn-primary">Open</a>
+      <button class="btn btn-sm" data-act="settings">Settings</button>
+      <button class="btn btn-sm" data-act="backup">Backup</button>
+      <button class="btn btn-sm" data-act="pin">${site.pinned_at ? "Unpin" : "Pin"}</button>
+      <button class="btn btn-sm ${site.active ? "btn-danger" : "btn-primary"}" data-act="toggle" style="grid-column:1 / -1">${site.active ? "Disable" : "Enable"}</button>
+      ${isSuperAdmin ? '<button class="btn btn-sm btn-danger" data-act="delete" style="grid-column:1 / -1">Delete</button>' : ""}
+    </div>
+  `;
+  el.querySelector('[data-act="settings"]').addEventListener("click", () => showSiteSettings(slug));
+  el.querySelector('[data-act="backup"]').addEventListener("click", () => downloadRepositoryBackup(slug));
+  el.querySelector('[data-act="pin"]').addEventListener("click", async () => { await toggleSitePinned(slug, !site.pinned_at); loadExplorer(); });
+  el.querySelector('[data-act="toggle"]').addEventListener("click", async () => { await toggleSiteActive(slug, !site.active); loadExplorer(); });
+  const delBtn = el.querySelector('[data-act="delete"]');
+  if (delBtn) delBtn.addEventListener("click", async () => { await confirmDeleteSite(slug); loadExplorer(); });
+}
+
+// --- Per-site country picker (used inside Site Settings → Access) ---
+//
+// Three modes: inherit the global allow-list, allow everyone, or a custom
+// list. Returns an object whose value() yields what the settings API expects:
+// null (inherit), [] (allow all), or ["US", ...].
+const siteCountryList = { all: null, byCode: null };
+async function ensureSiteCountryList() {
+  if (siteCountryList.all) return;
+  const { countries } = await api("/countries");
+  siteCountryList.all = countries || [];
+  siteCountryList.byCode = new Map(siteCountryList.all.map(c => [c.code, c]));
+}
+function createSiteCountryPicker(container, allowedCountries) {
+  const mode = allowedCountries === null || allowedCountries === undefined ? "inherit" : (allowedCountries === "" ? "all" : "custom");
+  let selected = mode === "custom" ? allowedCountries.split(",").map(c => c.trim()).filter(Boolean) : [];
+  container.innerHTML = `
+    <label>
+      Country access
+      <select class="site-country-mode">
+        <option value="inherit" ${mode === "inherit" ? "selected" : ""}>Use the global allow-list (Settings → Security)</option>
+        <option value="all" ${mode === "all" ? "selected" : ""}>Allow visitors from every country</option>
+        <option value="custom" ${mode === "custom" ? "selected" : ""}>Only these countries</option>
+      </select>
+      <small>Applies to this site only. Visitors from anywhere else — and anyone whose country can't be determined — get a 403.</small>
+    </label>
+    <div class="site-country-custom" ${mode === "custom" ? "" : "hidden"}>
+      <div class="chip-box site-country-chips"></div>
+      <div class="country-search-wrap">
+        <input type="text" class="site-country-search" placeholder="Type a country name or code (e.g. Canada, CA)…" autocomplete="off" spellcheck="false">
+        <div class="country-suggest site-country-suggest" hidden></div>
+      </div>
+    </div>`;
+  const modeEl = container.querySelector(".site-country-mode");
+  const customEl = container.querySelector(".site-country-custom");
+  const chips = container.querySelector(".site-country-chips");
+  const search = container.querySelector(".site-country-search");
+  const suggest = container.querySelector(".site-country-suggest");
+  const label = (code) => { const e = siteCountryList.byCode && siteCountryList.byCode.get(code); return `${flagEmoji(code)} ${e ? e.name : countryName(code)}`; };
+  function renderChips() {
+    if (!selected.length) { chips.innerHTML = '<span class="text-sm text-muted">No countries yet — nobody can reach this site until you add one.</span>'; return; }
+    chips.innerHTML = [...selected].sort((a, b) => label(a).localeCompare(label(b))).map(code =>
+      `<span class="chip" data-code="${esc(code)}"><span>${esc(label(code))}</span><button type="button" class="chip-remove" aria-label="Remove">✕</button></span>`).join("");
+    chips.querySelectorAll(".chip-remove").forEach(b => b.addEventListener("click", () => {
+      selected = selected.filter(c => c !== b.closest(".chip").dataset.code); renderChips();
+    }));
+  }
+  let matches = [], highlighted = 0;
+  function renderSuggest() {
+    const q = search.value.trim().toLowerCase();
+    if (!q || !siteCountryList.all) { suggest.hidden = true; return; }
+    matches = siteCountryList.all.filter(c => !selected.includes(c.code) && (c.name.toLowerCase().includes(q) || c.code.toLowerCase() === q)).slice(0, 12);
+    highlighted = 0;
+    suggest.hidden = false;
+    suggest.innerHTML = matches.length
+      ? matches.map((c, i) => `<button type="button" class="country-suggest-item ${i === 0 ? "active" : ""}" data-code="${esc(c.code)}">${flagEmoji(c.code)} ${esc(c.name)} <span class="text-muted">${esc(c.code)}</span></button>`).join("")
+      : '<div class="country-suggest-item text-muted">No matching country</div>';
+    suggest.querySelectorAll("[data-code]").forEach(b => b.addEventListener("mousedown", (e) => { e.preventDefault(); add(b.dataset.code); }));
+  }
+  function add(code) { if (!selected.includes(code)) selected.push(code); search.value = ""; suggest.hidden = true; renderChips(); search.focus(); }
+  modeEl.addEventListener("change", () => { customEl.hidden = modeEl.value !== "custom"; if (modeEl.value === "custom") ensureSiteCountryList().then(renderChips); });
+  search.addEventListener("input", renderSuggest);
+  search.addEventListener("focus", renderSuggest);
+  search.addEventListener("blur", () => setTimeout(() => { suggest.hidden = true; }, 120));
+  search.addEventListener("keydown", (e) => {
+    if (suggest.hidden || !matches.length) { if (e.key === "Enter") e.preventDefault(); return; }
+    if (e.key === "ArrowDown") { e.preventDefault(); highlighted = (highlighted + 1) % matches.length; }
+    else if (e.key === "ArrowUp") { e.preventDefault(); highlighted = (highlighted - 1 + matches.length) % matches.length; }
+    else if (e.key === "Enter") { e.preventDefault(); add(matches[highlighted].code); return; }
+    else if (e.key === "Escape") { suggest.hidden = true; return; }
+    else return;
+    suggest.querySelectorAll(".country-suggest-item").forEach((el, i) => el.classList.toggle("active", i === highlighted));
+  });
+  ensureSiteCountryList().then(renderChips).catch(() => renderChips());
+  return {
+    value() {
+      if (modeEl.value === "inherit") return null;
+      if (modeEl.value === "all") return [];
+      return [...selected];
+    },
+  };
 }
 
 // Pin or unpin a site (sorts it to the top of listings, shared across admins).
@@ -2618,10 +2835,12 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
   let aliases = [];
   let hostAliases = [];
   let siteName = slug;
+  let siteRecord = null;
   try {
     const data = await api(`/sites/${slug}`);
     if (data && data.site) {
       const s = data.site;
+      siteRecord = s;
       rootDir = s.root_dir;
       spa = s.spa;
       mcpEnabled = s.mcp_enabled;
@@ -2634,19 +2853,92 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
     hostAliases = (data && data.host_aliases) || [];
   } catch (_) {}
 
+  const isRepo = !!siteRecord && siteRecord.site_type === "repository";
+  const repoGeneralPanel = isRepo ? `
+        <div class="settings-tab-panel active" data-panel="general">
+          <label>
+            Display Name
+            <input type="text" id="settings-name" value="${esc(siteName || "")}" maxlength="200" placeholder="Friendly name shown as the repository title">
+            <small>Shown as the title of the repository page and in the admin. The slug (<code>/${esc(slug)}/</code>) is unchanged.</small>
+          </label>
+          <label>
+            Description <small>(optional, shown under the title)</small>
+            <textarea id="settings-repo-description" rows="2" maxlength="1000">${esc(siteRecord.repo_description || "")}</textarea>
+          </label>
+          <label>
+            Who can view
+            <select id="settings-repo-visibility">
+              <option value="private" ${siteRecord.repo_visibility !== "public" ? "selected" : ""}>Private — signed-in administrators and assigned site users</option>
+              <option value="public" ${siteRecord.repo_visibility === "public" ? "selected" : ""}>Public — anyone with the link can browse and download</option>
+            </select>
+            <small>Uploading, editing, and deleting always require signing in with a Hoster account that has access to this site.</small>
+          </label>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <label>
+              Storage limit (MB)
+              <input type="number" id="settings-repo-quota" min="0" step="1" style="width:100%" value="${Math.round((siteRecord.repo_quota_bytes || 0) / (1024 * 1024))}">
+              <small>0 = no limit. Counts every stored version.</small>
+            </label>
+            <label>
+              Versions kept per file
+              <input type="number" id="settings-repo-versions" min="0" max="1000" style="width:100%" value="${siteRecord.repo_max_versions ?? 20}">
+              <small>0 = keep every version</small>
+            </label>
+          </div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+          <label>
+            Banner image
+            <small>Shown across the top of the repository page. PNG, JPEG, WebP, or GIF up to 8 MB.</small>
+          </label>
+          <div id="settings-banner-preview" style="margin-bottom:8px">${siteRecord.repo_banner ? `<img src="/${esc(slug)}/_repo/banner?t=${Date.now()}" alt="" style="max-width:100%;max-height:120px;border-radius:6px;border:1px solid var(--border)">` : '<span class="text-sm text-muted">No banner set.</span>'}</div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input type="file" id="settings-banner-file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+            <button type="button" class="btn btn-sm" id="settings-banner-upload">${siteRecord.repo_banner ? "Replace banner" : "Upload banner"}</button>
+            ${siteRecord.repo_banner ? '<button type="button" class="btn btn-sm btn-danger" id="settings-banner-remove">Remove</button>' : ""}
+            <span class="text-sm" id="settings-banner-status"></span>
+          </div>
+        </div>
+        <div class="settings-tab-panel" data-panel="backup">
+          <label>
+            Backup
+            <small>Download a ZIP containing every current document (readable as plain files) plus the full version history and metadata Hoster needs to restore it.</small>
+          </label>
+          <div id="settings-repo-stats" class="text-sm text-muted" style="margin-bottom:8px">Loading…</div>
+          <button type="button" class="btn btn-sm" id="settings-repo-backup-btn">Download backup (.zip)</button>
+          <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+          <label>
+            Restore
+            <small style="color:var(--danger)">Replaces every document, folder, and version in this repository with the archive's contents. Administrators only; your password is required.</small>
+          </label>
+          <div class="file-drop" id="settings-repo-restore-drop" style="padding:14px">
+            <input type="file" id="settings-repo-restore-file" accept=".zip">
+            <p>Drop a repository backup <strong>.zip</strong> here or click to browse</p>
+          </div>
+          <input type="password" id="settings-repo-restore-password" placeholder="Your password" autocomplete="current-password" style="margin:8px 0">
+          <button type="button" class="btn btn-sm btn-danger" id="settings-repo-restore-btn" disabled>Restore from backup</button>
+          <div class="form-error" id="settings-repo-restore-error"></div>
+          <div class="form-success" id="settings-repo-restore-success"></div>
+        </div>` : "";
+
   const modal = document.createElement("div");
   modal.className = "modal site-settings-modal";
   modal.innerHTML = `
     <div class="modal-backdrop"></div>
     <div class="modal-content">
-      <h2>Site Settings — ${esc(slug)}</h2>
+      <h2>${isRepo ? "Repository Settings" : "Site Settings"} — ${esc(slug)}</h2>
       <div class="settings-tabs" role="tablist">
         <button type="button" class="settings-tab active" role="tab" data-tab="general">General</button>
-        <button type="button" class="settings-tab" role="tab" data-tab="mcp">MCP</button>
+        ${isRepo ? "" : '<button type="button" class="settings-tab" role="tab" data-tab="mcp">MCP</button>'}
+        <button type="button" class="settings-tab" role="tab" data-tab="access">Access</button>
         <button type="button" class="settings-tab" role="tab" data-tab="aliases">Aliases</button>
-        <button type="button" class="settings-tab" role="tab" data-tab="cms">CMS</button>
+        ${isRepo ? '<button type="button" class="settings-tab" role="tab" data-tab="backup">Backup</button>' : '<button type="button" class="settings-tab" role="tab" data-tab="cms">CMS</button>'}
       </div>
       <form id="site-settings-form">
+        ${repoGeneralPanel}
+        <div class="settings-tab-panel" data-panel="access">
+          <div id="settings-access-countries"></div>
+        </div>
+        ${isRepo ? "" : `
         <div class="settings-tab-panel active" data-panel="general">
           <label>
             Display Name
@@ -2670,7 +2962,9 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
           </label>
           <button type="button" class="btn btn-sm" id="settings-download-btn">Download current version (.zip)</button>
         </div>
+        `}
 
+        ${isRepo ? "" : `
         <div class="settings-tab-panel" data-panel="mcp">
           <label style="display:flex;align-items:center;gap:10px;flex-direction:row">
             <input type="checkbox" id="settings-mcp" ${mcpEnabled ? "checked" : ""} style="width:auto;margin:0">
@@ -2704,6 +2998,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
           </div>
           <div class="form-error" id="delegate-error" style="margin-top:4px"></div>
         </div>
+        `}
 
         <div class="settings-tab-panel" data-panel="aliases">
           <label>
@@ -2744,6 +3039,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
           <div class="form-error" id="host-alias-error" style="margin-top:4px"></div>
         </div>
 
+        ${isRepo ? "" : `
         <div class="settings-tab-panel" data-panel="cms">
           <label style="display:flex;align-items:center;gap:10px;flex-direction:row">
             <input type="checkbox" id="settings-cms" ${cmsEnabled ? "checked" : ""} style="width:auto;margin:0">
@@ -2757,6 +3053,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
 
           <div class="form-error" id="cms-error" style="margin-top:4px;margin-left:28px"></div>
         </div>
+        `}
 
         <div class="modal-actions" style="margin-top:16px">
           <button type="button" class="btn btn-ghost close-modal">Cancel</button>
@@ -2924,7 +3221,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
     } catch (_) {}
   }
 
-  modal.querySelector("#add-delegate-btn").addEventListener("click", async () => {
+  modal.querySelector("#add-delegate-btn")?.addEventListener("click", async () => {
     const label = modal.querySelector("#settings-delegate-label").value.trim();
     const password = modal.querySelector("#settings-delegate-password").value;
     const expVal = modal.querySelector("#settings-delegate-expires").value;
@@ -3043,16 +3340,105 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
   // Re-render the CMS status block whenever the toggle changes so the user
   // sees "will be scaffolded on save" vs the active status panel without
   // having to save first.
-  modal.querySelector("#settings-cms").addEventListener("change", () => loadCmsStatus());
+  modal.querySelector("#settings-cms")?.addEventListener("change", () => loadCmsStatus());
 
   // Initial load: only fetch when the CMS tab gains focus, but prime once so
   // it's ready immediately when the tab opens.
-  loadCmsStatus();
+  if (!isRepo) loadCmsStatus();
+
+  // --- Access tab: per-site country override (both site types) ---
+  const accessPicker = createSiteCountryPicker(modal.querySelector("#settings-access-countries"), siteRecord ? siteRecord.allowed_countries : null);
+
+  // --- Repository-only panels: banner, backup, restore ---
+  if (isRepo) {
+    const bannerFile = modal.querySelector("#settings-banner-file");
+    const bannerStatus = modal.querySelector("#settings-banner-status");
+    modal.querySelector("#settings-banner-upload").addEventListener("click", () => bannerFile.click());
+    bannerFile.addEventListener("change", async () => {
+      const file = bannerFile.files && bannerFile.files[0];
+      if (!file) return;
+      bannerStatus.textContent = "Uploading…";
+      try {
+        const res = await fetch(`${API}/sites/${slug}/repo/banner`, { method: "POST", headers: { "X-CSRF-Token": csrfToken, "Content-Type": file.type || "application/octet-stream" }, body: file });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Upload failed");
+        bannerStatus.textContent = "Banner updated.";
+        modal.querySelector("#settings-banner-preview").innerHTML = `<img src="/${esc(slug)}/_repo/banner?t=${Date.now()}" alt="" style="max-width:100%;max-height:120px;border-radius:6px;border:1px solid var(--border)">`;
+      } catch (e) { bannerStatus.textContent = e.message; bannerStatus.style.color = "var(--danger)"; }
+      bannerFile.value = "";
+    });
+    modal.querySelector("#settings-banner-remove")?.addEventListener("click", async () => {
+      try {
+        await api(`/sites/${slug}/repo/banner`, { method: "DELETE" });
+        modal.querySelector("#settings-banner-preview").innerHTML = '<span class="text-sm text-muted">No banner set.</span>';
+        modal.querySelector("#settings-banner-remove").remove();
+        modal.querySelector("#settings-banner-upload").textContent = "Upload banner";
+      } catch (e) { bannerStatus.textContent = e.message; }
+    });
+
+    api(`/sites/${slug}/repo/stats`).then(st => {
+      modal.querySelector("#settings-repo-stats").innerHTML =
+        `${st.file_count} file${st.file_count === 1 ? "" : "s"} in ${st.dir_count} folder${st.dir_count === 1 ? "" : "s"} · ${st.version_count} stored version${st.version_count === 1 ? "" : "s"} · ${formatBytes(st.used_bytes)} used${st.quota_bytes > 0 ? ` of ${formatBytes(st.quota_bytes)}` : ""}${st.trash_count ? ` · ${st.trash_count} in trash` : ""}`;
+    }).catch(() => {});
+    modal.querySelector("#settings-repo-backup-btn").addEventListener("click", () => downloadRepositoryBackup(slug));
+
+    const restoreDrop = modal.querySelector("#settings-repo-restore-drop");
+    const restoreFile = modal.querySelector("#settings-repo-restore-file");
+    const restoreBtn = modal.querySelector("#settings-repo-restore-btn");
+    const restoreErr = modal.querySelector("#settings-repo-restore-error");
+    const restoreOk = modal.querySelector("#settings-repo-restore-success");
+    const syncRestoreBtn = () => { restoreBtn.disabled = !(restoreFile.files && restoreFile.files.length) || !isSuperAdmin; };
+    restoreFile.addEventListener("change", syncRestoreBtn);
+    restoreDrop.addEventListener("dragover", (e) => { e.preventDefault(); restoreDrop.classList.add("dragover"); });
+    restoreDrop.addEventListener("dragleave", () => restoreDrop.classList.remove("dragover"));
+    restoreDrop.addEventListener("drop", (e) => { e.preventDefault(); restoreDrop.classList.remove("dragover"); if (e.dataTransfer.files.length) { restoreFile.files = e.dataTransfer.files; syncRestoreBtn(); } });
+    if (!isSuperAdmin) restoreDrop.insertAdjacentHTML("afterend", '<div class="text-sm text-muted">Only administrators can restore a repository.</div>');
+    restoreBtn.addEventListener("click", async () => {
+      restoreErr.textContent = ""; restoreOk.textContent = "";
+      const file = restoreFile.files && restoreFile.files[0];
+      const password = modal.querySelector("#settings-repo-restore-password").value;
+      if (!file) return;
+      if (!password) { restoreErr.textContent = "Your password is required to restore."; return; }
+      if (!confirm(`Replace EVERYTHING in "${siteName}" with the contents of ${file.name}? This cannot be undone.`)) return;
+      restoreBtn.disabled = true;
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        fd.append("confirm_password", password);
+        const result = await apiForm(`/sites/${slug}/repo/restore`, fd);
+        restoreOk.textContent = `Restored ${result.manifest.file_count} file(s) and ${result.manifest.version_count} version(s) from the backup taken ${timeAgo(result.manifest.created_at)}.`;
+        modal.querySelector("#settings-repo-restore-password").value = "";
+      } catch (e) { restoreErr.textContent = e.message; }
+      finally { syncRestoreBtn(); }
+    });
+  }
 
   // Save settings form
   modal.querySelector("#site-settings-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const newName = document.getElementById("settings-name").value.trim();
+    if (isRepo) {
+      try {
+        await api(`/sites/${slug}/settings`, {
+          method: "POST",
+          body: JSON.stringify({
+            name: newName,
+            allowed_countries: accessPicker.value(),
+            repo: {
+              description: modal.querySelector("#settings-repo-description").value,
+              visibility: modal.querySelector("#settings-repo-visibility").value,
+              quota_bytes: Math.max(0, parseInt(modal.querySelector("#settings-repo-quota").value, 10) || 0) * 1024 * 1024,
+              max_versions: Math.max(0, parseInt(modal.querySelector("#settings-repo-versions").value, 10) || 0),
+            },
+          }),
+        });
+        modal.remove();
+        if (currentView === "explorer") loadExplorer(); else loadSites();
+      } catch (err) {
+        document.getElementById("settings-error").textContent = err.message;
+      }
+      return;
+    }
     const newRoot = document.getElementById("settings-root-dir").value.trim() || null;
     const newSpa = document.getElementById("settings-spa").checked;
     const newMcp = document.getElementById("settings-mcp").checked;
@@ -3063,7 +3449,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
       // Persist the settings (display name, root_dir, spa, mcp flags, cms_enabled).
       await api(`/sites/${slug}/settings`, {
         method: "POST",
-        body: JSON.stringify({ name: newName, root_dir: newRoot, spa: newSpa, mcp_enabled: newMcp, mcp_read_only: newMcpReadOnly, mcp_auto_commit: newMcpAutoCommit, cms_enabled: newCms }),
+        body: JSON.stringify({ name: newName, root_dir: newRoot, spa: newSpa, mcp_enabled: newMcp, mcp_read_only: newMcpReadOnly, mcp_auto_commit: newMcpAutoCommit, cms_enabled: newCms, allowed_countries: accessPicker.value() }),
       });
       // If CMS was just turned on and isn't scaffolded yet, lay the files down.
       if (newCms && !cmsEnabled) {

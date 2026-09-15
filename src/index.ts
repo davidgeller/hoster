@@ -4,6 +4,7 @@ import { cleanExpiredSessions, cleanExpiredPending2fa, migrateLegacyAdmin } from
 import { cleanExpiredChallenges } from "./webauthn";
 import { pruneExpired as pruneExpiredOauth } from "./oauth";
 import { rebuildCurrentSymlinks } from "./sites";
+import { purgeExpiredRepoTrash, cleanRepoTemp } from "./repo";
 
 export const VERSION = "__BUILD_VERSION__";
 const PORT = parseInt(process.env.PORT || "3500");
@@ -53,6 +54,10 @@ function runPeriodicCleanup() {
     cleanExpiredPending2fa();
     cleanExpiredChallenges();
     pruneExpiredOauth();
+    // Repository sites: empty trash older than the retention window and drop
+    // abandoned upload temp files.
+    purgeExpiredRepoTrash();
+    cleanRepoTemp();
   } catch (e: any) {
     console.error("Periodic cleanup error:", e?.message || e);
   }

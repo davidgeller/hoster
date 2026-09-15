@@ -43,6 +43,8 @@ In every case the Hoster binary itself is identical — only the front-end TLS l
 - **Version management** — each upload creates a new version; roll back instantly
 - **SPA support** — auto-detects Angular, React, and Vue builds (with deep root directory detection); rewrites `<base href>` for subpath hosting
 - **Default landing page** — send the hostname root to any hosted site or external URL instead of the admin sign-in, with an optional footer bar over the default site that links back to the admin panel
+- **Repository sites** — a second site type: a document library with a built-in interface, no HTML to upload. Drag and drop files or whole folders, browse in grid or list view, preview images / video / audio / PDFs / text / Markdown, create and edit text and Markdown files in place, package any selection as a ZIP, and keep per-file version history with one-click restore. Deleted items sit in a trash for 30 days. Each repository has its own storage limit, versions-per-file cap, public or private visibility, optional banner image, and a self-contained backup archive
+- **Per-site country restrictions** — every site (web or repository) can inherit the global allow-list, open itself to every country, or use its own list
 - **Custom domains (host aliases)** — point any domain at a specific site so `spryly.com/about` serves the same content as `/spryly/about` on the canonical hostname, with no slug in the URL
 - **Configuration backup** — save and restore your entire hoster setup (settings, sites, versions) to a `.hoster` file with optional AES-256-GCM encryption for device migration; restore auto-rebuilds active-version symlinks and reports broken sites
 - **Self-healing site state** — `_current` symlinks rebuild at startup, after restore, or on demand from a database-driven repair pass; broken sites surface a red badge in the admin UI
@@ -85,6 +87,32 @@ For the selected site it surfaces, at a glance:
 - **Aliases** (path aliases) and **Host** aliases (custom domains)
 
 Inline actions cover the full lifecycle without leaving the page: **Visit**, **Files** (the file manager), **Versions** (with release notes), **Update**, **Upload File**, **Settings**, **Reload**, plus **Disable** and **Delete**. The preview pane refreshes on demand so you can confirm a deploy or an AI edit immediately.
+
+## Repository sites
+
+Besides classic web sites, Hoster can host **repositories**: document libraries with a built-in UI. Create one from *Sites → New Repository*; it opens at `/<slug>/` (or at the root of a custom domain) with nothing to design or upload.
+
+What a repository gives you:
+
+- **Uploads** — drag files or entire folders anywhere on the page, or use the Upload button (Shift-click to pick a folder). Uploads stream to disk and are hashed; identical content is stored once.
+- **Browsing** — folders, breadcrumbs, grid and list views, sorting, search across the whole tree, multi-select, drag-to-move between folders, shareable `?path=` / `?file=` links.
+- **Previews** — images, video, audio, PDFs, plain text, and rendered Markdown in a side pane; everything else is offered as a download.
+- **Packaging** — select any mix of files and folders and download them as one ZIP with the folder structure preserved.
+- **In-place editing** — create and edit `.md`, `.txt`, `.csv`, `.json` and other text files in a built-in editor with live Markdown preview; every save is a new version with an optional note.
+- **Per-file versions** — every upload or edit of an existing path records a version. Restore any version (the restore itself is a new version), download old versions, or delete one. The versions-per-file cap prunes the oldest automatically.
+- **Trash** — deletes are soft; restore from the trash for 30 days, or purge early.
+- **Storage limit** — a per-repository quota counted across every stored version (content-addressed, so re-uploads and restores are free).
+- **Banner + description** — set from Site Settings; shown across the top of the page.
+- **Backup & restore** — *Settings → Backup* downloads a ZIP with every current document as plain files (`files/`) plus the full history (`objects/`, `repository.json`); an administrator can restore it into any repository. Repositories are also included in the platform-wide configuration backup.
+
+### Access model
+
+- **Readers**: everyone when the repository is *public*; otherwise only writers.
+- **Writers**: platform administrators and site users assigned to the repository (*Settings → Users*). Uploading, editing, renaming, deleting, and restoring always require signing in — the repository page has its own sign-in dialog that uses the same accounts, passwords, and TOTP as the admin panel.
+- Mutations require the session's CSRF token; raw file bytes are served with `nosniff`, a content-hash ETag, and — for HTML/SVG/XML — a `sandbox` Content-Security-Policy so a hostile document can never run script on the site's origin. Office documents and unknown types are always served as attachments.
+- Per-site country restrictions apply to repositories too.
+
+Repositories store data under `sites/<slug>/_repo/objects/` (content-addressed blobs) with the tree and history in SQLite (`repo_files`, `repo_versions`, `repo_blobs`).
 
 ## Prerequisites
 

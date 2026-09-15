@@ -649,6 +649,12 @@ input:focus, textarea:focus, select:focus {
 .badge-active { background: var(--success-bg); color: var(--success); }
 .badge-inactive { background: var(--danger-bg); color: var(--danger); }
 .badge-broken { background: var(--danger-bg); color: var(--danger); margin-left: 6px; cursor: help; }
+.badge-repo { background: var(--warning-bg); color: var(--warning); }
+.site-card-repo { border-left: 3px solid var(--warning); }
+.repo-quota-bar { height: 4px; background: var(--bg-hover); border-radius: 2px; overflow: hidden; margin: 0 0 12px; }
+.repo-quota-fill { height: 100%; background: var(--accent); }
+.repo-quota-fill.warn { background: var(--warning); }
+.repo-quota-fill.full { background: var(--danger); }
 
 .site-card-badges {
   display: flex;

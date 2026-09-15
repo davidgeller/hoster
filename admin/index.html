@@ -171,6 +171,10 @@
           <div class="view-header">
             <h1>Sites</h1>
             <div style="display:flex;gap:8px">
+              <button class="btn" id="new-repo-btn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                New Repository
+              </button>
               <button class="btn" id="blank-site-btn">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
                 New Blank Site
@@ -237,6 +241,61 @@
                 <button type="submit" class="btn btn-primary" id="blank-submit">Create</button>
               </div>
               <div class="form-error" id="blank-error"></div>
+            </form>
+          </div>
+        </div>
+
+        <!-- New Repository Modal -->
+        <div id="repo-site-modal" class="modal" hidden>
+          <div class="modal-backdrop"></div>
+          <div class="modal-content">
+            <h2>Create Repository</h2>
+            <p class="text-sm text-muted mb-2">A document library with its own built-in interface: drag-and-drop uploads, folders, previews, per-file version history, and packaged downloads. Nothing to upload for the design — set a name, an optional banner, and you're done.</p>
+            <form id="repo-site-form">
+              <label>
+                Slug (URL path)
+                <input type="text" id="repo-slug" placeholder="documents" pattern="[a-z0-9][a-z0-9\-]*[a-z0-9]?" required>
+                <small>Lowercase letters, numbers, hyphens. Opens at <code>/<strong>slug</strong>/</code></small>
+              </label>
+              <label>
+                Display Name
+                <input type="text" id="repo-name" placeholder="Team Documents">
+              </label>
+              <label>
+                Description <small>(optional, shown under the title)</small>
+                <textarea id="repo-description" rows="2" maxlength="1000" placeholder="What lives here?"></textarea>
+              </label>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                <label>
+                  Storage limit
+                  <select id="repo-quota">
+                    <option value="268435456">256 MB</option>
+                    <option value="1073741824" selected>1 GB</option>
+                    <option value="5368709120">5 GB</option>
+                    <option value="21474836480">20 GB</option>
+                    <option value="107374182400">100 GB</option>
+                    <option value="0">Unlimited</option>
+                  </select>
+                </label>
+                <label>
+                  Versions kept per file
+                  <input type="number" id="repo-max-versions" min="0" max="1000" value="20" style="width:100%">
+                  <small>0 = keep every version</small>
+                </label>
+              </div>
+              <label>
+                Who can view
+                <select id="repo-visibility">
+                  <option value="private" selected>Private — only signed-in administrators and assigned site users</option>
+                  <option value="public">Public — anyone with the link can browse and download</option>
+                </select>
+                <small>Uploading, editing, and deleting always require signing in. Assign site users under Settings → Users.</small>
+              </label>
+              <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" id="repo-cancel">Cancel</button>
+                <button type="submit" class="btn btn-primary" id="repo-submit">Create</button>
+              </div>
+              <div class="form-error" id="repo-error"></div>
             </form>
           </div>
         </div>
@@ -495,7 +554,7 @@
           <div class="settings-page-panel" data-settings-panel="security" hidden>
             <div class="card" style="max-width:560px">
               <h3>Country Restrictions</h3>
-              <p class="text-sm text-muted mb-2">Only serve hosted sites to visitors from the countries you pick; everyone else (and any visitor whose country can't be determined) gets a 403. Leave the list empty to allow the whole world. The admin panel, MCP, and OAuth endpoints are never geo-blocked.</p>
+              <p class="text-sm text-muted mb-2">Only serve hosted sites to visitors from the countries you pick; everyone else (and any visitor whose country can't be determined) gets a 403. Leave the list empty to allow the whole world. Any site can override this list from its own Settings → Access tab. The admin panel, MCP, and OAuth endpoints are never geo-blocked.</p>
               <form id="country-form">
                 <label for="country-search">Allowed countries</label>
                 <div class="chip-box" id="country-chips" aria-live="polite">

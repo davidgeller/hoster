@@ -3,6 +3,7 @@ import { mkdirSync, rmSync, rmdirSync, existsSync, readdirSync, statSync, symlin
 import { join, resolve, sep } from "path";
 import { tmpdir } from "os";
 import { getScaffoldFiles, CMS_LIB_VERSION } from "./cms-scaffold";
+import { normalizeCountryCodes } from "./countries";
 
 import { dirname } from "path";
 const BASE_DIR = process.env.HOSTER_HOME || dirname(process.execPath);
@@ -27,7 +28,25 @@ export interface Site {
   cms_enabled: number;      // 1 = CMS feature enabled (JSON-driven content)
   cms_lib_version: string | null;  // version of the CMS lib currently scaffolded on disk
   pinned_at: string | null; // when the site was pinned to the top of listings (NULL = not pinned)
+  site_type: SiteType;      // "web" (static files, versioned tree) or "repository" (document library)
+  allowed_countries: string | null; // NULL = inherit the global allow-list; "" = allow all; "US,CA" = custom list
+  repo_quota_bytes: number;         // repository sites: storage cap across every stored version
+  repo_max_versions: number;        // repository sites: versions kept per file (0 = unlimited)
+  repo_visibility: RepoVisibility;  // repository sites: who may browse/download
+  repo_description: string | null;  // repository sites: blurb shown under the title
+  repo_banner: string | null;       // repository sites: banner filename inside _repo/ (NULL = none)
 }
+
+// Site kinds. A "web" site is the classic versioned static tree served from
+// _current. A "repository" is a document library with built-in UI, per-file
+// versioning, and content-addressed storage (see repo.ts); it has no
+// current_version and no _current symlink.
+export type SiteType = "web" | "repository";
+export type RepoVisibility = "public" | "private";
+export const SITE_TYPES: SiteType[] = ["web", "repository"];
+export const REPO_VISIBILITIES: RepoVisibility[] = ["public", "private"];
+export const DEFAULT_REPO_QUOTA_BYTES = 1024 * 1024 * 1024; // 1 GB
+export const DEFAULT_REPO_MAX_VERSIONS = 20;
 
 export interface SiteVersion {
   id: number;
@@ -86,6 +105,13 @@ try { db.exec("ALTER TABLE sites ADD COLUMN mcp_auto_commit INTEGER DEFAULT 0");
 try { db.exec("ALTER TABLE sites ADD COLUMN cms_enabled INTEGER DEFAULT 0"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN cms_lib_version TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN pinned_at TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN site_type TEXT NOT NULL DEFAULT 'web'"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN allowed_countries TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN repo_quota_bytes INTEGER NOT NULL DEFAULT 1073741824"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN repo_max_versions INTEGER NOT NULL DEFAULT 20"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN repo_visibility TEXT NOT NULL DEFAULT 'private'"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN repo_description TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN repo_banner TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE site_versions ADD COLUMN mcp_modified INTEGER DEFAULT 0"); } catch (_) {}
 try { db.exec("ALTER TABLE site_versions ADD COLUMN notes TEXT"); } catch (_) {}
 
@@ -266,7 +292,7 @@ function updateCurrentSymlink(slug: string, version: string) {
 
 const MAX_UPLOAD_SIZE = 500 * 1024 * 1024; // 500 MB
 
-function validateSlug(slug: string): void {
+export function validateSlug(slug: string): void {
   if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(slug)) {
     throw new Error("Slug must be lowercase alphanumeric with hyphens, not starting/ending with hyphen");
   }
@@ -297,6 +323,20 @@ const BLANK_INDEX_HTML = `<!DOCTYPE html>
 </body>
 </html>
 `;
+
+// The versioned-tree operations (deploy, commit, switch, file manager, MCP)
+// only make sense for web sites. A repository site's slug must never be
+// silently converted into a web site by a ZIP deploy.
+export function assertWebSite(slug: string): void {
+  const existing = getSite(slug);
+  if (existing && existing.site_type !== "web") {
+    throw new Error(`Site '${slug}' is a ${existing.site_type} site, not a web site`);
+  }
+}
+
+export function isRepositorySite(site: Site | null | undefined): boolean {
+  return !!site && site.site_type === "repository";
+}
 
 export function createBlankSite(slug: string, name: string): { site: Site; version: SiteVersion } {
   validateSlug(slug);
@@ -334,6 +374,7 @@ export async function deploySite(
   slug: string, name: string, zipBuffer: ArrayBuffer, label?: string | null, notes?: string | null
 ): Promise<{ site: Site; version: SiteVersion }> {
   validateSlug(slug);
+  assertWebSite(slug);
   const cleanLabel = sanitizeVersionLabel(label);
   const cleanNotes = sanitizeVersionNotes(notes);
   if (zipBuffer.byteLength > MAX_UPLOAD_SIZE) {
@@ -569,6 +610,11 @@ export function deleteSite(slug: string): boolean {
   db.run("DELETE FROM site_aliases WHERE site_slug = ?", slug);
   db.run("DELETE FROM host_aliases WHERE site_slug = ?", slug);
   db.run("DELETE FROM requests WHERE site_slug = ?", slug);
+  // Repository metadata (tables are created by repo.ts; they exist by the
+  // time any site can be deleted because index.ts imports the module).
+  try { db.run("DELETE FROM repo_versions WHERE site_slug = ?", slug); } catch (_) {}
+  try { db.run("DELETE FROM repo_files WHERE site_slug = ?", slug); } catch (_) {}
+  try { db.run("DELETE FROM repo_blobs WHERE site_slug = ?", slug); } catch (_) {}
   invalidateSiteCache(slug);
   invalidateHostAliasCache();
   // A default landing page pointing at this site would now 404 on every
@@ -675,6 +721,73 @@ export function updateSiteSettings(
   return result.changes > 0;
 }
 
+// --- Per-site country restrictions ---
+//
+// NULL inherits the global allow-list (Settings → Security). An empty string
+// overrides it to "allow everyone" for this site; a comma list restricts the
+// site to exactly those countries regardless of the global list.
+export function setSiteAllowedCountries(slug: string, countries: string[] | null): boolean {
+  const value = countries === null ? null : normalizeCountryCodes(countries).join(",");
+  const result = db.run(
+    "UPDATE sites SET allowed_countries = ?, updated_at = datetime('now') WHERE slug = ?",
+    value, slug
+  );
+  invalidateSiteCache(slug);
+  return result.changes > 0;
+}
+
+// Effective allow-list for a site: the site's own override when set, else
+// the global list. Empty array = no restriction.
+export function effectiveAllowedCountries(site: Site | null | undefined, globalList: string[]): string[] {
+  if (!site || site.allowed_countries === null || site.allowed_countries === undefined) return globalList;
+  return site.allowed_countries.split(",").map(c => c.trim().toUpperCase()).filter(Boolean);
+}
+
+export interface RepoSettingsInput {
+  quota_bytes?: number;
+  max_versions?: number;
+  visibility?: RepoVisibility;
+  description?: string | null;
+}
+
+const MAX_REPO_QUOTA_BYTES = 1024 * 1024 * 1024 * 1024; // 1 TB — sanity cap, not a promise
+const MAX_REPO_DESCRIPTION = 1000;
+
+export function updateRepoSettings(slug: string, input: RepoSettingsInput): boolean {
+  const site = getSite(slug);
+  if (!site) return false;
+  if (site.site_type !== "repository") throw new Error("Not a repository site");
+  let quota = site.repo_quota_bytes;
+  if (input.quota_bytes !== undefined) {
+    const q = Number(input.quota_bytes);
+    if (!Number.isFinite(q) || q < 0 || q > MAX_REPO_QUOTA_BYTES) throw new Error("Storage limit must be between 0 and 1 TB");
+    quota = Math.floor(q);
+  }
+  let maxVersions = site.repo_max_versions;
+  if (input.max_versions !== undefined) {
+    const m = Number(input.max_versions);
+    if (!Number.isInteger(m) || m < 0 || m > 1000) throw new Error("Versions per file must be a whole number from 0 (unlimited) to 1000");
+    maxVersions = m;
+  }
+  let visibility = site.repo_visibility;
+  if (input.visibility !== undefined) {
+    if (!REPO_VISIBILITIES.includes(input.visibility)) throw new Error("Visibility must be 'public' or 'private'");
+    visibility = input.visibility;
+  }
+  let description = site.repo_description;
+  if (input.description !== undefined) {
+    const d = input.description == null ? "" : stripControl(String(input.description).replace(/\r\n?/g, "\n"), true).trim();
+    if (d.length > MAX_REPO_DESCRIPTION) throw new Error(`Description exceeds ${MAX_REPO_DESCRIPTION} characters`);
+    description = d || null;
+  }
+  const result = db.run(
+    `UPDATE sites SET repo_quota_bytes = ?, repo_max_versions = ?, repo_visibility = ?, repo_description = ?, updated_at = datetime('now') WHERE slug = ?`,
+    quota, maxVersions, visibility, description, slug
+  );
+  invalidateSiteCache(slug);
+  return result.changes > 0;
+}
+
 // --- Admin file management (upload / delete / rename / copy / mkdir) ---
 //
 // Every mutation below operates on the CURRENT version's content directory
@@ -714,6 +827,7 @@ const within = (child: string, parent: string) => child === parent || child.star
 
 // Content directory of the site's current version, or throw.
 function contentDirFor(site: Site): string {
+  if (site.site_type !== "web") throw new Error(`'${site.slug}' is a ${site.site_type} site; use the repository tools instead`);
   if (!site.current_version) throw new Error("Site has no current version");
   const siteDir = join(SITES_DIR, site.slug, "_current");
   if (!existsSync(siteDir)) throw new Error("Site directory not found");
@@ -1544,6 +1658,14 @@ export function checkSiteHealth(slug: string): SiteHealth {
   if (!site) {
     return { slug, status: "missing_version_dir", current_version: null, detail: "site not in database" };
   }
+  if (site.site_type === "repository") {
+    // Repositories keep everything under _repo/ (content-addressed objects);
+    // there is no version directory or _current link to verify.
+    const repoDir = join(SITES_DIR, slug, "_repo");
+    return existsSync(repoDir)
+      ? { slug, status: "ok", current_version: null, detail: "" }
+      : { slug, status: "missing_version_dir", current_version: null, detail: "repository directory missing: _repo" };
+  }
   if (!site.current_version) {
     return { slug, status: "no_current_version", current_version: null, detail: "DB has no current_version recorded" };
   }
@@ -1588,10 +1710,17 @@ export interface RebuildResult {
 // listing — we don't trust the DB value as a free-form path.
 export function rebuildCurrentSymlinks(): RebuildResult {
   const result: RebuildResult = { repaired: [], warnings: [], ok: [] };
-  const sites = db.query("SELECT slug, current_version FROM sites").all() as { slug: string; current_version: string | null }[];
+  const sites = db.query("SELECT slug, current_version, site_type FROM sites").all() as { slug: string; current_version: string | null; site_type: string }[];
 
   for (const row of sites) {
     const { slug, current_version } = row;
+
+    // Repository sites have no _current symlink by design.
+    if (row.site_type === "repository") {
+      if (existsSync(join(SITES_DIR, slug, "_repo"))) result.ok.push(slug);
+      else result.warnings.push(`Site '${slug}': repository directory _repo is missing on disk`);
+      continue;
+    }
 
     if (!current_version) {
       result.warnings.push(`Site '${slug}': no current version recorded in database`);

@@ -26,7 +26,11 @@ import {
   deleteSitePaths, renameSitePath, copySitePath, createSiteDirectory,
   checkSiteHealth, rebuildCurrentSymlinks,
   getCmsStatus, cmsInit,
+  setSiteAllowedCountries, updateRepoSettings,
 } from "./sites";
+import {
+  createRepositorySite, repoStats, exportRepoBackup, importRepoBackup, setRepoBanner, clearRepoBanner,
+} from "./repo";
 import {
   listCmsLibFiles, getCmsLibFile, updateCmsLibFile, resetCmsLibFile,
 } from "./cms-lib";
@@ -282,6 +286,8 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
       path === "/_admin/api/users" || path.startsWith("/_admin/api/users/") ||
       path === "/_admin/api/sites/repair" ||
       path === "/_admin/api/sites/blank" ||
+      path === "/_admin/api/sites/repository" ||
+      /^\/_admin\/api\/sites\/[a-z0-9-]+\/repo\/restore$/.test(path) ||
       (path === "/_admin/api/sites" && req.method === "POST");
     if (isPlatformPath) return forbidden();
 
@@ -294,7 +300,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     const siteScoped = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)(?:\/|$)/);
     if (siteScoped) {
       const slug = siteScoped[1];
-      if (slug !== "blank" && slug !== "repair" && !canSite(slug)) return forbidden();
+      if (slug !== "blank" && slug !== "repair" && slug !== "repository" && !canSite(slug)) return forbidden();
     }
     const analyticsSite = path.match(/^\/_admin\/api\/analytics\/site\/([a-z0-9-]+)$/);
     if (analyticsSite && !canSite(analyticsSite[1])) return forbidden();
@@ -504,6 +510,27 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     }
   }
 
+  // --- Create a repository site (document library with built-in UI) ---
+  if (path === "/_admin/api/sites/repository" && req.method === "POST") {
+    const body = await readJsonBodyOrEmpty<{ slug?: string; name?: string; quota_bytes?: number; max_versions?: number; visibility?: "public" | "private"; description?: string }>(req);
+    const slug = body.slug?.toLowerCase().trim();
+    if (!slug) return json({ error: "Slug is required" }, 400);
+    try {
+      const site = createRepositorySite(slug, body.name || slug, {
+        quota_bytes: body.quota_bytes, max_versions: body.max_versions, visibility: body.visibility, description: body.description,
+      });
+      audit("site_created_repository", `${slug} (${site.repo_visibility}, ${Math.round(site.repo_quota_bytes / (1024 * 1024))} MB)`);
+      return json({ site });
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
+  }
+
+  // --- Country list for the per-site picker (any signed-in account) ---
+  if (path === "/_admin/api/countries" && req.method === "GET") {
+    return json({ countries: listCountries() });
+  }
+
   const siteMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)$/);
   if (siteMatch) {
     const slug = siteMatch[1];
@@ -544,16 +571,38 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   const settingsMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/settings$/);
   if (settingsMatch && req.method === "POST") {
     const slug = settingsMatch[1];
-    const body = await readJsonBody<{ name?: string; root_dir?: string | null; spa?: boolean; mcp_enabled?: boolean; mcp_read_only?: boolean; mcp_auto_commit?: boolean; cms_enabled?: boolean }>(req);
+    const body = await readJsonBody<{
+      name?: string; root_dir?: string | null; spa?: boolean; mcp_enabled?: boolean; mcp_read_only?: boolean; mcp_auto_commit?: boolean; cms_enabled?: boolean;
+      allowed_countries?: string[] | null;
+      repo?: { quota_bytes?: number; max_versions?: number; visibility?: "public" | "private"; description?: string | null };
+    }>(req);
     if (!body) return json({ error: "Invalid request body" }, 400);
+    const site = getSite(slug);
+    if (!site) return json({ error: "Not found" }, 404);
     try {
       // Rename the display name if a (changed) name was provided.
       if (typeof body.name === "string" && body.name.trim()) {
-        const site = getSite(slug);
-        if (site && body.name.trim() !== site.name) {
+        if (body.name.trim() !== site.name) {
           renameSite(slug, body.name);
           audit("site_renamed", `${slug} -> ${body.name.trim()}`);
         }
+      }
+      // Per-site country override: omit to leave alone, null to inherit the
+      // global list, [] to allow everyone, [codes] to restrict.
+      if ("allowed_countries" in body) {
+        const value = body.allowed_countries;
+        if (value !== null && !Array.isArray(value)) return json({ error: "allowed_countries must be an array or null" }, 400);
+        const before = site.allowed_countries;
+        setSiteAllowedCountries(slug, value);
+        const after = getSite(slug)!.allowed_countries;
+        if (before !== after) audit("site_countries_updated", `${slug}: ${after === null ? "inherit global" : after === "" ? "allow all" : after}`);
+      }
+      if (site.site_type === "repository") {
+        if (body.repo && typeof body.repo === "object") {
+          updateRepoSettings(slug, body.repo);
+          audit("repository_settings_updated", slug);
+        }
+        return json({ ok: true });
       }
       const ok = updateSiteSettings(slug, body.root_dir ?? null, body.spa ?? false, body.mcp_enabled, body.mcp_read_only, body.mcp_auto_commit, body.cms_enabled);
       if (ok) audit("site_settings_updated", slug);
@@ -769,6 +818,60 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
       const result = uploadFileToSite(slug, destPath, await file.arrayBuffer(), { replace });
       audit("file_uploaded", `${slug}:${result.path}${result.replaced ? " (replaced)" : ""}`);
       return json({ ok: true, ...result });
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
+  }
+
+  // --- Repository sites: stats, backup archive, restore, banner ---
+  const repoMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/repo\/(stats|backup|restore|banner)$/);
+  if (repoMatch) {
+    const [, slug, op] = repoMatch;
+    const site = getSite(slug);
+    if (!site) return json({ error: "Not found" }, 404);
+    if (site.site_type !== "repository") return json({ error: "Not a repository site" }, 400);
+    try {
+      if (op === "stats" && req.method === "GET") {
+        return json(repoStats(slug));
+      }
+      if (op === "backup" && req.method === "GET") {
+        const result = await exportRepoBackup(slug);
+        audit("repository_backup_downloaded", `${slug} (${result.manifest.file_count} files, ${result.manifest.version_count} versions)`);
+        return new Response(result.buffer, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/zip",
+            "Content-Disposition": `attachment; filename="${result.filename}"`,
+            "Content-Length": String(result.buffer.length),
+          },
+        });
+      }
+      if (op === "restore" && req.method === "POST") {
+        // Replaces every document and every version in the repository, so it
+        // asks for the acting administrator's password like a platform restore.
+        let formData: FormData;
+        try { formData = await req.formData(); }
+        catch { return json({ error: "Invalid multipart body" }, 400); }
+        const file = formData.get("file");
+        if (!file || !(file instanceof File)) return json({ error: "Backup file is required" }, 400);
+        const denied = await stepUp((formData.get("confirm_password") as string) || undefined);
+        if (denied) { audit("repository_restore_denied", slug); return denied; }
+        const manifest = await importRepoBackup(slug, Buffer.from(await file.arrayBuffer()), actor);
+        audit("repository_restored", `${slug} from ${manifest.slug} backup of ${manifest.created_at} (${manifest.file_count} files)`);
+        return json({ ok: true, manifest, stats: repoStats(slug) });
+      }
+      if (op === "banner" && req.method === "POST") {
+        const declared = parseInt(req.headers.get("content-length") || "0", 10) || 0;
+        if (declared > 8 * 1024 * 1024) return json({ error: "Banner image must be 8 MB or smaller" }, 413);
+        const result = setRepoBanner(slug, new Uint8Array(await req.arrayBuffer()));
+        audit("repo_banner_set", `${slug} (${result.mime})`);
+        return json({ ok: true, ...result });
+      }
+      if (op === "banner" && req.method === "DELETE") {
+        clearRepoBanner(slug);
+        audit("repo_banner_cleared", slug);
+        return json({ ok: true });
+      }
     } catch (e: any) {
       return json({ error: e.message }, 400);
     }

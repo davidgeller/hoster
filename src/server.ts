@@ -7,8 +7,9 @@ import {
   handleRegister, handleAuthorize, handleToken, handleRevoke,
 } from "./oauth";
 import { logRequest, extractRequestMeta, shouldTrack, isCountryAllowed, isIpBlocked, checkAndAutoBlock } from "./analytics";
-import { resolveSitePath, resolveAlias, resolveHostAlias, normalizeHost, getDefaultSite, getDefaultSiteFooterSlug } from "./sites";
+import { resolveSitePath, resolveAlias, resolveHostAlias, normalizeHost, getDefaultSite, getDefaultSiteFooterSlug, getSite } from "./sites";
 import { serveCmsLibFile } from "./cms-lib";
+import { handleRepoSite } from "./repo-site";
 
 // Full header set for first-party surfaces we control: the admin UI (document
 // + static assets), the admin/OAuth/MCP APIs, and OAuth/MCP discovery. Safe to
@@ -282,8 +283,18 @@ export function createServer(port: number) {
         }
 
         // --- Country restriction (skip for infra paths) ---
+        // Site-aware: the site a request is headed for (host alias, or the
+        // first path segment on the canonical host) may carry its own
+        // allow-list that overrides the global one. Non-site paths (OAuth
+        // discovery etc.) use the global list.
         if (!isInfraPath) {
-          if (!isCountryAllowed(meta.country)) {
+          const gateSlug = hostAliasSlug
+            ? resolveAlias(hostAliasSlug)
+            : (() => {
+                const first = path.split("/").filter(Boolean)[0];
+                return first && !first.startsWith(".") && !first.startsWith("_") && /^[a-z0-9][a-z0-9-]*$/.test(first) ? resolveAlias(first) : null;
+              })();
+          if (!isCountryAllowed(meta.country, gateSlug)) {
             status = 403;
             const res = addSiteHeaders(new Response("Access denied", { status: 403 }));
             logReq(res);
@@ -422,6 +433,31 @@ export function createServer(port: number) {
           candidateSlug = resolveAlias(parts[0]);
           reqPath = parts.slice(1).join("/") || "index.html";
           basePath = `/${parts[0]}/`;
+        }
+
+        // --- Repository sites: built-in document library UI + API ---
+        // Routed before any static-file logic; a repository has no _current tree.
+        const candidateSite = getSite(candidateSlug);
+        if (candidateSite && candidateSite.site_type === "repository") {
+          if (!candidateSite.active) {
+            status = 404;
+            const res = addSiteHeaders(new Response("Not found", { status: 404 }));
+            logReq(res);
+            return res;
+          }
+          siteSlug = candidateSlug;
+          // /slug -> /slug/ so the UI's relative asset paths resolve.
+          if (!hostAliasSlug && parts.length === 1 && !path.endsWith("/")) {
+            status = 301;
+            const res = addSiteHeaders(new Response(null, { status: 301, headers: { Location: path + "/" + url.search } }));
+            logReq(res);
+            return res;
+          }
+          const repoPath = reqPath === "index.html" && !path.endsWith("index.html") ? "" : reqPath;
+          const res = addSiteHeaders(await handleRepoSite(req, candidateSite, repoPath, { ip: meta.ip, basePath, hostAliased: !!hostAliasSlug }));
+          status = res.status;
+          logReq(res);
+          return res;
         }
 
         // If a .html URL has a trailing slash (e.g. /slug/page.html/), strip it.
