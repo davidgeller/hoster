@@ -2930,6 +2930,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
         <button type="button" class="settings-tab active" role="tab" data-tab="general">General</button>
         ${isRepo ? "" : '<button type="button" class="settings-tab" role="tab" data-tab="mcp">MCP</button>'}
         <button type="button" class="settings-tab" role="tab" data-tab="access">Access</button>
+        ${isSuperAdmin ? '<button type="button" class="settings-tab" role="tab" data-tab="users">Users</button>' : ""}
         <button type="button" class="settings-tab" role="tab" data-tab="aliases">Aliases</button>
         ${isRepo ? '<button type="button" class="settings-tab" role="tab" data-tab="backup">Backup</button>' : '<button type="button" class="settings-tab" role="tab" data-tab="cms">CMS</button>'}
       </div>
@@ -2938,6 +2939,29 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
         <div class="settings-tab-panel" data-panel="access">
           <div id="settings-access-countries"></div>
         </div>
+        ${isSuperAdmin ? `
+        <div class="settings-tab-panel" data-panel="users">
+          <label>
+            Who can manage this ${isRepo ? "repository" : "site"}
+            <small>${isRepo
+              ? "Administrators can always upload, edit, and delete here. Site users you grant below can too (and can view it even when it's private). Everyone else gets the public view, or nothing if the repository is private."
+              : "Administrators can always manage every site. Site users you grant below see this site in their admin panel and can update its files, versions, and settings — but can't create or delete sites."}
+          </small>
+          </label>
+          <div id="settings-users-list" class="text-sm text-muted">Loading…</div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
+          <label>
+            Add a new site user with access
+            <small>Creates the account and grants it this ${isRepo ? "repository" : "site"} right away. They sign in with these credentials${isRepo ? " — on the repository page or at /_admin" : " at /_admin"}.</small>
+          </label>
+          <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:6px;align-items:center">
+            <input type="text" id="settings-user-new-name" placeholder="username" pattern="[a-z0-9._\\-]{1,40}" autocomplete="off">
+            <input type="password" id="settings-user-new-password" placeholder="password (min 8 chars)" minlength="8" autocomplete="new-password">
+            <button type="button" class="btn btn-sm btn-primary" id="settings-user-add-btn">Add</button>
+          </div>
+          <div class="form-error" id="settings-users-error" style="margin-top:4px"></div>
+          <p class="text-sm text-muted" style="margin-top:10px">Passwords, 2FA, and administrator rights for every account are managed under <a href="#" id="settings-users-go">Settings → Users</a>.</p>
+        </div>` : ""}
         ${isRepo ? "" : `
         <div class="settings-tab-panel active" data-panel="general">
           <label>
@@ -3348,6 +3372,69 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
 
   // --- Access tab: per-site country override (both site types) ---
   const accessPicker = createSiteCountryPicker(modal.querySelector("#settings-access-countries"), siteRecord ? siteRecord.allowed_countries : null);
+
+  // --- Users tab: per-site grants (administrators only) ---
+  // Reuses the platform user endpoints, so Settings → Users stays in sync.
+  async function loadSiteUsers() {
+    const listEl = modal.querySelector("#settings-users-list");
+    if (!listEl) return;
+    try {
+      const { users } = await api("/users");
+      const admins = users.filter(u => u.is_admin);
+      const siteUsers = users.filter(u => !u.is_admin);
+      listEl.innerHTML = `
+        <div style="margin-bottom:8px"><strong style="color:var(--text)">Administrators</strong> <span class="text-muted">(always)</span>:
+          ${admins.map(u => `<code>${esc(u.username)}</code>`).join(", ")}</div>
+        ${siteUsers.length ? `
+          <div style="margin-bottom:4px"><strong style="color:var(--text)">Site users</strong> — check to grant access:</div>
+          <div style="display:flex;flex-direction:column;gap:4px">
+            ${siteUsers.map(u => `
+              <label style="display:flex;align-items:center;gap:8px;flex-direction:row;margin:0;font-weight:normal;color:var(--text)">
+                <input type="checkbox" data-grant-user="${u.id}" ${u.sites.includes(slug) ? "checked" : ""} style="width:auto;margin:0">
+                <code>${esc(u.username)}</code>
+                <span class="text-muted text-sm">${u.sites.length ? `${u.sites.length} site${u.sites.length === 1 ? "" : "s"}` : "no sites yet"}${u.totp_enabled ? " · 2FA" : ""}</span>
+              </label>`).join("")}
+          </div>`
+          : `<div>No site users exist yet — add one below.</div>`}`;
+      listEl.querySelectorAll("[data-grant-user]").forEach(cb => cb.addEventListener("change", async () => {
+        const errEl = modal.querySelector("#settings-users-error");
+        errEl.textContent = "";
+        const user = siteUsers.find(u => u.id === parseInt(cb.dataset.grantUser, 10));
+        const sites = cb.checked ? Array.from(new Set([...user.sites, slug])) : user.sites.filter(x => x !== slug);
+        cb.disabled = true;
+        try {
+          await api(`/users/${user.id}`, { method: "PUT", body: JSON.stringify({ sites }) });
+          user.sites = sites;
+        } catch (err) {
+          cb.checked = !cb.checked;
+          errEl.textContent = err.message;
+        } finally { cb.disabled = false; }
+      }));
+    } catch (err) {
+      listEl.innerHTML = `<span style="color:var(--danger)">${esc(err.message)}</span>`;
+    }
+  }
+  modal.querySelector("#settings-user-add-btn")?.addEventListener("click", async () => {
+    const nameEl = modal.querySelector("#settings-user-new-name");
+    const pwEl = modal.querySelector("#settings-user-new-password");
+    const errEl = modal.querySelector("#settings-users-error");
+    errEl.textContent = "";
+    const username = nameEl.value.trim().toLowerCase();
+    if (!username) { errEl.textContent = "Username is required"; return; }
+    if (pwEl.value.length < 8) { errEl.textContent = "Password must be at least 8 characters"; return; }
+    try {
+      await api("/users", { method: "POST", body: JSON.stringify({ username, password: pwEl.value, is_admin: false, sites: [slug] }) });
+      nameEl.value = ""; pwEl.value = "";
+      loadSiteUsers();
+    } catch (err) { errEl.textContent = err.message; }
+  });
+  modal.querySelector("#settings-users-go")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    modal.remove();
+    navigateTo("settings");
+    setTimeout(() => selectSettingsTab("users"), 50);
+  });
+  if (isSuperAdmin) loadSiteUsers();
 
   // --- Repository-only panels: banner, backup, restore ---
   if (isRepo) {

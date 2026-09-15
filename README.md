@@ -109,7 +109,7 @@ What a repository gives you:
 ### Access model
 
 - **Readers**: everyone when the repository is *public*; otherwise only writers.
-- **Writers**: platform administrators and site users assigned to the repository (*Settings → Users*). Uploading, editing, renaming, deleting, and restoring always require signing in — the repository page has its own sign-in dialog that uses the same accounts, passwords, and TOTP as the admin panel.
+- **Writers**: platform administrators and site users assigned to the repository. Grant or revoke access, or create a new site user, from the repository's own *Settings → Users* tab (every site has one); the platform-wide list under *Settings → Users* shows the same grants. Uploading, editing, renaming, deleting, and restoring always require signing in — the repository page has its own sign-in dialog that uses the same accounts, passwords, and TOTP as the admin panel.
 - Mutations require the session's CSRF token; raw file bytes are served with `nosniff`, a content-hash ETag, and — for HTML/SVG/XML — a `sandbox` Content-Security-Policy so a hostile document can never run script on the site's origin. Office documents and unknown types are always served as attachments.
 - Per-site country restrictions apply to repositories too.
 
