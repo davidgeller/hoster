@@ -31,7 +31,7 @@ import { SITES_DIR, getSite, validateSlug, invalidateSiteCache, normalizeSitePat
 import { createHash, randomBytes } from "crypto";
 import {
   existsSync, mkdirSync, rmSync, renameSync, unlinkSync, copyFileSync, linkSync, statSync,
-  readdirSync, readFileSync, writeFileSync, lstatSync, realpathSync,
+  readdirSync, readFileSync, writeFileSync, lstatSync, realpathSync, openSync,
 } from "fs";
 import { join, dirname, resolve, sep, extname, basename } from "path";
 import { tmpdir } from "os";
@@ -88,7 +88,7 @@ const MAX_PATH_LENGTH = 1024;
 const MAX_SEGMENT_LENGTH = 255;
 const MAX_NOTE_LENGTH = 500;
 const MAX_TEXT_FILE_BYTES = 10 * 1024 * 1024; // in-place editor cap
-const MAX_ZIP_BYTES = 4 * 1024 * 1024 * 1024; // packaged download cap (uncompressed)
+const MAX_ZIP_BYTES = 4 * 1024 * 1024 * 1024; // packaged download cap (uncompressed; streamed, never buffered)
 
 // --- Types ---
 
@@ -350,6 +350,15 @@ function blobExists(slug: string, sha256: string): boolean {
 // Stream an incoming body to a temp file while hashing it. Returns the hash
 // and size; the caller moves the temp file into objects/ or discards it.
 export interface StagedBlob { tmpPath: string; sha256: string; size: number }
+
+// Bytes a new upload may add before the quota is hit (Infinity = no quota).
+// Used to stop streaming an oversized upload early instead of filling the
+// disk with a temp file that would be rejected anyway.
+export function repoQuotaRemaining(slug: string): number {
+  const site = requireRepoSite(slug);
+  if (!site.repo_quota_bytes || site.repo_quota_bytes <= 0) return Infinity;
+  return Math.max(0, site.repo_quota_bytes - repoUsedBytes(slug));
+}
 
 export async function stageBlob(slug: string, body: ReadableStream<Uint8Array> | Uint8Array | ArrayBuffer | null, maxBytes: number): Promise<StagedBlob> {
   ensureRepoDirs(slug);
@@ -988,13 +997,26 @@ export function deleteRepoVersion(slug: string, relPath: string, versionNo: numb
   return true;
 }
 
+// An archive handed to the HTTP layer as a file the OS streams straight from
+// disk. The temp path is unlinked immediately; the open descriptor keeps the
+// bytes alive until the response finishes, so nothing is buffered in memory
+// and nothing is left behind if the process dies mid-download.
+export interface StreamedArchive { file: ReturnType<typeof Bun.file>; size: number; filename: string }
+
+function streamAndUnlink(zipPath: string, filename: string): StreamedArchive {
+  const size = statSync(zipPath).size;
+  const fd = openSync(zipPath, "r");
+  try { unlinkSync(zipPath); } catch (_) {}
+  return { file: Bun.file(fd), size, filename };
+}
+
 // --- Packaging (zip) ---
 
 // Materialize the selected paths (files and/or folders) into a temp tree and
 // zip it. Folder selections keep their structure; the archive's root holds
 // the selected items themselves. Blobs are hard-linked when the filesystem
 // allows it and copied otherwise.
-export async function zipRepoPaths(slug: string, relPaths: string[], archiveName?: string): Promise<{ buffer: Buffer; filename: string }> {
+export async function zipRepoPaths(slug: string, relPaths: string[], archiveName?: string): Promise<StreamedArchive> {
   const site = requireRepoSite(slug);
   if (!Array.isArray(relPaths) || !relPaths.length) throw new Error("No paths given");
   if (relPaths.length > 5000) throw new Error("Too many paths in one request (max 5000)");
@@ -1049,11 +1071,10 @@ export async function zipRepoPaths(slug: string, relPaths: string[], archiveName
       const err = proc.stderr ? new TextDecoder().decode(proc.stderr) : "unknown error";
       throw new Error(`Failed to create archive: ${err.trim()}`);
     }
-    const buffer = Buffer.from(readFileSync(zipPath));
     const name = safeArchiveName(archiveName) || (entries.length === 1 && selected.length === 1 && selected[0] !== ""
       ? basename(selected[0]).replace(/\.[^.]+$/, "")
       : site.slug);
-    return { buffer, filename: `${name}.zip` };
+    return streamAndUnlink(zipPath, `${name}.zip`);
   } finally {
     rmSync(staging, { recursive: true, force: true });
     try { rmSync(zipPath, { force: true }); } catch (_) {}
@@ -1140,7 +1161,7 @@ export interface RepoBackupManifest {
   visibility: RepoVisibility;
 }
 
-export async function exportRepoBackup(slug: string): Promise<{ buffer: Buffer; filename: string; manifest: RepoBackupManifest }> {
+export async function exportRepoBackup(slug: string): Promise<StreamedArchive & { manifest: RepoBackupManifest }> {
   const site = requireRepoSite(slug);
   const files = db.query("SELECT * FROM repo_files WHERE site_slug = ? ORDER BY path").all(slug) as FileRow[];
   const versions = db.query("SELECT * FROM repo_versions WHERE site_slug = ? ORDER BY file_id, version_no").all(slug) as any[];
@@ -1188,16 +1209,16 @@ export async function exportRepoBackup(slug: string): Promise<{ buffer: Buffer; 
       const err = proc.stderr ? new TextDecoder().decode(proc.stderr) : "unknown error";
       throw new Error(`Failed to create archive: ${err.trim()}`);
     }
-    const buffer = Buffer.from(readFileSync(zipPath));
     const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
-    return { buffer, filename: `${slug}-repository-${stamp}.zip`, manifest };
+    return { ...streamAndUnlink(zipPath, `${slug}-repository-${stamp}.zip`), manifest };
   } finally {
     rmSync(staging, { recursive: true, force: true });
     try { rmSync(zipPath, { force: true }); } catch (_) {}
   }
 }
 
-const MAX_REPO_RESTORE_BYTES = 4 * 1024 * 1024 * 1024;
+// The restore body is buffered by the multipart parser, so keep it modest.
+const MAX_REPO_RESTORE_BYTES = 1024 * 1024 * 1024;
 
 function stripSymlinks(dir: string): void {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -1218,7 +1239,16 @@ export async function importRepoBackup(slug: string, archive: Buffer, actor?: st
   try {
     const zipFile = join(staging, "archive.zip");
     writeFileSync(zipFile, archive);
-    const proc = Bun.spawnSync(["unzip", "-o", "-q", zipFile, "manifest.json", "repository.json", "objects/*", "banner.*", "-d", staging], { stdout: "ignore", stderr: "pipe" });
+    // Only ever extract members with exactly the names we expect. Listing
+    // first and passing explicit names (no globs) means an archive can't
+    // smuggle in "objects/<sha>/x", a symlink to extract through, or any
+    // path we'd never read — even before the post-extraction symlink sweep.
+    const listing = Bun.spawnSync(["unzip", "-Z1", zipFile], { stdout: "pipe", stderr: "pipe" });
+    if (listing.exitCode !== 0) { rmSync(zipFile, { force: true }); throw new Error("Archive could not be read (is it a repository backup?)"); }
+    const members = listing.stdout.toString().split("\n").map(l => l.trim()).filter(Boolean)
+      .filter(n => n === "manifest.json" || n === "repository.json" || /^objects\/[a-f0-9]{64}$/.test(n) || /^banner\.(png|jpg|webp|gif)$/.test(n));
+    if (!members.includes("manifest.json")) { rmSync(zipFile, { force: true }); throw new Error("Not a repository backup: manifest.json is missing"); }
+    const proc = Bun.spawnSync(["unzip", "-o", "-q", zipFile, ...members, "-d", staging], { stdout: "ignore", stderr: "pipe" });
     rmSync(zipFile, { force: true });
     if (proc.exitCode !== 0 && !existsSync(join(staging, "manifest.json"))) {
       throw new Error("Archive could not be read (is it a repository backup?)");

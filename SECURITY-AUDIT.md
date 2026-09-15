@@ -589,3 +589,41 @@ Moving from one administrator to many introduces two risks that did not exist be
 - **`prompt()`-based confirmations.** Step-up passwords in the Users panel are collected through the browser's native `prompt()`, which is not maskable. It is transmitted only over the existing authenticated HTTPS channel and never stored, but a shoulder-surfer could read it. A masked modal is a reasonable follow-up.
 
 *Verified by `bun test` (118 tests across 8 files, including new suites for accounts, file operations, version notes, and country validation) and by the compile-and-boot preflight in `build-pi.sh`.*
+
+
+---
+
+## Review — Repository sites, per-site countries, per-site users (2026-09-15, v2.1)
+
+**Scope:** `src/repo.ts`, `src/repo-site.ts`, `admin/repo/*`, the repository/country/user additions to `src/admin-api.ts`, `src/server.ts`, `src/backup.ts`, `admin/app.js`.
+
+### Model
+
+- Two principals only: administrators and site users granted via `admin_user_sites`. Repository writers = those; readers = everyone on a public repository, writers only on a private one. Enforced in one place (`resolveAuth` in `repo-site.ts`) before any read; every write additionally requires a session **and** the session's CSRF token (`X-CSRF-Token`).
+- Sign-in on the repository page reuses `verifyUserPassword` / TOTP / the per-IP lockouts, rotates the account's sessions, and issues the same `hoster_session` cookie (HttpOnly, Secure, SameSite=Strict).
+- Paths never touch the filesystem: files are content-addressed blobs (`_repo/objects/<aa>/<sha256>`) and the tree lives in SQLite. Path text is validated (`normalizeRepoPath`: no `..`/NUL/control chars, length caps) because it is shown in the UI and written into export archives, where it is re-checked against the staging root.
+- Country gating happens in `server.ts` before any repository or site code runs; the target slug's own list overrides the global one.
+
+### Findings fixed during the review
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| V1 | Medium | Packaged ZIPs and repository backups were read fully into memory before responding (up to 4 GB) — a memory-exhaustion vector, reachable anonymously on public repositories via `/_repo/api/zip`. | Archives are now streamed from an open file descriptor after the temp file is unlinked (`streamAndUnlink`); nothing is buffered. |
+| V2 | Medium | Uploads were spooled to disk up to the 2 GB per-file cap before the quota check ran, so a writer could fill the disk with temp files that would be rejected anyway. | `repoQuotaRemaining()` caps the streamed byte count and a declared `Content-Length` over the remaining quota is refused with 413 before any bytes are read. |
+| V3 | Low | Bun's default 128 MB request-body cap silently rejected large uploads and large ZIP deploys before Hoster's own limits applied. | `maxRequestBodySize` raised to the repository per-file limit; every buffering endpoint keeps its own smaller cap. |
+| V4 | Medium | Repository restore extracted `objects/*` by glob: a crafted archive could contain `objects/<sha>/x` or symlink members, and unzip would create them (and potentially extract through a symlink) before the post-extraction sweep. | The archive is listed first and only members matching the exact expected names (`manifest.json`, `repository.json`, `objects/<64 hex>`, `banner.<ext>`) are passed to `unzip` explicitly; symlinks are still stripped afterwards; every referenced hash must exist. Restore remains administrator-only with a password step-up; the buffered body is capped at 1 GB. |
+| V5 | Low | A private repository's banner image was served without authentication, and its description was included in the public `info` response (needed for the sign-in gate). | Banner and description now require read access; only the title is public. |
+
+### Verified safe (no change)
+
+- **Guessing filenames on a private repository reveals nothing.** Every content route (`tree`, `file`, `versions`, `zip`, `trash`) checks read access before looking anything up, so a real path and a bogus path both return the identical 401 body (covered by a test). On a public repository the tree is intentionally listable, so guessing is moot. Blob names on disk are hashes, not filenames, and never appear in URLs.
+- Raw content: `X-Content-Type-Options: nosniff`, strong content-hash ETag, `Content-Disposition` with RFC 5987 encoding. HTML/SVG/XML are only served inline under `Content-Security-Policy: sandbox` (opaque origin, no script), Markdown is served as `text/plain`, and office/unknown types are always attachments — a hostile document can't run script on the site's origin or read the admin cookie.
+- The built-in UI runs under `script-src 'self'` with no inline handlers; all user-controlled strings pass through `esc()`; the Markdown renderer escapes the whole input before pattern matching and rejects non-http(s)/mailto link schemes.
+- Per-site country lists are validated against the ISO table (`normalizeCountryCodes`), so a typo can't lock a site out silently.
+- Per-site user management reuses the existing `/users` endpoints (administrator-only, step-up for anything touching an administrator account).
+
+### Known limitations / accepted risks
+
+- A public repository can host `.js`/`.css` that other sites can include cross-origin — the same property any public static host has. Keep repositories that accept untrusted uploads private, or restrict writers.
+- Trash keeps blobs (and counts them against the quota) for 30 days by design; purge early to reclaim space.
+- Pre-existing and out of scope: ZIP site deploys and platform-backup restores still extract whole archives and strip symlinks afterwards. Both are administrator-only, but explicit member filtering (as done for repository restore) would be a worthwhile follow-up.

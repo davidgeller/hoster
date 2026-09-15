@@ -29,7 +29,7 @@ import {
   listRepoTree, readRepoContent, stageBlob, commitRepoFile, writeRepoText, createRepoFolder, renameRepoPath,
   deleteRepoPaths, moveRepoPaths, copyRepoPaths, listRepoTrash, restoreRepoTrash, purgeRepoTrash, listRepoVersions, restoreRepoVersion, deleteRepoVersion,
   zipRepoPaths, repoStats, repoBannerPath, setRepoBanner, clearRepoBanner, previewKind, isTextMime, mimeForName,
-  REPO_MAX_FILE_BYTES, TRASH_TTL_DAYS,
+  REPO_MAX_FILE_BYTES, TRASH_TTL_DAYS, repoQuotaRemaining,
 } from "./repo";
 
 const BASE_DIR = process.env.HOSTER_HOME || dirname(process.execPath);
@@ -106,6 +106,9 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
 
   // --- Banner (visible to anyone who can see the page shell) ---
   if (reqPath === "_repo/banner") {
+    // Part of the content, not the shell: a private repository's banner is
+    // only for people who can see its files.
+    if (!auth.canRead) return new Response("Not found", { status: 404 });
     const banner = repoBannerPath(site);
     if (!banner) return new Response("Not found", { status: 404 });
     const st = statSync(banner.abs);
@@ -127,9 +130,12 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
     return json({
       slug: site.slug,
       name: site.name,
-      description: site.repo_description,
+      // Anyone who can reach the page learns its title (it's the sign-in
+      // gate's heading); everything else about a private repository waits
+      // for a reader.
+      description: auth.canRead ? site.repo_description : null,
       visibility: site.repo_visibility,
-      banner: !!repoBannerPath(site),
+      banner: auth.canRead && !!repoBannerPath(site),
       base_path: ctx.basePath,
       max_file_bytes: REPO_MAX_FILE_BYTES,
       trash_ttl_days: TRASH_TTL_DAYS,
@@ -218,11 +224,11 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
     if (!paths.length) return json({ error: "paths is required" }, 400);
     try {
       const result = await zipRepoPaths(site.slug, paths, typeof body?.name === "string" ? body!.name : undefined);
-      return new Response(result.buffer, {
+      return new Response(result.file, {
         headers: {
           "Content-Type": "application/zip",
           "Content-Disposition": contentDisposition("attachment", result.filename),
-          "Content-Length": String(result.buffer.length),
+          "Content-Length": String(result.size),
           "Cache-Control": "no-store",
         },
       });
@@ -247,7 +253,13 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
       const replace = url.searchParams.get("replace") !== "0";
       const declared = parseInt(req.headers.get("content-length") || "0", 10) || 0;
       if (declared > REPO_MAX_FILE_BYTES) return json({ error: `File exceeds the ${Math.round(REPO_MAX_FILE_BYTES / (1024 * 1024 * 1024))} GB limit` }, 413);
-      const staged = await stageBlob(site.slug, req.body, REPO_MAX_FILE_BYTES);
+      // Stop streaming as soon as the quota would be exceeded rather than
+      // spooling a doomed upload to disk. (Content identical to an existing
+      // blob would be free, but we can't know that before hashing the body,
+      // so a nearly-full repository may reject a re-upload — acceptable.)
+      const remaining = repoQuotaRemaining(site.slug);
+      if (declared > remaining) return json({ error: "Not enough space left in this repository for that file" }, 413);
+      const staged = await stageBlob(site.slug, req.body, Math.min(REPO_MAX_FILE_BYTES, remaining));
       const result = commitRepoFile(site.slug, path, staged, { actor, replace, note: url.searchParams.get("note") });
       audit("repo_file_uploaded", `${site.slug}:${result.file.path}${result.new_version ? ` v${result.file.version_no}` : " (unchanged)"}`);
       return json({ ok: true, ...result });

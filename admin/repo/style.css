@@ -95,7 +95,9 @@ label input { display: block; width: 100%; margin-top: 4px; }
 
 /* --- Hero / banner --- */
 .hero { background: var(--bg-card); border-bottom: 1px solid var(--border); }
-.hero-banner { height: 180px; background-size: cover; background-position: center; }
+/* Full-width strip at 5:1 (e.g. 1600×320). The image covers the strip and is
+   cropped from the centre, so keep the subject in the middle. */
+.hero-banner { aspect-ratio: 5 / 1; max-height: 240px; background-size: cover; background-position: center; }
 .hero-body { max-width: 1400px; margin: 0 auto; padding: 22px 28px 18px; display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; flex-wrap: wrap; }
 .hero h1 { font-size: 1.55rem; font-weight: 700; letter-spacing: -0.01em; }
 .hero-text p { margin-top: 4px; max-width: 720px; white-space: pre-line; }
@@ -302,5 +304,11 @@ label input { display: block; width: 100%; margin-top: 4px; }
 @media (max-width: 640px) {
   .hero-body, .toolbar, .selbar, .main, .trash-view { padding-left: 16px; padding-right: 16px; }
   .search input { width: 160px; }
-  .hero-banner { height: 120px; }
+  .hero-banner { max-height: 140px; }
 }
+
+/* --- Password reveal --- */
+.pw-wrap { display: block; min-width: 0; }
+.pw-wrap > input { width: 100%; }
+.pw-reveal { display: inline-flex ; align-items: center; gap: 5px; margin: 3px 0 0 ; font-size: 0.75rem ; font-weight: normal ; color: var(--text-secondary); cursor: pointer; user-select: none; }
+.pw-reveal input[type="checkbox"] { width: auto ; margin: 0 ; display: inline-block; }

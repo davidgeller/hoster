@@ -123,6 +123,44 @@ async function apiForm(path, formData) {
   return data;
 }
 
+
+// --- Password reveal ---
+// Every password field gets a "Show" checkbox beneath it so you can confirm
+// what you typed. Fields are wrapped in a block so the checkbox sits inside
+// the same grid/flex cell as the input and never shifts a form row. Works for
+// fields that exist at load and any added later (modals), via an observer.
+function installPasswordReveal(root = document) {
+  const wrap = (input) => {
+    if (input.dataset.revealBound) return;
+    input.dataset.revealBound = "1";
+    const wrapper = document.createElement("span");
+    wrapper.className = "pw-wrap";
+    if (input.style.width) wrapper.style.width = input.style.width;
+    input.parentNode.insertBefore(wrapper, input);
+    wrapper.appendChild(input);
+    const label = document.createElement("label");
+    label.className = "pw-reveal";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.setAttribute("aria-label", "Show password");
+    label.appendChild(box);
+    label.appendChild(document.createTextNode(" Show"));
+    wrapper.appendChild(label);
+    box.addEventListener("change", () => { input.type = box.checked ? "text" : "password"; });
+    // A form reset hides the text again.
+    const form = input.closest("form");
+    if (form) form.addEventListener("reset", () => { box.checked = false; input.type = "password"; });
+  };
+  root.querySelectorAll('input[type="password"]').forEach(wrap);
+  new MutationObserver((muts) => {
+    for (const m of muts) for (const n of m.addedNodes) {
+      if (!(n instanceof Element)) continue;
+      if (n.matches && n.matches('input[type="password"]')) wrap(n);
+      n.querySelectorAll?.('input[type="password"]').forEach(wrap);
+    }
+  }).observe(root.body || root, { childList: true, subtree: true });
+}
+
 // --- App State ---
 let currentView = "dashboard";
 let pendingTotpToken = null;
@@ -133,6 +171,7 @@ let passkeyLoginAvailable = false;
 
 // --- Init ---
 document.addEventListener("DOMContentLoaded", async () => {
+  installPasswordReveal();
   initTheme();
 
   try {
@@ -2888,7 +2927,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
           <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
           <label>
             Banner image
-            <small>Shown across the top of the repository page. PNG, JPEG, WebP, or GIF up to 8 MB.</small>
+            <small>Shown as a full-width strip across the top of the repository page. <strong>Best at a 5:1 aspect ratio — 1600 × 320 px, or 2400 × 480 px for sharp high-DPI screens.</strong> The image is scaled to the page width and cropped from the centre on narrow screens, so keep the subject in the middle. PNG, JPEG, WebP, or GIF up to 8 MB.</small>
           </label>
           <div id="settings-banner-preview" style="margin-bottom:8px">${siteRecord.repo_banner ? `<img src="/${esc(slug)}/_repo/banner?t=${Date.now()}" alt="" style="max-width:100%;max-height:120px;border-radius:6px;border:1px solid var(--border)">` : '<span class="text-sm text-muted">No banner set.</span>'}</div>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">

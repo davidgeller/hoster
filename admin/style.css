@@ -1336,3 +1336,9 @@ tr:hover td { background: var(--bg-hover); }
 .version-edit { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .version-edit input, .version-edit textarea { margin: 0; font-size: 0.85rem; }
 .version-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+
+/* --- Password reveal --- */
+.pw-wrap { display: block; min-width: 0; }
+.pw-wrap > input { width: 100%; }
+.pw-reveal { display: inline-flex !important; align-items: center; gap: 5px; margin: 3px 0 0 !important; font-size: 0.75rem !important; font-weight: normal !important; color: var(--text-muted); cursor: pointer; user-select: none; }
+.pw-reveal input[type="checkbox"] { width: auto !important; margin: 0 !important; display: inline-block; }

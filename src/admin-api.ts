@@ -837,16 +837,18 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
       if (op === "backup" && req.method === "GET") {
         const result = await exportRepoBackup(slug);
         audit("repository_backup_downloaded", `${slug} (${result.manifest.file_count} files, ${result.manifest.version_count} versions)`);
-        return new Response(result.buffer, {
+        return new Response(result.file, {
           status: 200,
           headers: {
             "Content-Type": "application/zip",
             "Content-Disposition": `attachment; filename="${result.filename}"`,
-            "Content-Length": String(result.buffer.length),
+            "Content-Length": String(result.size),
           },
         });
       }
       if (op === "restore" && req.method === "POST") {
+        const declared = parseInt(req.headers.get("content-length") || "0", 10) || 0;
+        if (declared > 1024 * 1024 * 1024 + 1024 * 1024) return json({ error: "Restore archives are limited to 1 GB" }, 413);
         // Replaces every document and every version in the repository, so it
         // asks for the acting administrator's password like a platform restore.
         let formData: FormData;

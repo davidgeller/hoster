@@ -219,6 +219,11 @@ function serveFile(filePath: string, req: Request, cacheMode: "revalidate" | "no
 export function createServer(port: number) {
   return Bun.serve({
     port,
+    // Bun's default cap is 128 MB, which would silently reject large ZIP
+    // deploys and repository uploads before our own limits ever ran. Raise it
+    // to the repository per-file limit plus multipart overhead; every endpoint
+    // that buffers a body still enforces its own, smaller cap first.
+    maxRequestBodySize: 2 * 1024 * 1024 * 1024 + 64 * 1024 * 1024,
     async fetch(req) {
       const start = performance.now();
       const url = new URL(req.url);

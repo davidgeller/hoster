@@ -5,7 +5,7 @@
 // HOSTER_HOME is set in test/preload.ts.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, writeFileSync, mkdtempSync } from "fs";
+import { existsSync, readdirSync, writeFileSync, mkdtempSync, mkdirSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
@@ -218,8 +218,10 @@ describe("repository storage", () => {
   });
 
   test("zip packages files and folders with their structure", async () => {
-    const { buffer, filename } = await zipRepoPaths(SLUG, ["archive/reports", "notes/readme.md"]);
-    expect(filename).toBe(`${SLUG}.zip`);
+    const zipped = await zipRepoPaths(SLUG, ["archive/reports", "notes/readme.md"]);
+    expect(zipped.filename).toBe(`${SLUG}.zip`);
+    const buffer = Buffer.from(await zipped.file.arrayBuffer());
+    expect(buffer.length).toBe(zipped.size);
     const listing = zipListing(buffer);
     expect(listing).toContain("reports/q1/summary.txt");
     expect(listing).toContain("readme.md");
@@ -237,7 +239,9 @@ describe("repository storage", () => {
 
   test("backup archive round-trips files, history, trash and banner", async () => {
     const statsBefore = repoStats(SLUG);
-    const { buffer, manifest } = await exportRepoBackup(SLUG);
+    const exported = await exportRepoBackup(SLUG);
+    const { manifest } = exported;
+    const buffer = Buffer.from(await exported.file.arrayBuffer());
     expect(manifest.format).toBe("hoster-repository");
     expect(manifest.file_count).toBe(statsBefore.file_count);
     const listing = zipListing(buffer);
@@ -259,6 +263,19 @@ describe("repository storage", () => {
       expect(repoStats("docs-restore").used_bytes).toBe(statsBefore.used_bytes);
       expect(repoBannerPath(getSite("docs-restore")!)).not.toBeNull();
       await expect(importRepoBackup("docs-restore", Buffer.from("not a zip"))).rejects.toThrow();
+      // A hostile archive: unexpected members (including a symlink and a
+      // nested objects path) are never extracted, and a bad hash is refused.
+      const evilDir = mkdtempSync(join(tmpdir(), "hoster-evil-"));
+      writeFileSync(join(evilDir, "manifest.json"), JSON.stringify({ format: "hoster-repository", version: 1, slug: "x", name: "x", created_at: "now", file_count: 1, version_count: 1, total_bytes: 1, quota_bytes: 0, max_versions: 0, visibility: "private" }));
+      writeFileSync(join(evilDir, "repository.json"), JSON.stringify({ files: [{ id: 1, path: "a.txt", kind: "file", size: 1, sha256: "f".repeat(64), version_no: 1 }], versions: [{ file_id: 1, version_no: 1, sha256: "f".repeat(64), size: 1 }] }));
+      mkdirSync(join(evilDir, "objects", "f".repeat(64)), { recursive: true });
+      writeFileSync(join(evilDir, "objects", "f".repeat(64), "x"), "nested");
+      writeFileSync(join(evilDir, "extra.txt"), "should never land");
+      Bun.spawnSync(["ln", "-s", "/etc/hosts", join(evilDir, "link")]);
+      Bun.spawnSync(["zip", "-r", "-y", "-q", join(evilDir, "evil.zip"), "manifest.json", "repository.json", "objects", "extra.txt", "link"], { cwd: evilDir });
+      await expect(importRepoBackup("docs-restore", Buffer.from(readFileSync(join(evilDir, "evil.zip"))))).rejects.toThrow(/missing content/);
+      // Nothing changed: the earlier restore is intact.
+      expect(listRepoTree("docs-restore").files.map(f => f.path)).toContain("archive/reports/q1/summary.txt");
     } finally {
       deleteSite("docs-restore");
     }
@@ -404,6 +421,12 @@ describe("repository HTTP surface", () => {
     expect(up.status).toBe(200);
     expect(upBody.file.path).toBe("d/new.txt");
     expect(upBody.file.updated_by).toBe("repoadmin");
+    updateRepoSettings(SITE, { quota_bytes: 200 });
+    const tooBig = await fetch(`${base()}/${SITE}/_repo/api/upload?path=d/big.bin`, {
+      method: "POST", headers: { Cookie: adminCookie, "X-CSRF-Token": adminCsrf }, body: new Uint8Array(500),
+    });
+    expect(tooBig.status).toBe(413);
+    updateRepoSettings(SITE, { quota_bytes: 0 });
     const again = await fetch(`${base()}/${SITE}/_repo/api/upload?path=d/new.txt&replace=0`, {
       method: "POST", headers: { Cookie: adminCookie, "X-CSRF-Token": adminCsrf }, body: "other",
     });
@@ -455,6 +478,18 @@ describe("repository HTTP surface", () => {
     updateRepoSettings(SITE, { visibility: "private" });
     const anon = await fetch(`${base()}/${SITE}/_repo/api/tree`);
     expect(anon.status).toBe(401);
+    updateRepoSettings(SITE, { description: "secret plans" });
+    const anonInfo = await (await fetch(`${base()}/${SITE}/_repo/api/info`)).json();
+    expect(anonInfo.name).toBe("Public Docs");
+    expect(anonInfo.description).toBeNull();
+    expect(anonInfo.banner).toBe(false);
+    expect(anonInfo.stats).toBeNull();
+    expect((await fetch(`${base()}/${SITE}/_repo/banner`)).status).toBe(404);
+    // Guessing paths reveals nothing: unknown and real files answer the same.
+    const guessReal = await fetch(`${base()}/${SITE}/_repo/api/file?path=hello.txt`);
+    const guessFake = await fetch(`${base()}/${SITE}/_repo/api/file?path=nope.txt`);
+    expect([guessReal.status, guessFake.status]).toEqual([401, 401]);
+    expect(await guessReal.text()).toBe(await guessFake.text());
     const anonFile = await fetch(`${base()}/${SITE}/_repo/api/file?path=hello.txt`);
     expect(anonFile.status).toBe(401);
     const user = await fetch(`${base()}/${SITE}/_repo/api/tree`, { headers: { Cookie: userCookie } });

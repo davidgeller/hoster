@@ -1083,6 +1083,44 @@
     if (!silent) { await boot(); toast("Signed out"); }
   }
 
+
+// --- Password reveal ---
+// Every password field gets a "Show" checkbox beneath it so you can confirm
+// what you typed. Fields are wrapped in a block so the checkbox sits inside
+// the same grid/flex cell as the input and never shifts a form row. Works for
+// fields that exist at load and any added later (modals), via an observer.
+  function installPasswordReveal(root = document) {
+  const wrap = (input) => {
+    if (input.dataset.revealBound) return;
+    input.dataset.revealBound = "1";
+    const wrapper = document.createElement("span");
+    wrapper.className = "pw-wrap";
+    if (input.style.width) wrapper.style.width = input.style.width;
+    input.parentNode.insertBefore(wrapper, input);
+    wrapper.appendChild(input);
+    const label = document.createElement("label");
+    label.className = "pw-reveal";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.setAttribute("aria-label", "Show password");
+    label.appendChild(box);
+    label.appendChild(document.createTextNode(" Show"));
+    wrapper.appendChild(label);
+    box.addEventListener("change", () => { input.type = box.checked ? "text" : "password"; });
+    // A form reset hides the text again.
+    const form = input.closest("form");
+    if (form) form.addEventListener("reset", () => { box.checked = false; input.type = "password"; });
+  };
+  root.querySelectorAll('input[type="password"]').forEach(wrap);
+  new MutationObserver((muts) => {
+    for (const m of muts) for (const n of m.addedNodes) {
+      if (!(n instanceof Element)) continue;
+      if (n.matches && n.matches('input[type="password"]')) wrap(n);
+      n.querySelectorAll?.('input[type="password"]').forEach(wrap);
+    }
+  }).observe(root.body || root, { childList: true, subtree: true });
+}
+
   // ---------- Boot ----------
   async function boot() {
     try {
@@ -1098,5 +1136,6 @@
       toast(e.message || "Couldn't load the repository", true);
     }
   }
+  installPasswordReveal();
   boot();
 })();
