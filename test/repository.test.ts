@@ -410,6 +410,11 @@ describe("repository HTTP surface", () => {
     expect(html).toContain(`<base href="/${SITE}/">`);
     expect(r2.headers.get("content-security-policy")).toContain("script-src 'self'");
     expect(r2.headers.get("content-security-policy")).toContain("frame-ancestors 'self'");
+    // UI assets are cache-busted per build and long-cacheable when versioned.
+    const stamped = /_repo\/ui\/app\.js\?v=([a-z0-9]+)"/.exec(html);
+    expect(stamped).not.toBeNull();
+    const versioned = await fetch(`${base()}/${SITE}/_repo/ui/app.js?v=${stamped![1]}`);
+    expect(versioned.headers.get("cache-control")).toContain("immutable");
     const css = await fetch(`${base()}/${SITE}/_repo/ui/style.css`);
     expect(css.status).toBe(200);
     expect(css.headers.get("content-type")).toContain("text/css");

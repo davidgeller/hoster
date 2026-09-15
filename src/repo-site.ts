@@ -107,7 +107,10 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
       return new Response("Not found", { status: 404 });
     }
     const type = file.endsWith(".css") ? "text/css; charset=utf-8" : file.endsWith(".js") ? "text/javascript; charset=utf-8" : "application/octet-stream";
-    return new Response(Bun.file(file), { headers: { "Content-Type": type, "Cache-Control": "no-cache", "Content-Length": String(statSync(file).size) } });
+    // Versioned URLs (?v=…) are safe to cache for a long time; the document
+    // always references the current stamp. Unversioned requests revalidate.
+    const cache = url.searchParams.has("v") ? "public, max-age=31536000, immutable" : "no-cache";
+    return new Response(Bun.file(file), { headers: { "Content-Type": type, "Cache-Control": cache, "Content-Length": String(statSync(file).size) } });
   }
 
   // --- Banner (visible to anyone who can see the page shell) ---
@@ -510,6 +513,14 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
 
 let uiTemplateCache: { mtime: number; html: string } | null = null;
 
+function uiAssetStamp(): string {
+  let newest = 0;
+  for (const name of ["app.js", "style.css", "index.html"]) {
+    try { newest = Math.max(newest, statSync(join(REPO_UI_DIR, name)).mtimeMs); } catch (_) {}
+  }
+  return Math.floor(newest / 1000).toString(36);
+}
+
 function serveUiDocument(basePath: string): Response {
   const file = join(REPO_UI_DIR, "index.html");
   if (!existsSync(file)) return new Response("Repository UI is not installed", { status: 500 });
@@ -517,7 +528,13 @@ function serveUiDocument(basePath: string): Response {
   if (!uiTemplateCache || uiTemplateCache.mtime !== st.mtimeMs) {
     uiTemplateCache = { mtime: st.mtimeMs, html: readFileSync(file, "utf8") };
   }
-  const html = uiTemplateCache.html.replace(/<base\s+href="\/"\s*\/?>/i, `<base href="${basePath}">`);
+  // Cache-bust the UI assets with the newest mtime of the bundle files so a
+  // CDN (Cloudflare caches .js/.css aggressively) can never hand a browser an
+  // app.js from a previous release against a new document.
+  const stamp = uiAssetStamp();
+  const html = uiTemplateCache.html
+    .replace(/<base\s+href="\/"\s*\/?>/i, `<base href="${basePath}">`)
+    .replace(/(_repo\/ui\/[a-z0-9._-]+\.(?:js|css))"/g, `$1?v=${stamp}"`);
   return new Response(html, {
     headers: {
       "Content-Type": "text/html; charset=utf-8",

@@ -99,6 +99,7 @@
   function previewKind(mime) {
     if (!mime) return "none";
     if (mime === "application/x-hoster-weblink") return "link";
+    if (mime === "text/html") return "html";
     if (mime.startsWith("image/")) return "image";
     if (mime.startsWith("video/")) return "video";
     if (mime.startsWith("audio/")) return "audio";
@@ -555,6 +556,9 @@
     else if (kind === "video") body.innerHTML = `<video controls preload="metadata" src="${esc(url)}"></video>`;
     else if (kind === "audio") body.innerHTML = `<audio controls preload="metadata" src="${esc(url)}"></audio>`;
     else if (kind === "pdf") body.innerHTML = `<iframe src="${esc(url)}" title="${esc(f.name)}"></iframe>`;
+    // HTML renders in a fully sandboxed frame (no scripts, opaque origin); the
+    // raw route serves it under a sandbox CSP as well, so it's inert twice over.
+    else if (kind === "html") body.innerHTML = `<iframe sandbox="" referrerpolicy="no-referrer" src="${esc(url)}" title="${esc(f.name)}"></iframe>`;
     else if (kind === "link") {
       body.innerHTML = `<div class="linkbox muted">Loading…</div>`;
       loadLink(f).then(link => {
