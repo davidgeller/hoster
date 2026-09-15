@@ -271,8 +271,8 @@ export function createServer(port: number) {
 
         // --- Version check (no auth needed) ---
         if (path === "/_admin/api/version") {
-          const { VERSION } = await import("./index");
-          return addSecurityHeaders(new Response(JSON.stringify({ version: VERSION }), {
+          const { VERSION, APP_VERSION } = await import("./index");
+          return addSecurityHeaders(new Response(JSON.stringify({ version: VERSION, app_version: APP_VERSION }), {
             headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
           }));
         }

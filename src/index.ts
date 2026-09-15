@@ -7,6 +7,14 @@ import { rebuildCurrentSymlinks } from "./sites";
 import { purgeExpiredRepoTrash, cleanRepoTemp, purgeStaleRepoShares } from "./repo";
 
 export const VERSION = "__BUILD_VERSION__";
+// Release number from package.json, stamped by build-pi.sh. Falls back to
+// reading package.json when running from source.
+export const APP_VERSION: string = (() => {
+  const stamped = "__APP_VERSION__";
+  if (!stamped.startsWith("__")) return stamped;
+  try { return JSON.parse(require("fs").readFileSync(require("path").join(process.env.HOSTER_HOME || dirname(process.execPath), "package.json"), "utf8")).version || "dev"; }
+  catch { try { return JSON.parse(require("fs").readFileSync(new URL("../package.json", import.meta.url), "utf8")).version || "dev"; } catch { return "dev"; } }
+})();
 const PORT = parseInt(process.env.PORT || "3500");
 const BASE = process.env.HOSTER_HOME || dirname(process.execPath);
 
@@ -17,7 +25,7 @@ console.log(`
 
   Lightweight Web Hosting Platform
   Port: ${PORT}
-  Version: ${VERSION}
+  Version: ${APP_VERSION} (build ${VERSION})
   Admin:   http://localhost:${PORT}/_admin
   Base:    ${BASE}
 `);

@@ -2202,7 +2202,11 @@ function showMcpSetup(label) {
 async function loadAbout() {
   try {
     const data = await api("/version");
-    document.getElementById("about-version").textContent = "Version " + data.version;
+    const el = document.getElementById("about-version");
+    const rel = data.app_version && data.app_version !== "dev" ? data.app_version : null;
+    el.innerHTML = rel
+      ? `Version <strong>${esc(rel)}</strong> · build ${esc(data.version)} · <a href="https://github.com/davidgeller/hoster/releases/tag/v${esc(rel)}" target="_blank" rel="noopener">release notes</a>`
+      : `Development build ${esc(data.version)}`;
   } catch (_) {}
 }
 

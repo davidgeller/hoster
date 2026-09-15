@@ -59,10 +59,11 @@ echo ""
 
 # Generate build version: date + incrementing build number
 BUILD_VERSION=$(date +"%Y.%m.%d")-$(date +"%H%M%S")
-echo "=== Building Hoster v${BUILD_VERSION} for linux-${ARCH_LABEL} ==="
+APP_VERSION=$(node -p "require('./package.json').version" 2>/dev/null || grep -o '"version": *"[^"]*"' package.json | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+echo "=== Building Hoster ${APP_VERSION} (build ${BUILD_VERSION}) for linux-${ARCH_LABEL} ==="
 
 # Stamp version into source (will be compiled into binary)
-sed -i.bak "s/__BUILD_VERSION__/${BUILD_VERSION}/" src/index.ts
+sed -i.bak "s/__BUILD_VERSION__/${BUILD_VERSION}/; s/__APP_VERSION__/${APP_VERSION}/" src/index.ts
 sed -i.bak "s/__BUILD_VERSION__/${BUILD_VERSION}/g" admin/index.html
 
 # Compile standalone binary
