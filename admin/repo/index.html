@@ -174,6 +174,22 @@
     </form>
   </div>
 
+  <!-- Add a passkey for this hostname -->
+  <div class="modal" id="passkey-modal" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <form class="modal-card" id="passkey-form">
+      <h2>Add a passkey for this address</h2>
+      <p class="muted" id="passkey-text">Passkeys are tied to the exact web address. Adding one here lets you sign in on this address with Touch ID, Face ID, Windows Hello, or a security key — no password or code. Confirm your password first.</p>
+      <label>Your password <input type="password" id="passkey-password" autocomplete="current-password" required></label>
+      <label>Name this passkey <input type="text" id="passkey-label" maxlength="60" placeholder="e.g. iPhone, Work laptop"></label>
+      <div class="form-error" id="passkey-error"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+        <button type="submit" class="btn btn-primary" id="passkey-submit">Create passkey</button>
+      </div>
+    </form>
+  </div>
+
   <!-- Web link (create / edit) -->
   <div class="modal" id="link-modal" hidden>
     <div class="modal-backdrop" data-close></div>

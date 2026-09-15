@@ -260,8 +260,10 @@
     const a = state.info.auth;
     const el = $("who");
     if (a.authenticated) {
-      el.innerHTML = `<span class="name">${esc(a.username)}</span><span class="muted">${a.can_write ? "· can edit" : "· view only"}</span> <button type="button" class="btn btn-sm" id="signout-btn">Sign out</button>`;
+      const offerPasskey = state.info.passkey_supported && !state.info.passkey_for_you && passkeysInBrowser();
+      el.innerHTML = `<span class="name">${esc(a.username)}</span><span class="muted">${a.can_write ? "· can edit" : "· view only"}</span> ${offerPasskey ? '<button type="button" class="btn btn-sm" id="add-passkey-btn" title="Sign in here with Touch ID / Face ID / a security key next time">Add passkey</button> ' : ""}<button type="button" class="btn btn-sm" id="signout-btn">Sign out</button>`;
       $("signout-btn").addEventListener("click", signOut);
+      $("add-passkey-btn")?.addEventListener("click", openPasskeyDialog);
     } else {
       el.innerHTML = `<button type="button" class="btn btn-primary" id="signin-btn">Sign in</button>`;
       $("signin-btn").addEventListener("click", () => openSignIn());
@@ -1310,6 +1312,49 @@
     } finally { btn.disabled = false; }
   }
   $("signin-passkey-btn").addEventListener("click", () => signInWithPasskey($("signin-error"), $("signin-passkey-btn")));
+
+  // Registering a passkey for this hostname (custom domains can't reach the
+  // admin panel, so this is the only place to do it there).
+  function openPasskeyDialog() {
+    $("passkey-password").value = ""; $("passkey-label").value = ""; $("passkey-error").textContent = "";
+    $("passkey-modal").hidden = false;
+    setTimeout(() => $("passkey-password").focus(), 0);
+  }
+  $("passkey-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = $("passkey-submit"), errEl = $("passkey-error");
+    errEl.textContent = ""; btn.disabled = true;
+    try {
+      const options = await api("auth/passkey/register/options", { method: "POST", body: JSON.stringify({ password: $("passkey-password").value }) });
+      const credential = await navigator.credentials.create({
+        publicKey: {
+          ...options,
+          challenge: b64uToBuf(options.challenge),
+          user: { ...options.user, id: b64uToBuf(options.user.id) },
+          excludeCredentials: (options.excludeCredentials || []).map(c => ({ ...c, id: b64uToBuf(c.id) })),
+        },
+      });
+      if (!credential) throw new Error("No passkey was created");
+      const r = credential.response;
+      await api("auth/passkey/register/verify", {
+        method: "POST",
+        body: JSON.stringify({ label: $("passkey-label").value.trim() || undefined, response: {
+          id: credential.id, rawId: bufToB64u(credential.rawId), type: credential.type,
+          clientExtensionResults: credential.getClientExtensionResults(),
+          authenticatorAttachment: credential.authenticatorAttachment || undefined,
+          response: {
+            clientDataJSON: bufToB64u(r.clientDataJSON), attestationObject: bufToB64u(r.attestationObject),
+            transports: typeof r.getTransports === "function" ? r.getTransports() : [],
+          },
+        } }),
+      });
+      closeModals();
+      toast("Passkey added — use it next time you sign in here");
+      await loadInfo();
+    } catch (err) {
+      errEl.textContent = err.name === "NotAllowedError" ? "The passkey prompt was dismissed." : err.message;
+    } finally { btn.disabled = false; }
+  });
   $("gate-passkey").addEventListener("click", () => signInWithPasskey($("gate-error"), $("gate-passkey")));
 
   // ---------- Sign in / out ----------

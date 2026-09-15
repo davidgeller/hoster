@@ -25,8 +25,8 @@ import {
   type Principal,
 } from "./auth";
 import type { Site } from "./sites";
-import { getRpContext, beginLogin as beginPasskeyLogin, finishLogin as finishPasskeyLogin, hasCredentialsForRp } from "./webauthn";
-import { getUser, recordLoginAttempt } from "./auth";
+import { getRpContext, beginLogin as beginPasskeyLogin, finishLogin as finishPasskeyLogin, hasCredentialsForRp, beginRegistration, finishRegistration } from "./webauthn";
+import { getUser, recordLoginAttempt, verifyPasswordForUser } from "./auth";
 import { buildWebLink, serializeWebLink, webLinkFileName, fetchLinkPreview, WEBLINK_MIME } from "./weblink";
 import { putRepoFile } from "./repo";
 import type { RepoFile } from "./repo";
@@ -190,6 +190,10 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
       // the host this request arrived on.
       passkey_supported: rp !== null,
       passkey_enabled: rp !== null && hasCredentialsForRp(rp.rpId),
+      // Whether the signed-in account itself has a passkey for THIS hostname —
+      // drives the "Add a passkey for this address" offer on custom domains,
+      // where the admin panel (the usual place to register one) is unreachable.
+      passkey_for_you: rp !== null && !!auth.principal && hasCredentialsForRp(rp.rpId, auth.principal.userId),
       auth: {
         authenticated: !!auth.principal,
         username: auth.principal?.username ?? null,
@@ -337,6 +341,40 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
   if (req.method === "GET") return json({ error: "Not found" }, 404);
   if (!auth.principal) return json({ error: "Sign in required", sign_in: true }, 401);
   if (!validateCsrf(req, auth.token)) return json({ error: "Invalid CSRF token" }, 403);
+
+  // Account self-service that any signed-in reader may use (no write access needed).
+  try {
+  // --- Register a passkey for this hostname (signed-in account, password step-up) ---
+  if (api === "auth/passkey/register/options" && req.method === "POST") {
+    const rp = getRpContext(req);
+    if (!rp) return json({ error: "Passkeys require HTTPS (or localhost)" }, 400);
+    const body = await readJson<{ password?: unknown }>(req);
+    if (!body || typeof body.password !== "string" || !body.password) return json({ error: "Your password is required to add a passkey" }, 400);
+    if (isRateLimited(ctx.ip)) return json({ error: "Too many attempts. Try again later." }, 429);
+    if (!(await verifyPasswordForUser(auth.principal!.userId, body.password, ctx.ip))) {
+      audit("repo_passkey_step_up_failed", site.slug);
+      return json({ error: "Incorrect password" }, 401);
+    }
+    try { return json(await beginRegistration(rp, ctx.ip, auth.principal!.userId)); }
+    catch (e: any) { return json({ error: e?.message || "Could not start passkey registration" }, 400); }
+  }
+  if (api === "auth/passkey/register/verify" && req.method === "POST") {
+    const rp = getRpContext(req);
+    if (!rp) return json({ error: "Passkeys require HTTPS (or localhost)" }, 400);
+    const body = await readJson<{ response?: any; label?: unknown }>(req);
+    if (!body?.response) return json({ error: "Passkey response required" }, 400);
+    try {
+      const credential = await finishRegistration(rp, ctx.ip, body.response, typeof body.label === "string" ? body.label : undefined, auth.principal!.userId);
+      audit("passkey_added", `${credential.label} (${credential.rp_id}) via ${site.slug}`);
+      return json({ ok: true, credential: { id: credential.id, label: credential.label, rp_id: credential.rp_id } });
+    } catch (e: any) {
+      return json({ error: e?.message || "Passkey registration failed" }, 400);
+    }
+  }
+  } catch (e: any) {
+    return json({ error: e?.message || "Request failed" }, 400);
+  }
+
   if (!auth.canWrite) return json({ error: "You can view this repository but not change it" }, 403);
 
   try {

@@ -657,6 +657,20 @@ describe("repository HTTP surface", () => {
     const verify = await fetch(`${base()}/${SITE}/_repo/api/auth/passkey/verify`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ response: { id: "x", rawId: "eA", type: "public-key", response: {} } }) });
     expect(verify.status).toBe(401);
     expect(verify.headers.get("set-cookie")).toBeNull();
+    // Registering from the repository page needs a session, CSRF, and the
+    // account's password — but not write access.
+    const h = { Cookie: adminCookie, "X-CSRF-Token": adminCsrf, "Content-Type": "application/json" };
+    expect((await fetch(`${base()}/${SITE}/_repo/api/auth/passkey/register/options`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: "x" }) })).status).toBe(401);
+    expect((await fetch(`${base()}/${SITE}/_repo/api/auth/passkey/register/options`, { method: "POST", headers: h, body: "{}" })).status).toBe(400);
+    expect((await fetch(`${base()}/${SITE}/_repo/api/auth/passkey/register/options`, { method: "POST", headers: h, body: JSON.stringify({ password: "wrong" }) })).status).toBe(401);
+    const reg = await fetch(`${base()}/${SITE}/_repo/api/auth/passkey/register/options`, { method: "POST", headers: h, body: JSON.stringify({ password: "repoadmin-pass-1" }) });
+    expect(reg.status).toBe(200);
+    const regOpts = await reg.json();
+    expect(regOpts.rp.id).toBe("127.0.0.1");
+    expect(regOpts.user.name).toBe("repoadmin");
+    expect((await fetch(`${base()}/${SITE}/_repo/api/auth/passkey/register/verify`, { method: "POST", headers: h, body: JSON.stringify({ response: { id: "x", response: {} } }) })).status).toBe(400);
+    const me = await (await fetch(`${base()}/${SITE}/_repo/api/info`, { headers: { Cookie: adminCookie } })).json();
+    expect(me.passkey_for_you).toBe(false);
     // A non-secure origin gets a clear error rather than a broken flow.
     const insecure = await fetch(`${base()}/${SITE}/_repo/api/auth/passkey/options`, { method: "POST", headers: { Origin: "http://example.com" }, body: "{}" });
     expect(insecure.status).toBe(400);
