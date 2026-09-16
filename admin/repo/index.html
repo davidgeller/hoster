@@ -66,13 +66,21 @@
       </div>
     </div>
 
+    <div class="tagbar" id="tagbar" hidden>
+      <span class="tagbar-label">Tags</span>
+      <div class="tagbar-chips" id="tagbar-chips"></div>
+      <button type="button" class="btn btn-sm btn-ghost writer-only" id="manage-tags-btn" hidden>Manage tags</button>
+    </div>
+
     <div class="selbar" id="selbar" hidden>
       <span id="sel-count"></span>
       <button type="button" class="btn btn-sm" id="sel-download">Download</button>
+      <button type="button" class="btn btn-sm writer-only" id="sel-tag" hidden>Tags…</button>
       <button type="button" class="btn btn-sm writer-only" id="sel-share" hidden>Share…</button>
       <button type="button" class="btn btn-sm writer-only" id="sel-move" hidden>Move to…</button>
       <button type="button" class="btn btn-sm writer-only" id="sel-copy" hidden>Copy to…</button>
       <button type="button" class="btn btn-sm writer-only" id="sel-rename" hidden>Rename</button>
+      <button type="button" class="btn btn-sm writer-only" id="sel-describe" hidden>Describe</button>
       <button type="button" class="btn btn-sm btn-danger writer-only" id="sel-delete" hidden>Delete</button>
       <button type="button" class="btn btn-sm btn-ghost" id="sel-clear">Clear</button>
     </div>
@@ -91,6 +99,8 @@
           <button type="button" class="icon-btn" id="preview-close" aria-label="Close preview">✕</button>
         </div>
         <div class="preview-body" id="preview-body"></div>
+        <div class="preview-desc" id="preview-desc"></div>
+        <div class="preview-tags" id="preview-tags"></div>
         <dl class="preview-meta" id="preview-meta"></dl>
         <div class="preview-actions" id="preview-actions"></div>
         <div class="preview-versions" id="preview-versions"></div>
@@ -262,6 +272,60 @@
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" data-close>Cancel</button>
         <button type="button" class="btn btn-primary" id="folder-ok">Move</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Description (any file or folder) -->
+  <div class="modal" id="desc-modal" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <form class="modal-card" id="desc-form">
+      <h2 id="desc-title">Description</h2>
+      <p class="muted" id="desc-text"></p>
+      <label>Description <textarea id="desc-input" rows="5" maxlength="2000" placeholder="What is this, and why does it matter?"></textarea></label>
+      <div class="form-error" id="desc-error"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+        <button type="submit" class="btn btn-primary" id="desc-save">Save</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Apply tags to the selected items -->
+  <div class="modal" id="tag-modal" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <form class="modal-card" id="tag-form">
+      <h2 id="tag-title">Tags</h2>
+      <p class="muted" id="tag-text"></p>
+      <div class="tag-picker" id="tag-picker"></div>
+      <div class="tag-new-row">
+        <input type="text" id="tag-new-name" placeholder="New tag…" maxlength="40" autocomplete="off">
+        <button type="button" class="btn btn-sm" id="tag-new-add">Add</button>
+      </div>
+      <div class="form-error" id="tag-error"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+        <button type="submit" class="btn btn-primary" id="tag-save">Apply</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Tag library for this repository -->
+  <div class="modal" id="tagmgr-modal" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-card tagmgr-card">
+      <h2>Manage tags</h2>
+      <p class="muted">Tags belong to this repository. Apply them to any file or folder, then filter by them above the listing.</p>
+      <form class="tagmgr-new" id="tagmgr-form">
+        <input type="color" id="tagmgr-color" value="#2f6fed" title="Colour">
+        <input type="text" id="tagmgr-name" placeholder="Tag name" maxlength="40" required autocomplete="off">
+        <input type="text" id="tagmgr-desc" placeholder="Description (optional)" maxlength="200">
+        <button type="submit" class="btn btn-primary btn-sm">Add tag</button>
+      </form>
+      <div class="form-error" id="tagmgr-error"></div>
+      <div class="tagmgr-list" id="tagmgr-list"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-close>Close</button>
       </div>
     </div>
   </div>

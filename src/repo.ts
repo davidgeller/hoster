@@ -97,13 +97,49 @@ db.exec(`
     refcount INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (site_slug, sha256)
   );
+
+  -- Tag library, one per repository site. Names are unique per site
+  -- (case-insensitively); colour is a hex triplet the UI renders as a chip.
+  CREATE TABLE IF NOT EXISTS repo_tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_slug TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    color TEXT,
+    display_order INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    created_by TEXT,
+    FOREIGN KEY (site_slug) REFERENCES sites(slug) ON DELETE CASCADE
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_repo_tags_site_name ON repo_tags(site_slug, lower(name));
+
+  -- Tag assignments follow the row, not the path, so a tagged item keeps its
+  -- tags through renames, moves, and a trip to the trash and back.
+  CREATE TABLE IF NOT EXISTS repo_item_tags (
+    file_id INTEGER NOT NULL,
+    tag_id INTEGER NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    created_by TEXT,
+    PRIMARY KEY (file_id, tag_id),
+    FOREIGN KEY (file_id) REFERENCES repo_files(id) ON DELETE CASCADE,
+    FOREIGN KEY (tag_id) REFERENCES repo_tags(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_repo_item_tags_tag ON repo_item_tags(tag_id);
 `);
+// Free-text description on any item (file or folder). Added after the
+// table's first release, so it lives in a migration.
+try { db.exec("ALTER TABLE repo_files ADD COLUMN description TEXT"); } catch (_) {}
 
 export const REPO_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB per upload
 export const TRASH_TTL_DAYS = 30;
 const MAX_PATH_LENGTH = 1024;
 const MAX_SEGMENT_LENGTH = 255;
 const MAX_NOTE_LENGTH = 500;
+const MAX_DESCRIPTION_LENGTH = 2000;
+const MAX_TAG_NAME_LENGTH = 40;
+const MAX_TAG_DESCRIPTION_LENGTH = 200;
+const MAX_TAGS_PER_SITE = 200;
 const MAX_TEXT_FILE_BYTES = 10 * 1024 * 1024; // in-place editor cap
 const MAX_ZIP_BYTES = 4 * 1024 * 1024 * 1024; // packaged download cap (uncompressed; streamed, never buffered)
 
@@ -122,6 +158,20 @@ export interface RepoFile {
   updated_at: string;
   created_by: string | null;
   updated_by: string | null;
+  description: string | null;
+  tags: number[];
+}
+
+export interface RepoTag {
+  id: number;
+  name: string;
+  description: string | null;
+  color: string | null;
+  display_order: number;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+  item_count: number;
 }
 
 export interface RepoTrashEntry extends RepoFile {
@@ -154,6 +204,7 @@ interface FileRow {
   id: number; site_slug: string; path: string; kind: "file" | "dir"; size: number; mime: string | null;
   sha256: string | null; version_no: number; created_at: string; updated_at: string;
   created_by: string | null; updated_by: string | null; deleted_at: string | null; deleted_by: string | null;
+  description: string | null;
 }
 
 // --- MIME detection (by extension; the browser never sniffs thanks to nosniff) ---
@@ -460,12 +511,34 @@ function liveRow(slug: string, path: string): FileRow | null {
   return db.query("SELECT * FROM repo_files WHERE site_slug = ? AND path = ? AND deleted_at IS NULL").get(slug, path) as FileRow | null;
 }
 
-function toRepoFile(r: FileRow): RepoFile {
+function toRepoFile(r: FileRow, tags: number[] = []): RepoFile {
   return {
     id: r.id, path: r.path, name: basename(r.path), kind: r.kind, size: r.size, mime: r.mime, sha256: r.sha256,
     version_no: r.version_no, created_at: r.created_at, updated_at: r.updated_at,
     created_by: r.created_by, updated_by: r.updated_by,
+    description: r.description ?? null, tags,
   };
+}
+
+// file_id -> tag ids for every assignment in a site, in tag display order.
+function tagMap(slug: string): Map<number, number[]> {
+  const rows = db.query(
+    `SELECT it.file_id, it.tag_id FROM repo_item_tags it
+     JOIN repo_tags t ON t.id = it.tag_id
+     JOIN repo_files f ON f.id = it.file_id
+     WHERE f.site_slug = ? ORDER BY t.display_order, lower(t.name)`
+  ).all(slug) as { file_id: number; tag_id: number }[];
+  const map = new Map<number, number[]>();
+  for (const r of rows) {
+    const list = map.get(r.file_id);
+    if (list) list.push(r.tag_id); else map.set(r.file_id, [r.tag_id]);
+  }
+  return map;
+}
+function tagsForFile(fileId: number): number[] {
+  return (db.query(
+    "SELECT it.tag_id FROM repo_item_tags it JOIN repo_tags t ON t.id = it.tag_id WHERE it.file_id = ? ORDER BY t.display_order, lower(t.name)"
+  ).all(fileId) as { tag_id: number }[]).map(r => r.tag_id);
 }
 
 // Make sure every ancestor directory of `path` has a live row. A file may not
@@ -499,7 +572,8 @@ export function listRepoTree(slug: string): RepoTree {
   ).all(slug) as FileRow[];
   const files: RepoFile[] = [];
   const dirs: RepoFile[] = [];
-  for (const r of rows) (r.kind === "dir" ? dirs : files).push(toRepoFile(r));
+  const tags = tagMap(slug);
+  for (const r of rows) (r.kind === "dir" ? dirs : files).push(toRepoFile(r, tags.get(r.id) || []));
   return { files, dirs };
 }
 
@@ -507,7 +581,174 @@ export function getRepoFile(slug: string, relPath: string): RepoFile | null {
   requireRepoSite(slug);
   const path = normalizeRepoPath(relPath);
   const row = liveRow(slug, path);
-  return row ? toRepoFile(row) : null;
+  return row ? toRepoFile(row, tagsForFile(row.id)) : null;
+}
+
+// --- Descriptions ---
+
+function cleanDescription(value: unknown, max: number): string | null {
+  if (value == null) return null;
+  if (typeof value !== "string") throw new Error("Description must be text");
+  const trimmed = value.replace(/\r\n/g, "\n").trim();
+  if (!trimmed) return null;
+  if (trimmed.length > max) throw new Error(`Description is too long (max ${max} characters)`);
+  return trimmed;
+}
+
+// Attach (or clear, with null/empty) a free-text description to a file or folder.
+export function setRepoDescription(slug: string, relPath: string, description: unknown, actor?: string | null): RepoFile {
+  requireRepoSite(slug);
+  const path = normalizeRepoPath(relPath);
+  const row = liveRow(slug, path);
+  if (!row) throw new Error(`'${path}' does not exist`);
+  const value = cleanDescription(description, MAX_DESCRIPTION_LENGTH);
+  db.run("UPDATE repo_files SET description = ?, updated_at = datetime('now'), updated_by = ? WHERE id = ?", value, sanitizeActor(actor), row.id);
+  return toRepoFile(liveRow(slug, path)!, tagsForFile(row.id));
+}
+
+// --- Tags ---
+//
+// A per-site tag library (modelled on the CRM's org-scoped tags: own id,
+// name, colour, description, display order) plus an assignment table keyed
+// by repo_files.id so tags ride along with renames, moves, and trash/restore.
+
+const TAG_COLOR_RE = /^#[0-9a-f]{6}$/i;
+
+interface TagRow {
+  id: number; site_slug: string; name: string; description: string | null; color: string | null;
+  display_order: number; created_at: string; updated_at: string; created_by: string | null; item_count: number;
+}
+
+function toRepoTag(r: TagRow): RepoTag {
+  return {
+    id: r.id, name: r.name, description: r.description, color: r.color, display_order: r.display_order,
+    created_at: r.created_at, updated_at: r.updated_at, created_by: r.created_by, item_count: r.item_count ?? 0,
+  };
+}
+
+function cleanTagName(value: unknown): string {
+  if (typeof value !== "string") throw new Error("Tag name is required");
+  const name = value.trim().replace(/\s+/g, " ");
+  if (!name) throw new Error("Tag name is required");
+  if (name.length > MAX_TAG_NAME_LENGTH) throw new Error(`Tag name is too long (max ${MAX_TAG_NAME_LENGTH} characters)`);
+  if (/[\u0000-\u001f\u007f]/.test(name)) throw new Error("Tag name contains invalid characters");
+  return name;
+}
+function cleanTagColor(value: unknown): string | null {
+  if (value == null || value === "") return null;
+  if (typeof value !== "string" || !TAG_COLOR_RE.test(value)) throw new Error("Colour must be a hex value like #2f6fed");
+  return value.toLowerCase();
+}
+
+function tagRow(slug: string, id: number): TagRow | null {
+  return db.query(
+    `SELECT t.*, (SELECT COUNT(*) FROM repo_item_tags it JOIN repo_files f ON f.id = it.file_id WHERE it.tag_id = t.id AND f.deleted_at IS NULL) AS item_count
+     FROM repo_tags t WHERE t.id = ? AND t.site_slug = ?`
+  ).get(id, slug) as TagRow | null;
+}
+
+export function listRepoTags(slug: string): RepoTag[] {
+  requireRepoSite(slug);
+  const rows = db.query(
+    `SELECT t.*, (SELECT COUNT(*) FROM repo_item_tags it JOIN repo_files f ON f.id = it.file_id WHERE it.tag_id = t.id AND f.deleted_at IS NULL) AS item_count
+     FROM repo_tags t WHERE t.site_slug = ? ORDER BY t.display_order, lower(t.name)`
+  ).all(slug) as TagRow[];
+  return rows.map(toRepoTag);
+}
+
+export function getRepoTag(slug: string, id: number): RepoTag | null {
+  requireRepoSite(slug);
+  const r = tagRow(slug, id);
+  return r ? toRepoTag(r) : null;
+}
+
+export interface TagInput { name?: unknown; description?: unknown; color?: unknown; display_order?: unknown }
+
+export function createRepoTag(slug: string, input: TagInput, actor?: string | null): RepoTag {
+  requireRepoSite(slug);
+  const name = cleanTagName(input.name);
+  const description = cleanDescription(input.description, MAX_TAG_DESCRIPTION_LENGTH);
+  const color = cleanTagColor(input.color);
+  const count = (db.query("SELECT COUNT(*) AS n FROM repo_tags WHERE site_slug = ?").get(slug) as { n: number }).n;
+  if (count >= MAX_TAGS_PER_SITE) throw new Error(`This repository already has the maximum of ${MAX_TAGS_PER_SITE} tags`);
+  if (db.query("SELECT id FROM repo_tags WHERE site_slug = ? AND lower(name) = lower(?)").get(slug, name)) throw new Error(`A tag named '${name}' already exists`);
+  const order = Number.isInteger(input.display_order)
+    ? (input.display_order as number)
+    : ((db.query("SELECT COALESCE(MAX(display_order), 0) AS m FROM repo_tags WHERE site_slug = ?").get(slug) as { m: number }).m + 10);
+  const ins = db.run(
+    "INSERT INTO repo_tags (site_slug, name, description, color, display_order, created_by) VALUES (?, ?, ?, ?, ?, ?)",
+    slug, name, description, color, order, sanitizeActor(actor)
+  );
+  return toRepoTag(tagRow(slug, Number(ins.lastInsertRowid))!);
+}
+
+export function updateRepoTag(slug: string, id: number, input: TagInput): RepoTag {
+  requireRepoSite(slug);
+  const existing = tagRow(slug, id);
+  if (!existing) throw new Error("Tag not found");
+  const name = input.name === undefined ? existing.name : cleanTagName(input.name);
+  const description = input.description === undefined ? existing.description : cleanDescription(input.description, MAX_TAG_DESCRIPTION_LENGTH);
+  const color = input.color === undefined ? existing.color : cleanTagColor(input.color);
+  const order = input.display_order === undefined ? existing.display_order
+    : (Number.isInteger(input.display_order) ? (input.display_order as number) : existing.display_order);
+  const clash = db.query("SELECT id FROM repo_tags WHERE site_slug = ? AND lower(name) = lower(?) AND id != ?").get(slug, name, id);
+  if (clash) throw new Error(`A tag named '${name}' already exists`);
+  db.run(
+    "UPDATE repo_tags SET name = ?, description = ?, color = ?, display_order = ?, updated_at = datetime('now') WHERE id = ?",
+    name, description, color, order, id
+  );
+  return toRepoTag(tagRow(slug, id)!);
+}
+
+// Deleting a tag removes it from every item (assignments cascade).
+export function deleteRepoTag(slug: string, id: number): { removed_from: number } {
+  requireRepoSite(slug);
+  const existing = tagRow(slug, id);
+  if (!existing) throw new Error("Tag not found");
+  const n = (db.query("SELECT COUNT(*) AS n FROM repo_item_tags WHERE tag_id = ?").get(id) as { n: number }).n;
+  db.run("DELETE FROM repo_tags WHERE id = ?", id);
+  return { removed_from: n };
+}
+
+export interface TagApplyResult { paths: string[]; added: number; removed: number }
+
+// Add and/or remove tags on a batch of items. Every path and tag id is
+// validated before anything changes; unknown tags are rejected rather than
+// silently skipped so a stale client can't half-apply a change.
+export function tagRepoPaths(slug: string, relPaths: string[], opts: { add?: number[]; remove?: number[] }, actor?: string | null): TagApplyResult {
+  requireRepoSite(slug);
+  if (!Array.isArray(relPaths) || relPaths.length === 0) throw new Error("No paths given");
+  if (relPaths.length > 5000) throw new Error("Too many paths in one request (max 5000)");
+  const add = [...new Set((opts.add || []).filter(n => Number.isInteger(n)))];
+  const remove = [...new Set((opts.remove || []).filter(n => Number.isInteger(n)))];
+  if (!add.length && !remove.length) throw new Error("Nothing to change");
+  for (const id of [...add, ...remove]) if (!tagRow(slug, id)) throw new Error(`Tag #${id} does not exist in this repository`);
+  const rows: FileRow[] = [];
+  const seen = new Set<string>();
+  for (const raw of relPaths) {
+    const path = normalizeRepoPath(raw);
+    if (seen.has(path)) continue;
+    seen.add(path);
+    const r = liveRow(slug, path);
+    if (!r) throw new Error(`'${path}' does not exist`);
+    rows.push(r);
+  }
+  const who = sanitizeActor(actor);
+  let added = 0, removed = 0;
+  const tx = db.transaction(() => {
+    for (const r of rows) {
+      for (const id of add) {
+        const res = db.run("INSERT OR IGNORE INTO repo_item_tags (file_id, tag_id, created_by) VALUES (?, ?, ?)", r.id, id, who);
+        added += res.changes;
+      }
+      for (const id of remove) {
+        const res = db.run("DELETE FROM repo_item_tags WHERE file_id = ? AND tag_id = ?", r.id, id);
+        removed += res.changes;
+      }
+    }
+  });
+  tx();
+  return { paths: rows.map(r => r.path), added, removed };
 }
 
 // Absolute path of the blob backing a file (or one of its versions). Verified
@@ -775,22 +1016,31 @@ export function copyRepoPaths(slug: string, relPaths: string[], destDir: string,
           "SELECT * FROM repo_files WHERE site_slug = ? AND deleted_at IS NULL AND path LIKE ? ESCAPE '\\' ORDER BY path"
         ).all(slug, escapeLike(p.from) + "/%") as FileRow[]));
       }
+      // Descriptions and tags travel with copies.
+      const copyMeta = (fromId: number, toId: number) => {
+        db.run("INSERT OR IGNORE INTO repo_item_tags (file_id, tag_id, created_by) SELECT ?, tag_id, ? FROM repo_item_tags WHERE file_id = ?", toId, who, fromId);
+      };
       for (const r of rows) {
         const target = p.to + r.path.slice(p.from.length);
         ensureParents(slug, target, who);
         if (r.kind === "dir") {
-          if (!liveRow(slug, target)) db.run("INSERT INTO repo_files (site_slug, path, kind, created_by, updated_by) VALUES (?, ?, 'dir', ?, ?)", slug, target, who, who);
+          if (!liveRow(slug, target)) {
+            const ins = db.run("INSERT INTO repo_files (site_slug, path, kind, description, created_by, updated_by) VALUES (?, ?, 'dir', ?, ?, ?)", slug, target, r.description ?? null, who, who);
+            copyMeta(r.id, Number(ins.lastInsertRowid));
+          }
           continue;
         }
         if (!r.sha256) continue;
         const ins = db.run(
-          `INSERT INTO repo_files (site_slug, path, kind, size, mime, sha256, version_no, created_by, updated_by) VALUES (?, ?, 'file', ?, ?, ?, 1, ?, ?)`,
-          slug, target, r.size, r.mime, r.sha256, who, who
+          `INSERT INTO repo_files (site_slug, path, kind, size, mime, sha256, version_no, description, created_by, updated_by) VALUES (?, ?, 'file', ?, ?, ?, 1, ?, ?, ?)`,
+          slug, target, r.size, r.mime, r.sha256, r.description ?? null, who, who
         );
+        const newId = Number(ins.lastInsertRowid);
         db.run(
           `INSERT INTO repo_versions (file_id, site_slug, version_no, sha256, size, mime, note, created_by) VALUES (?, ?, 1, ?, ?, ?, ?, ?)`,
-          Number(ins.lastInsertRowid), slug, r.sha256, r.size, r.mime, `Copied from ${r.path}`, who
+          newId, slug, r.sha256, r.size, r.mime, `Copied from ${r.path}`, who
         );
+        copyMeta(r.id, newId);
         blobRetain(slug, r.sha256, r.size);
         files++;
       }
@@ -851,7 +1101,8 @@ export function listRepoTrash(slug: string): RepoTrashEntry[] {
   const rows = db.query(
     "SELECT * FROM repo_files WHERE site_slug = ? AND deleted_at IS NOT NULL ORDER BY deleted_at DESC, path"
   ).all(slug) as FileRow[];
-  return rows.map(r => ({ ...toRepoFile(r), deleted_at: r.deleted_at!, deleted_by: r.deleted_by }));
+  const tags = tagMap(slug);
+  return rows.map(r => ({ ...toRepoFile(r, tags.get(r.id) || []), deleted_at: r.deleted_at!, deleted_by: r.deleted_by }));
 }
 
 // Bring a trashed entry back. A trashed folder brings back everything that was
@@ -1185,6 +1436,10 @@ export async function exportRepoBackup(slug: string): Promise<StreamedArchive & 
   const files = db.query("SELECT * FROM repo_files WHERE site_slug = ? ORDER BY path").all(slug) as FileRow[];
   const versions = db.query("SELECT * FROM repo_versions WHERE site_slug = ? ORDER BY file_id, version_no").all(slug) as any[];
   const blobs = db.query("SELECT sha256, size FROM repo_blobs WHERE site_slug = ? AND refcount > 0").all(slug) as { sha256: string; size: number }[];
+  const tags = db.query("SELECT * FROM repo_tags WHERE site_slug = ? ORDER BY display_order, lower(name)").all(slug) as any[];
+  const itemTags = db.query(
+    "SELECT it.file_id, it.tag_id, it.created_at, it.created_by FROM repo_item_tags it JOIN repo_files f ON f.id = it.file_id WHERE f.site_slug = ?"
+  ).all(slug) as any[];
 
   const staging = join(tmpdir(), `hoster-repo-backup-${slug}-${randomBytes(6).toString("hex")}`);
   const zipPath = staging + ".zip";
@@ -1200,7 +1455,7 @@ export async function exportRepoBackup(slug: string): Promise<StreamedArchive & 
       quota_bytes: site.repo_quota_bytes, max_versions: site.repo_max_versions, visibility: site.repo_visibility,
     };
     writeFileSync(join(staging, "manifest.json"), JSON.stringify(manifest, null, 2));
-    writeFileSync(join(staging, "repository.json"), JSON.stringify({ files, versions }, null, 2));
+    writeFileSync(join(staging, "repository.json"), JSON.stringify({ files, versions, tags, item_tags: itemTags }, null, 2));
 
     const realStaging = realpathSync(staging);
     for (const f of files) {
@@ -1279,8 +1534,18 @@ export async function importRepoBackup(slug: string, archive: Buffer, actor?: st
     if (manifest.format !== "hoster-repository") throw new Error("Not a repository backup");
     const dataPath = join(staging, "repository.json");
     if (!existsSync(dataPath)) throw new Error("Archive is missing repository.json");
-    const data = JSON.parse(readFileSync(dataPath, "utf8")) as { files: FileRow[]; versions: any[] };
+    const data = JSON.parse(readFileSync(dataPath, "utf8")) as { files: FileRow[]; versions: any[]; tags?: any[]; item_tags?: any[] };
     if (!Array.isArray(data.files) || !Array.isArray(data.versions)) throw new Error("repository.json is malformed");
+    // Tags arrived in a later format revision; older archives simply have none.
+    const tags: any[] = Array.isArray(data.tags) ? data.tags : [];
+    const itemTags: any[] = Array.isArray(data.item_tags) ? data.item_tags : [];
+    const tagIds = new Set<number>();
+    for (const t of tags) {
+      if (typeof t.id !== "number" || typeof t.name !== "string") throw new Error("repository.json has an invalid tag row");
+      cleanTagName(t.name);
+      if (t.color != null && t.color !== "" && !TAG_COLOR_RE.test(String(t.color))) throw new Error(`Invalid colour on tag '${t.name}'`);
+      tagIds.add(t.id);
+    }
 
     // Validate every path and blob reference before touching the live store.
     const objectsSrc = join(staging, "objects");
@@ -1298,22 +1563,41 @@ export async function importRepoBackup(slug: string, archive: Buffer, actor?: st
       if (typeof v.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(v.sha256)) throw new Error("Invalid version hash");
       if (!available.has(v.sha256)) throw new Error(`Archive is missing a stored version of '${idMap.get(v.file_id)!.path}'`);
     }
+    for (const it of itemTags) {
+      if (!idMap.has(it.file_id) || !tagIds.has(it.tag_id)) throw new Error("repository.json has a tag assignment for an unknown file or tag");
+    }
 
     // Wipe and rebuild.
     const tx = db.transaction(() => {
       db.run("DELETE FROM repo_versions WHERE site_slug = ?", slug);
       db.run("DELETE FROM repo_files WHERE site_slug = ?", slug);
+      db.run("DELETE FROM repo_tags WHERE site_slug = ?", slug);
       db.run("DELETE FROM repo_blobs WHERE site_slug = ?", slug);
       const newIds = new Map<number, number>();
       for (const f of data.files) {
+        const desc = typeof f.description === "string" && f.description.trim() ? f.description.slice(0, MAX_DESCRIPTION_LENGTH) : null;
         const ins = db.run(
-          `INSERT INTO repo_files (site_slug, path, kind, size, mime, sha256, version_no, created_at, updated_at, created_by, updated_by, deleted_at, deleted_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          slug, f.path, f.kind, f.size || 0, f.mime || null, f.kind === "file" ? f.sha256 || null : null, f.version_no || 0,
+          `INSERT INTO repo_files (site_slug, path, kind, size, mime, sha256, version_no, description, created_at, updated_at, created_by, updated_by, deleted_at, deleted_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          slug, f.path, f.kind, f.size || 0, f.mime || null, f.kind === "file" ? f.sha256 || null : null, f.version_no || 0, desc,
           f.created_at || new Date().toISOString(), f.updated_at || new Date().toISOString(), f.created_by || null, f.updated_by || null,
           f.deleted_at || null, f.deleted_by || null
         );
         newIds.set(f.id, Number(ins.lastInsertRowid));
+      }
+      const newTagIds = new Map<number, number>();
+      for (const t of tags) {
+        const ins = db.run(
+          "INSERT INTO repo_tags (site_slug, name, description, color, display_order, created_at, updated_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          slug, cleanTagName(t.name), typeof t.description === "string" && t.description ? t.description.slice(0, MAX_TAG_DESCRIPTION_LENGTH) : null,
+          t.color ? String(t.color).toLowerCase() : null, Number.isInteger(t.display_order) ? t.display_order : 0,
+          t.created_at || new Date().toISOString(), t.updated_at || new Date().toISOString(), t.created_by || null
+        );
+        newTagIds.set(t.id, Number(ins.lastInsertRowid));
+      }
+      for (const it of itemTags) {
+        db.run("INSERT OR IGNORE INTO repo_item_tags (file_id, tag_id, created_at, created_by) VALUES (?, ?, ?, ?)",
+          newIds.get(it.file_id), newTagIds.get(it.tag_id), it.created_at || new Date().toISOString(), it.created_by || null);
       }
       for (const v of data.versions) {
         db.run(

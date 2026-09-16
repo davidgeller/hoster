@@ -100,6 +100,23 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () 
 });
 
 // --- API Helpers ---
+// A 401 from any authenticated call means the session is gone (expired,
+// pruned, or the account was removed). Rather than leaving the page half-alive
+// with every action failing, drop straight back to the sign-in screen once.
+let sessionLostShown = false;
+function handleSessionLost(res, path) {
+  if (res.status !== 401 || path === "/auth-check" || path === "/login" || path.startsWith("/login/")) return false;
+  if (!sessionLostShown) {
+    sessionLostShown = true;
+    csrfToken = null;
+    const err = document.getElementById("login-error");
+    if (err) err.textContent = "Your session has ended. Please sign in again.";
+    showScreen("login-screen");
+    setTimeout(() => { sessionLostShown = false; }, 1500);
+  }
+  return true;
+}
+
 async function api(path, opts = {}) {
   const headers = { "Content-Type": "application/json", ...opts.headers };
   const method = (opts.method || "GET").toUpperCase();
@@ -108,7 +125,10 @@ async function api(path, opts = {}) {
   }
   const res = await fetch(API + path, { ...opts, headers });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "Request failed");
+  if (!res.ok) {
+    if (handleSessionLost(res, path)) throw new Error("Session ended — please sign in again");
+    throw new Error(data.error || "Request failed");
+  }
   // Capture CSRF token from responses that provide one
   if (data.csrf_token) csrfToken = data.csrf_token;
   return data;
@@ -119,7 +139,10 @@ async function apiForm(path, formData) {
   if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
   const res = await fetch(API + path, { method: "POST", body: formData, headers });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "Upload failed");
+  if (!res.ok) {
+    if (handleSessionLost(res, path)) throw new Error("Session ended — please sign in again");
+    throw new Error(data.error || "Upload failed");
+  }
   return data;
 }
 
@@ -1864,6 +1887,7 @@ async function loadMcpAudit() {
 
       if (!res.ok) {
         const data = await res.json();
+        if (handleSessionLost(res, "/config/export")) throw new Error("Session ended — please sign in again");
         throw new Error(data.error || "Export failed");
       }
 
@@ -1997,7 +2021,7 @@ async function loadMcpAudit() {
         headers: importHeaders,
       });
       const importData = await importRes.json();
-      if (!importRes.ok) throw new Error(importData.error || "Import failed");
+      if (!importRes.ok) { if (handleSessionLost(importRes, "/config/import")) throw new Error("Session ended — please sign in again"); throw new Error(importData.error || "Import failed"); }
 
       fillEl.style.animation = "none";
       fillEl.style.width = "100%";
@@ -3497,7 +3521,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
       try {
         const res = await fetch(`${API}/sites/${slug}/repo/banner`, { method: "POST", headers: { "X-CSRF-Token": csrfToken, "Content-Type": file.type || "application/octet-stream" }, body: file });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Upload failed");
+        if (!res.ok) { if (handleSessionLost(res, "/repo/banner")) throw new Error("Session ended — please sign in again"); throw new Error(data.error || "Upload failed"); }
         bannerStatus.textContent = "Banner updated.";
         modal.querySelector("#settings-banner-preview").innerHTML = `<img src="/${esc(slug)}/_repo/banner?t=${Date.now()}" alt="" style="max-width:100%;max-height:120px;border-radius:6px;border:1px solid var(--border)">`;
       } catch (e) { bannerStatus.textContent = e.message; bannerStatus.style.color = "var(--danger)"; }

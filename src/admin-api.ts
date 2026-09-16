@@ -11,7 +11,7 @@ import {
   isTotpRateLimited, recordTotpAttempt,
   recordLoginAttempt,
   auditLog, getAuditLog,
-  getSessionUser, destroySessionsForUser, verifyUserPassword, verifyPasswordForUser,
+  getSessionUser, destroySessionsForUser, pruneSessionsForUser, verifyUserPassword, verifyPasswordForUser,
   setUserPassword, getUser,
   getUserSiteSlugs, listAdminUsers, createAdminUser, updateAdminUser, deleteAdminUser,
   type Principal,
@@ -85,10 +85,9 @@ function unauthorized(): Response {
 }
 
 function sessionResponse(ip: string, userId: number): Response {
-  // Rotate sessions on every successful login: invalidate any previously-issued
-  // cookie for THIS account (stolen, leaked, or just stale). Scoped to the
-  // logging-in account so signing in as one user doesn't evict the others.
-  destroySessionsForUser(userId);
+  // Each login gets its own session; the account's other devices stay signed
+  // in. Only the oldest sessions past the per-account cap are dropped.
+  pruneSessionsForUser(userId);
   const { sessionToken, csrfToken } = createSession(ip, userId);
   return json({ ok: true, csrf_token: csrfToken }, 200, { "Set-Cookie": sessionCookie(sessionToken) });
 }

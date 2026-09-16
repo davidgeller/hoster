@@ -109,6 +109,9 @@ try { db.exec("ALTER TABLE sessions ADD COLUMN csrf_token TEXT"); } catch (_) {}
 // Identity of the logged-in principal: NULL = platform super-admin, otherwise
 // the admin_users.id of a site-scoped user.
 try { db.exec("ALTER TABLE sessions ADD COLUMN user_id INTEGER"); } catch (_) {}
+// Sliding expiry bookkeeping: when the session was last renewed and from where.
+try { db.exec("ALTER TABLE sessions ADD COLUMN last_seen_at TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE sessions ADD COLUMN last_ip TEXT"); } catch (_) {}
 
 // Produces a SQLite-compatible UTC timestamp string that compares correctly
 // against columns populated by `datetime('now')`. Both formats must agree

@@ -3,7 +3,19 @@ import { randomBytes, createHash, timingSafeEqual } from "crypto";
 import * as OTPAuth from "otpauth";
 import QRCode from "qrcode";
 
-const SESSION_DURATION_HOURS = 24;
+// Sessions slide: every authenticated request that lands more than
+// SESSION_RENEW_MIN_MINUTES after the previous renewal pushes expires_at out to
+// now + SESSION_IDLE_HOURS, so an active user is never logged out mid-work.
+// A hard ceiling (SESSION_MAX_DAYS from creation) still bounds the cookie's
+// total lifetime, and the cookie's Max-Age matches that ceiling so the browser
+// keeps it as long as the server would honour it.
+const SESSION_IDLE_HOURS = 24 * 7;
+const SESSION_MAX_DAYS = 30;
+const SESSION_RENEW_MIN_MINUTES = 5;
+// How many concurrent sessions one account may hold (laptop, phone, a second
+// browser, a repository site on another hostname…). Logging in past the cap
+// drops the oldest instead of evicting everything.
+const MAX_SESSIONS_PER_USER = 10;
 const MAX_LOGIN_ATTEMPTS = 5;
 const MAX_TOTP_ATTEMPTS = 5;
 const LOCKOUT_MINUTES = 15;
@@ -286,11 +298,39 @@ export function createSession(ip: string, userId: number): { sessionToken: strin
   // datetime('now') comparisons (validateSession, getCsrfToken, cleanExpiredSessions)
   // produce. Mixing toISOString() with datetime('now') silently breaks expiry.
   db.run(
-    `INSERT INTO sessions (token, csrf_token, expires_at, ip, user_id)
-     VALUES (?, ?, datetime('now', ?), ?, ?)`,
-    sessionToken, csrfToken, `+${SESSION_DURATION_HOURS} hours`, ip, userId
+    `INSERT INTO sessions (token, csrf_token, expires_at, ip, user_id, last_seen_at, last_ip)
+     VALUES (?, ?, datetime('now', ?), ?, ?, datetime('now'), ?)`,
+    sessionToken, csrfToken, `+${SESSION_IDLE_HOURS} hours`, ip, userId, ip
   );
   return { sessionToken, csrfToken };
+}
+
+// Keep an account's session count under MAX_SESSIONS_PER_USER by dropping its
+// oldest sessions. Called on login *before* the new session is created, so the
+// cap counts the one about to be issued.
+export function pruneSessionsForUser(userId: number, keep: number = MAX_SESSIONS_PER_USER - 1): void {
+  db.run(
+    `DELETE FROM sessions WHERE user_id = ? AND token NOT IN (
+       SELECT token FROM sessions WHERE user_id = ?
+       ORDER BY COALESCE(last_seen_at, created_at) DESC, created_at DESC LIMIT ?)`,
+    userId, userId, Math.max(0, keep)
+  );
+}
+
+// Slide a live session forward. Cheap to call on every request: the UPDATE
+// only fires once the previous renewal is more than SESSION_RENEW_MIN_MINUTES
+// old, and the new expiry never passes the absolute ceiling.
+function touchSession(token: string, ip?: string): void {
+  db.run(
+    `UPDATE sessions
+        SET expires_at = MIN(datetime('now', ?), datetime(created_at, ?)),
+            last_seen_at = datetime('now'),
+            last_ip = COALESCE(?, last_ip)
+      WHERE token = ?
+        AND (last_seen_at IS NULL OR last_seen_at < datetime('now', ?))`,
+    `+${SESSION_IDLE_HOURS} hours`, `+${SESSION_MAX_DAYS} days`, ip && ip !== "unknown" ? ip : null, token,
+    `-${SESSION_RENEW_MIN_MINUTES} minutes`
+  );
 }
 
 // Resolve the account behind a session. Returns null for an invalid or expired
@@ -312,17 +352,20 @@ export function destroySessionsForUser(userId: number): void {
   db.run("DELETE FROM sessions WHERE user_id = ?", userId);
 }
 
+// Sessions are no longer pinned to the login IP: behind Cloudflare the client
+// address changes whenever a phone hops networks, a VPN toggles, or a
+// dual-stack client flips between v4 and v6, and every one of those used to
+// log the user out. The IP is still recorded (login IP in `ip`, most recent
+// in `last_ip`) for the audit trail. A valid session is renewed as a side
+// effect (see touchSession).
 export function validateSession(token: string | undefined, ip?: string): boolean {
   if (!token) return false;
   const row = db.query(
-    `SELECT s.ip FROM sessions s JOIN admin_users u ON u.id = s.user_id
+    `SELECT s.token FROM sessions s JOIN admin_users u ON u.id = s.user_id
      WHERE s.token = ? AND s.expires_at > datetime('now')`
-  ).get(token) as { ip: string | null } | null;
+  ).get(token) as { token: string } | null;
   if (!row) return false;
-  // If IP is provided and session has a recorded IP, verify they match
-  if (ip && row.ip && row.ip !== "unknown" && ip !== "unknown" && row.ip !== ip) {
-    return false;
-  }
+  touchSession(token, ip);
   return true;
 }
 
@@ -381,7 +424,7 @@ export function getSessionToken(req: Request): string | undefined {
   return match?.[1];
 }
 
-export function sessionCookie(token: string, maxAge: number = SESSION_DURATION_HOURS * 3600): string {
+export function sessionCookie(token: string, maxAge: number = SESSION_MAX_DAYS * 86400): string {
   return `hoster_session=${token}; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=${maxAge}`;
 }
 

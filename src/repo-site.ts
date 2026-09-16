@@ -21,7 +21,7 @@ import { join, dirname, resolve } from "path";
 import {
   getSessionToken, validateSession, getSessionUser, validateCsrf, getCsrfToken,
   verifyUserPassword, isTotpEnabled, verifyTotpOrRecovery, isRateLimited, isTotpRateLimited, recordTotpAttempt,
-  createSession, destroySession, destroySessionsForUser, sessionCookie, auditLog, userCanAccessSite,
+  createSession, destroySession, pruneSessionsForUser, sessionCookie, auditLog, userCanAccessSite,
   type Principal,
 } from "./auth";
 import type { Site } from "./sites";
@@ -36,6 +36,7 @@ import {
   zipRepoPaths, repoStats, repoBannerPath, setRepoBanner, clearRepoBanner, previewKind, isTextMime, mimeForName,
   REPO_MAX_FILE_BYTES, TRASH_TTL_DAYS, repoQuotaRemaining,
   createRepoShare, listRepoShares, revokeRepoShare, resolveRepoShare, listSharedFolder, type RepoShare,
+  setRepoDescription, listRepoTags, createRepoTag, updateRepoTag, deleteRepoTag, tagRepoPaths,
 } from "./repo";
 
 const BASE_DIR = process.env.HOSTER_HOME || dirname(process.execPath);
@@ -229,7 +230,7 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
       }
       recordTotpAttempt(ctx.ip, true);
     }
-    destroySessionsForUser(user.userId);
+    pruneSessionsForUser(user.userId);
     const { sessionToken, csrfToken } = createSession(ctx.ip, user.userId);
     auditLog("repo_login", site.slug, ctx.ip, user.username);
     const canWrite = userCanAccessSite(user, site.slug);
@@ -259,7 +260,7 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
       const owner = credential.user_id != null ? getUser(credential.user_id) : null;
       if (!owner) throw new Error("Unrecognized passkey");
       recordLoginAttempt(ctx.ip, true);
-      destroySessionsForUser(owner.userId);
+      pruneSessionsForUser(owner.userId);
       const { sessionToken, csrfToken } = createSession(ctx.ip, owner.userId);
       auditLog("repo_login_passkey", `${site.slug} (${credential.label})`, ctx.ip, owner.username);
       const canWrite = userCanAccessSite(owner, site.slug);
@@ -285,7 +286,11 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
   // --- Reads ---
   if (api === "tree" && req.method === "GET") {
     const tree = listRepoTree(site.slug);
-    return json({ ...tree, stats: repoStats(site.slug) });
+    return json({ ...tree, tags: listRepoTags(site.slug), stats: repoStats(site.slug) });
+  }
+
+  if (api === "tags" && req.method === "GET") {
+    return json({ tags: listRepoTags(site.slug) });
   }
 
   if (api === "file" && req.method === "GET") {
@@ -467,6 +472,46 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
       if (!body || typeof body.from !== "string" || typeof body.to !== "string") return json({ error: "from and to are required" }, 400);
       const result = renameRepoPath(site.slug, body.from, body.to, actor);
       audit("repo_renamed", `${site.slug}: ${result.from} -> ${result.to}`);
+      return json({ ok: true, ...result });
+    }
+
+    if (api === "describe" && req.method === "POST") {
+      const body = await readJson<{ path?: unknown; description?: unknown }>(req);
+      if (!body || typeof body.path !== "string") return json({ error: "path is required" }, 400);
+      const item = setRepoDescription(site.slug, body.path, body.description ?? null, actor);
+      audit("repo_described", `${site.slug}:${item.path}${item.description ? "" : " (cleared)"}`);
+      return json({ ok: true, item });
+    }
+
+    // --- Tags: a per-repository library, applied to any file or folder ---
+    if (api === "tags/create" && req.method === "POST") {
+      const body = await readJson<{ name?: unknown; description?: unknown; color?: unknown; display_order?: unknown }>(req);
+      if (!body) return json({ error: "name is required" }, 400);
+      const tag = createRepoTag(site.slug, body, actor);
+      audit("repo_tag_created", `${site.slug}: ${tag.name}`);
+      return json({ ok: true, tag });
+    }
+    if (api === "tags/update" && req.method === "POST") {
+      const body = await readJson<{ id?: unknown; name?: unknown; description?: unknown; color?: unknown; display_order?: unknown }>(req);
+      if (!body || !Number.isInteger(body.id)) return json({ error: "id is required" }, 400);
+      const tag = updateRepoTag(site.slug, body.id as number, body);
+      audit("repo_tag_updated", `${site.slug}: ${tag.name}`);
+      return json({ ok: true, tag });
+    }
+    if (api === "tags/delete" && req.method === "POST") {
+      const body = await readJson<{ id?: unknown }>(req);
+      if (!body || !Number.isInteger(body.id)) return json({ error: "id is required" }, 400);
+      const result = deleteRepoTag(site.slug, body.id as number);
+      audit("repo_tag_deleted", `${site.slug}: tag #${body.id} (was on ${result.removed_from} item${result.removed_from === 1 ? "" : "s"})`);
+      return json({ ok: true, ...result });
+    }
+    if (api === "tag" && req.method === "POST") {
+      const body = await readJson<{ paths?: unknown; add?: unknown; remove?: unknown }>(req);
+      const paths = Array.isArray(body?.paths) ? body!.paths.filter((p): p is string => typeof p === "string") : [];
+      if (!paths.length) return json({ error: "paths is required" }, 400);
+      const ids = (v: unknown) => Array.isArray(v) ? v.filter((n): n is number => Number.isInteger(n)) : [];
+      const result = tagRepoPaths(site.slug, paths, { add: ids(body?.add), remove: ids(body?.remove) }, actor);
+      audit("repo_tagged", `${site.slug}: ${result.paths.length} item${result.paths.length === 1 ? "" : "s"} (+${result.added} / -${result.removed})`);
       return json({ ok: true, ...result });
     }
 
@@ -687,7 +732,7 @@ function sharedFolderPage(site: Site, share: RepoShare, token: string, basePath:
   const ordered = [...sections.keys()].sort((a, b) => a.localeCompare(b));
   const body = ordered.map(dir => `
     ${dir ? `<div class="row"><span class="dir">📁 ${htmlEsc(dir)}</span></div>` : ""}
-    ${sections.get(dir)!.map(f => `<div class="row"><a href="${htmlEsc(`${base}/${encodePath(f.path)}`)}">📄 ${htmlEsc(f.path.split("/").pop())}</a><span class="size">${fmtBytes(f.size)}</span><a class="size" href="${htmlEsc(`${base}/${encodePath(f.path)}?dl=1`)}" style="flex:0">↓</a></div>`).join("")}
+    ${sections.get(dir)!.map(f => `<div class="row"><a href="${htmlEsc(`${base}/${encodePath(f.path)}`)}" title="${htmlEsc(f.description || "")}">📄 ${htmlEsc(f.path.split("/").pop())}</a><span class="size">${fmtBytes(f.size)}</span><a class="size" href="${htmlEsc(`${base}/${encodePath(f.path)}?dl=1`)}" style="flex:0">↓</a></div>`).join("")}
     ${!sections.get(dir)!.length && dir ? `<div class="row muted">empty</div>` : ""}`).join("");
   const expires = share.expires_at ? `Link expires ${htmlEsc(share.expires_at)} UTC.` : "";
   const html = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${htmlEsc(folderName)} — ${htmlEsc(site.name)}</title><style>${SHARE_STYLE}</style></head>

@@ -18,6 +18,8 @@
     canRead: false,
     files: [],           // flat list from GET tree
     dirs: [],
+    tags: [],            // this repository's tag library (GET tree / GET tags)
+    tagFilter: new Set(),// tag ids the listing is filtered to (all must match)
     stats: null,
     cwd: "",             // current folder ("" = root)
     view: localStorage.getItem("repo.view") || "grid",
@@ -136,9 +138,26 @@
       err.status = res.status;
       err.signIn = !!data.sign_in;
       err.data = data;
+      if (err.signIn) sessionLost();
       throw err;
     }
     return data;
+  }
+
+  // The server answered "sign in required" to something that used to work:
+  // the session expired or was revoked. Re-read the shell (which flips the
+  // page back to its signed-out state) and put the sign-in dialog up once.
+  let sessionLostAt = 0;
+  function sessionLost() {
+    if (Date.now() - sessionLostAt < 2000) return;
+    sessionLostAt = Date.now();
+    state.csrf = null;
+    closeModals(); // whatever was in flight can't complete without a session
+    loadInfo().then(() => {
+      toast("Your session has ended — please sign in again", true);
+      if (state.canRead) loadTree(); else render();
+      openSignIn();
+    }).catch(() => {});
   }
 
   // ---------- Markdown (small, safe) ----------
@@ -291,7 +310,9 @@
     const data = await api("tree");
     state.files = data.files;
     state.dirs = data.dirs;
+    state.tags = data.tags || [];
     state.stats = data.stats;
+    for (const id of [...state.tagFilter]) if (!state.tags.some(t => t.id === id)) state.tagFilter.delete(id);
     // Prune selections that vanished.
     const live = new Set([...state.files, ...state.dirs].map(f => f.path));
     for (const p of [...state.selected]) if (!live.has(p)) state.selected.delete(p);
@@ -304,12 +325,20 @@
   // ---------- Rendering ----------
   function currentEntries() {
     const q = state.search.trim().toLowerCase();
+    const filtering = state.tagFilter.size > 0;
     let list;
     if (q) {
-      list = [...state.dirs, ...state.files].filter(f => f.path.toLowerCase().includes(q));
+      list = [...state.dirs, ...state.files].filter(f =>
+        f.path.toLowerCase().includes(q) ||
+        (f.description || "").toLowerCase().includes(q) ||
+        (f.tags || []).some(id => (tagById(id)?.name || "").toLowerCase().includes(q)));
+    } else if (filtering) {
+      // A tag filter searches the whole repository, like a query does.
+      list = [...state.dirs, ...state.files];
     } else {
       list = [...state.dirs, ...state.files].filter(f => parentOf(f.path) === state.cwd);
     }
+    if (filtering) list = list.filter(f => [...state.tagFilter].every(id => (f.tags || []).includes(id)));
     const cmp = {
       name: (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }),
       modified: (a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""),
@@ -359,12 +388,17 @@
         const thumb = f.kind === "file" && (f.mime || "").startsWith("image/")
           ? `<div class="thumb"><img src="${esc(fileUrl(f.path))}" alt="" loading="lazy"></div>`
           : `<div class="thumb${f.kind === "dir" ? " dir" : isLink(f) ? " link" : ""}">${iconFor(f)}</div>`;
-        const label = searching ? f.path : displayName(f);
+        const wide = searching || state.tagFilter.size > 0;
+        const label = wide ? f.path : displayName(f);
+        const chips = renderChips(f.tags, "mini");
         return `<div class="item${sel ? " selected" : ""}" data-path="${esc(f.path)}" data-kind="${f.kind}" tabindex="0" role="button" draggable="${state.canWrite ? "true" : "false"}">
           <div class="check" data-check>${sel ? "✓" : ""}</div>
           ${thumb}
-          <div class="info"><div class="name" title="${esc(f.path)}">${esc(label)}</div>
-          <div class="sub">${f.kind === "dir" ? esc(folderSummary(f.path)) : `${fmtBytes(f.size)} · ${timeAgo(f.updated_at)}`}</div></div>
+          <div class="info"><div class="name" title="${esc(f.description ? `${f.path}\n${f.description}` : f.path)}">${esc(label)}</div>
+          <div class="sub">${f.kind === "dir" ? esc(folderSummary(f.path)) : `${fmtBytes(f.size)} · ${timeAgo(f.updated_at)}`}</div>
+          ${f.description ? `<div class="desc">${esc(f.description)}</div>` : ""}
+          ${chips ? `<div class="tags">${chips}</div>` : ""}</div>
+          <div class="col col-tags">${chips}</div>
           <div class="col col-size" title="${f.kind === "dir" ? esc(folderSummary(f.path)) : ""}">${f.kind === "dir" ? (() => { const st = folderStats(f.path); return st.files ? `${st.files} doc${st.files === 1 ? "" : "s"}` : "empty"; })() : fmtBytes(f.size)}</div>
           <div class="col col-mod" title="${esc(fmtDate(f.updated_at))}">${esc(fmtDate(f.updated_at))}</div>
           <div class="col col-by">${esc(f.updated_by || "")}</div>
@@ -372,7 +406,7 @@
         </div>`;
       });
       const head = state.view === "list"
-        ? `<div class="head"><div></div><div></div><div>Name</div><div>Size</div><div class="col-mod">Modified</div><div class="col-by">By</div><div class="col-v">Ver.</div></div>`
+        ? `<div class="head"><div></div><div></div><div>Name</div><div class="col-tags">Tags</div><div>Size</div><div class="col-mod">Modified</div><div class="col-by">By</div><div class="col-v">Ver.</div></div>`
         : "";
       listing.innerHTML = head + rows.join("");
       // Fill in link cards (image + site) once their JSON arrives.
@@ -392,8 +426,222 @@
       }
     }
     renderSelbar();
+    renderTagbar();
     document.querySelectorAll(".seg [data-view]").forEach(b => b.classList.toggle("active", b.dataset.view === state.view));
     $("sort").value = state.sort;
+  }
+
+  // ---------- Tags ----------
+  function tagById(id) { return state.tags.find(t => t.id === id) || null; }
+  function chipStyle(tag) { return tag.color ? ` style="--chip:${esc(tag.color)}"` : ""; }
+  function renderChips(ids, extra = "") {
+    return (ids || []).map(tagById).filter(Boolean)
+      .map(t => `<span class="chip ${extra}"${chipStyle(t)} title="${esc(t.description || t.name)}">${esc(t.name)}</span>`).join("");
+  }
+
+  // Filter bar above the listing: one chip per tag with its item count;
+  // active chips narrow the listing (all selected tags must match).
+  function renderTagbar() {
+    const bar = $("tagbar");
+    const show = state.canRead && !state.trashMode && (state.tags.length > 0 || state.canWrite);
+    bar.hidden = !show;
+    if (!show) return;
+    $("tagbar-chips").innerHTML = state.tags.length
+      ? state.tags.map(t => `<button type="button" class="chip${state.tagFilter.has(t.id) ? " active" : ""}"${chipStyle(t)} data-tag="${t.id}" title="${esc(t.description || `Filter by ${t.name}`)}">${esc(t.name)}<span class="count">${t.item_count}</span></button>`).join("")
+        + (state.tagFilter.size ? `<button type="button" class="btn btn-sm btn-ghost" data-clear-tags>Clear filter</button>` : "")
+      : `<span class="muted" style="font-size:.8rem">No tags yet.</span>`;
+  }
+  $("tagbar-chips").addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-tag]");
+    if (chip) {
+      const id = Number(chip.dataset.tag);
+      if (state.tagFilter.has(id)) state.tagFilter.delete(id); else state.tagFilter.add(id);
+      state.selected.clear();
+      render();
+      return;
+    }
+    if (e.target.closest("[data-clear-tags]")) { state.tagFilter.clear(); state.selected.clear(); render(); }
+  });
+  $("manage-tags-btn").addEventListener("click", () => openTagManager());
+
+  // Apply/remove tags on one or more items. Checkboxes start in the state the
+  // items share; an item-set with mixed membership shows indeterminate and is
+  // left alone unless the user clicks it.
+  async function openTagDialog(paths) {
+    const items = paths.map(entryAt).filter(Boolean);
+    if (!items.length) return;
+    const modal = $("tag-modal");
+    const picker = $("tag-picker");
+    const errEl = $("tag-error");
+    errEl.textContent = "";
+    $("tag-title").textContent = items.length === 1 ? `Tags for "${displayName(items[0])}"` : `Tags for ${items.length} items`;
+    $("tag-text").textContent = items.length === 1 ? "" : "Checked tags are added to every selected item; unchecked ones are removed.";
+    const initial = new Map(); // id -> "all" | "some" | "none"
+    const paint = () => {
+      if (!state.tags.length) { picker.innerHTML = `<div class="empty-note">This repository has no tags yet. Add one below.</div>`; return; }
+      picker.innerHTML = state.tags.map(t => {
+        const n = items.filter(i => (i.tags || []).includes(t.id)).length;
+        const st = n === items.length ? "all" : n ? "some" : "none";
+        if (!initial.has(t.id)) initial.set(t.id, st);
+        return `<label><input type="checkbox" data-tag="${t.id}"${st === "all" ? " checked" : ""}${st === "some" ? ' data-mixed="1"' : ""}><span class="chip"${chipStyle(t)}>${esc(t.name)}</span>${t.description ? `<span class="tdesc">${esc(t.description)}</span>` : ""}</label>`;
+      }).join("");
+      picker.querySelectorAll("[data-mixed]").forEach(cb => { cb.indeterminate = true; });
+    };
+    paint();
+    $("tag-new-name").value = "";
+    modal.hidden = false;
+    $("tag-new-name").focus();
+    return new Promise((resolve) => {
+      const form = $("tag-form");
+      const addBtn = $("tag-new-add");
+      const onAdd = async () => {
+        const name = $("tag-new-name").value.trim();
+        if (!name) return;
+        addBtn.disabled = true;
+        try {
+          const { tag } = await api("tags/create", { method: "POST", body: JSON.stringify({ name, color: pickColor(state.tags.length) }) });
+          state.tags.push(tag);
+          initial.set(tag.id, "none");
+          paint();
+          picker.querySelector(`[data-tag="${tag.id}"]`).checked = true;
+          $("tag-new-name").value = "";
+        } catch (e) { errEl.textContent = e.message; }
+        finally { addBtn.disabled = false; }
+      };
+      const onNewKey = (e) => { if (e.key === "Enter") { e.preventDefault(); onAdd(); } };
+      const onSubmit = async (e) => {
+        e.preventDefault();
+        const add = [], remove = [];
+        picker.querySelectorAll("input[data-tag]").forEach(cb => {
+          const id = Number(cb.dataset.tag);
+          if (cb.indeterminate) return;
+          if (cb.checked && initial.get(id) !== "all") add.push(id);
+          if (!cb.checked && initial.get(id) !== "none") remove.push(id);
+        });
+        if (!add.length && !remove.length) { cleanup(); resolve(false); return; }
+        try {
+          await api("tag", { method: "POST", body: JSON.stringify({ paths: items.map(i => i.path), add, remove }) });
+          cleanup(); resolve(true);
+          await loadTree();
+        } catch (err) { errEl.textContent = err.message; }
+      };
+      const onClose = () => { cleanup(); resolve(false); };
+      const cleanup = () => {
+        form.removeEventListener("submit", onSubmit); addBtn.removeEventListener("click", onAdd);
+        $("tag-new-name").removeEventListener("keydown", onNewKey);
+        modal.querySelectorAll("[data-close]").forEach(b => b.removeEventListener("click", onClose));
+        modal.hidden = true;
+      };
+      form.addEventListener("submit", onSubmit);
+      addBtn.addEventListener("click", onAdd);
+      $("tag-new-name").addEventListener("keydown", onNewKey);
+      modal.querySelectorAll("[data-close]").forEach(b => b.addEventListener("click", onClose));
+    });
+  }
+
+  const TAG_PALETTE = ["#2f6fed", "#17a36a", "#d98a0b", "#d93a3a", "#8b5cf6", "#0ea5e9", "#db2777", "#65a30d", "#f97316", "#64748b"];
+  function pickColor(n) { return TAG_PALETTE[n % TAG_PALETTE.length]; }
+
+  // Library editor: rename, recolour, describe, or delete tags. Edits save on
+  // blur/change; deleting removes the tag from every item.
+  async function openTagManager() {
+    const modal = $("tagmgr-modal");
+    const list = $("tagmgr-list");
+    const errEl = $("tagmgr-error");
+    errEl.textContent = "";
+    $("tagmgr-color").value = pickColor(state.tags.length);
+    $("tagmgr-name").value = ""; $("tagmgr-desc").value = "";
+    const paint = () => {
+      if (!state.tags.length) { list.innerHTML = `<div class="tagmgr-empty">No tags yet. Add the first one above.</div>`; return; }
+      list.innerHTML = state.tags.map(t => `
+        <div class="tagmgr-row" data-id="${t.id}">
+          <input type="color" data-f="color" value="${esc(t.color || "#9aa1ad")}" title="Colour">
+          <input type="text" data-f="name" value="${esc(t.name)}" maxlength="40" aria-label="Tag name">
+          <input type="text" data-f="description" value="${esc(t.description || "")}" maxlength="200" placeholder="Description" aria-label="Description">
+          <span class="count">${t.item_count} item${t.item_count === 1 ? "" : "s"}</span>
+          <button type="button" class="btn btn-sm btn-ghost" data-del title="Delete tag">✕</button>
+        </div>`).join("");
+      list.querySelectorAll("[data-f]").forEach(input => {
+        const save = async () => {
+          const row = input.closest(".tagmgr-row");
+          const id = Number(row.dataset.id);
+          const tag = tagById(id);
+          if (!tag) return;
+          const field = input.dataset.f;
+          const value = input.value.trim();
+          if ((tag[field] || "") === value) return;
+          try {
+            const { tag: updated } = await api("tags/update", { method: "POST", body: JSON.stringify({ id, [field]: value || null }) });
+            Object.assign(tag, updated);
+            errEl.textContent = "";
+            render();
+          } catch (e) { errEl.textContent = e.message; input.value = tag[field] || (field === "color" ? "#9aa1ad" : ""); }
+        };
+        input.addEventListener("change", save);
+        if (input.type === "text") input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); input.blur(); } });
+      });
+      list.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", async () => {
+        const id = Number(b.closest(".tagmgr-row").dataset.id);
+        const tag = tagById(id);
+        if (!tag) return;
+        const ok = await confirmDialog({ title: `Delete tag "${tag.name}"?`, text: tag.item_count ? `It will be removed from ${tag.item_count} item${tag.item_count === 1 ? "" : "s"}.` : "It isn't applied to anything.", ok: "Delete tag" });
+        if (!ok) return;
+        modal.hidden = false; // confirmDialog hides every modal; keep the manager open
+        try {
+          await api("tags/delete", { method: "POST", body: JSON.stringify({ id }) });
+          await loadTree();
+          paint();
+        } catch (e) { errEl.textContent = e.message; }
+      }));
+    };
+    paint();
+    modal.hidden = false;
+    $("tagmgr-name").focus();
+    const form = $("tagmgr-form");
+    const onSubmit = async (e) => {
+      e.preventDefault();
+      try {
+        await api("tags/create", { method: "POST", body: JSON.stringify({ name: $("tagmgr-name").value, description: $("tagmgr-desc").value || null, color: $("tagmgr-color").value }) });
+        $("tagmgr-name").value = ""; $("tagmgr-desc").value = "";
+        errEl.textContent = "";
+        await loadTree();
+        $("tagmgr-color").value = pickColor(state.tags.length);
+        paint();
+      } catch (err) { errEl.textContent = err.message; }
+    };
+    const onClose = () => { form.removeEventListener("submit", onSubmit); modal.querySelectorAll("[data-close]").forEach(b => b.removeEventListener("click", onClose)); modal.hidden = true; };
+    form.addEventListener("submit", onSubmit);
+    modal.querySelectorAll("[data-close]").forEach(b => b.addEventListener("click", onClose));
+  }
+
+  // ---------- Descriptions ----------
+  async function openDescriptionDialog(path) {
+    const f = entryAt(path);
+    if (!f) return;
+    const modal = $("desc-modal");
+    const input = $("desc-input");
+    const errEl = $("desc-error");
+    $("desc-title").textContent = f.description ? "Edit description" : "Add a description";
+    $("desc-text").textContent = f.kind === "dir" ? `Folder: ${f.path}` : displayName(f);
+    input.value = f.description || "";
+    errEl.textContent = "";
+    modal.hidden = false;
+    input.focus();
+    return new Promise((resolve) => {
+      const form = $("desc-form");
+      const onSubmit = async (e) => {
+        e.preventDefault();
+        try {
+          await api("describe", { method: "POST", body: JSON.stringify({ path, description: input.value }) });
+          cleanup(); resolve(true);
+          await loadTree();
+        } catch (err) { errEl.textContent = err.message; }
+      };
+      const onClose = () => { cleanup(); resolve(false); };
+      const cleanup = () => { form.removeEventListener("submit", onSubmit); modal.querySelectorAll("[data-close]").forEach(b => b.removeEventListener("click", onClose)); modal.hidden = true; };
+      form.addEventListener("submit", onSubmit);
+      modal.querySelectorAll("[data-close]").forEach(b => b.addEventListener("click", onClose));
+    });
   }
 
   function renderCrumbs() {
@@ -419,6 +667,8 @@
     if (!n) return;
     $("sel-count").textContent = `${n} selected`;
     $("sel-rename").hidden = !state.canWrite || n !== 1;
+    $("sel-tag").hidden = !state.canWrite;
+    $("sel-describe").hidden = !state.canWrite || n !== 1;
     $("sel-share").hidden = !state.canWrite || n !== 1;
     $("sel-move").hidden = !state.canWrite;
     $("sel-copy").hidden = !state.canWrite;
@@ -429,6 +679,7 @@
   function navigate(dir, { push = true } = {}) {
     state.cwd = dir;
     state.search = "";
+    state.tagFilter.clear();
     $("search").value = "";
     state.selected.clear();
     if (push) history.pushState({ path: dir }, "", dir ? `?path=${encodeURIComponent(dir)}` : location.pathname);
@@ -509,6 +760,8 @@
   $("sel-delete").addEventListener("click", () => confirmDelete([...state.selected]));
   $("sel-rename").addEventListener("click", () => { const p = [...state.selected][0]; if (p) promptRename(p); });
   $("sel-share").addEventListener("click", () => { const p = [...state.selected][0]; if (p) openShareDialog(p); });
+  $("sel-tag").addEventListener("click", () => openTagDialog([...state.selected]));
+  $("sel-describe").addEventListener("click", () => { const p = [...state.selected][0]; if (p) openDescriptionDialog(p); });
   $("sel-move").addEventListener("click", () => moveOrCopyDialog([...state.selected], "move"));
   $("sel-copy").addEventListener("click", () => moveOrCopyDialog([...state.selected], "copy"));
 
@@ -601,6 +854,18 @@
         if (kind !== "markdown") body.querySelector("pre").textContent = t;
       }).catch(() => { body.innerHTML = `<div class="none">Couldn't load the file.</div>`; });
     } else body.innerHTML = `<div class="none"><div class="big">${iconFor(f)}</div>No preview for this file type.</div>`;
+
+    const descEl = $("preview-desc");
+    descEl.innerHTML = f.description
+      ? `${esc(f.description)}${state.canWrite ? ` <button type="button" class="btn btn-sm btn-ghost edit-desc" data-act="describe">Edit</button>` : ""}`
+      : state.canWrite ? `<span class="muted">No description.</span> <button type="button" class="btn btn-sm btn-ghost edit-desc" data-act="describe">Add one</button>` : "";
+    descEl.hidden = !descEl.innerHTML;
+    descEl.querySelector('[data-act="describe"]')?.addEventListener("click", () => openDescriptionDialog(path));
+    const tagsEl = $("preview-tags");
+    const chips = renderChips(f.tags);
+    tagsEl.innerHTML = chips + (state.canWrite ? `<button type="button" class="btn btn-sm btn-ghost" data-act="tags">${chips ? "Edit tags" : "Add tags"}</button>` : "");
+    tagsEl.hidden = !tagsEl.innerHTML;
+    tagsEl.querySelector('[data-act="tags"]')?.addEventListener("click", () => openTagDialog([path]));
 
     $("preview-meta").innerHTML = `
       <dt>Path</dt><dd class="mono">${esc(f.path)}</dd>
@@ -1070,7 +1335,7 @@
         let data = {};
         try { data = JSON.parse(xhr.responseText); } catch (_) {}
         if (xhr.status >= 200 && xhr.status < 300) resolve(data);
-        else { const err = new Error(data.error || `Upload failed (${xhr.status})`); err.signIn = !!data.sign_in; reject(err); }
+        else { const err = new Error(data.error || `Upload failed (${xhr.status})`); err.signIn = !!data.sign_in; if (err.signIn) sessionLost(); reject(err); }
       };
       xhr.onerror = () => reject(new Error("Network error"));
       xhr.send(job.file);
