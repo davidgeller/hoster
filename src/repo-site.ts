@@ -21,7 +21,7 @@ import { join, dirname, resolve } from "path";
 import {
   getSessionToken, validateSession, getSessionUser, validateCsrf, getCsrfToken,
   verifyUserPassword, isTotpEnabled, verifyTotpOrRecovery, isRateLimited, isTotpRateLimited, recordTotpAttempt,
-  createSession, destroySession, pruneSessionsForUser, sessionCookie, auditLog, userCanAccessSite,
+  createSession, destroySession, pruneSessionsForUser, sessionCookie, auditLog, userCanAccessSite, setUserPassword,
   type Principal,
 } from "./auth";
 import type { Site } from "./sites";
@@ -77,7 +77,9 @@ interface Auth {
 function resolveAuth(req: Request, site: Site, ip: string): Auth {
   const token = getSessionToken(req);
   const principal = token && validateSession(token, ip) ? getSessionUser(token) : null;
-  const canWrite = !!principal && userCanAccessSite(principal, site.slug);
+  // An account still on its temporary password is signed in but can't act
+  // until it chooses a new one (the page shows that dialog first).
+  const canWrite = !!principal && !principal.mustChangePassword && userCanAccessSite(principal, site.slug);
   const canRead = site.repo_visibility === "public" || canWrite;
   return { principal, token, canWrite, canRead };
 }
@@ -199,6 +201,7 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
         authenticated: !!auth.principal,
         username: auth.principal?.username ?? null,
         is_admin: !!auth.principal?.isAdmin,
+        must_change_password: !!auth.principal?.mustChangePassword,
         can_read: auth.canRead,
         can_write: auth.canWrite,
         csrf_token: auth.principal ? getCsrfToken(auth.token) : null,
@@ -233,9 +236,9 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
     pruneSessionsForUser(user.userId);
     const { sessionToken, csrfToken } = createSession(ctx.ip, user.userId);
     auditLog("repo_login", site.slug, ctx.ip, user.username);
-    const canWrite = userCanAccessSite(user, site.slug);
+    const canWrite = !user.mustChangePassword && userCanAccessSite(user, site.slug);
     return json(
-      { ok: true, csrf_token: csrfToken, username: user.username, can_write: canWrite, can_read: site.repo_visibility === "public" || canWrite },
+      { ok: true, csrf_token: csrfToken, username: user.username, must_change_password: user.mustChangePassword, can_write: canWrite, can_read: site.repo_visibility === "public" || canWrite },
       200, { "Set-Cookie": sessionCookie(sessionToken) }
     );
   }
@@ -263,9 +266,9 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
       pruneSessionsForUser(owner.userId);
       const { sessionToken, csrfToken } = createSession(ctx.ip, owner.userId);
       auditLog("repo_login_passkey", `${site.slug} (${credential.label})`, ctx.ip, owner.username);
-      const canWrite = userCanAccessSite(owner, site.slug);
+      const canWrite = !owner.mustChangePassword && userCanAccessSite(owner, site.slug);
       return json(
-        { ok: true, csrf_token: csrfToken, username: owner.username, can_write: canWrite, can_read: site.repo_visibility === "public" || canWrite },
+        { ok: true, csrf_token: csrfToken, username: owner.username, must_change_password: owner.mustChangePassword, can_write: canWrite, can_read: site.repo_visibility === "public" || canWrite },
         200, { "Set-Cookie": sessionCookie(sessionToken) }
       );
     } catch (e: any) {
@@ -278,6 +281,29 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
   if (api === "auth/logout" && req.method === "POST") {
     if (auth.token) destroySession(auth.token);
     return json({ ok: true }, 200, { "Set-Cookie": sessionCookie("deleted", 0) });
+  }
+
+  // --- Change own password (any signed-in account) ---
+  // Lives here, before the read gate, so an account handed a temporary
+  // password can replace it from the repository page itself — on a custom
+  // domain that may be the only Hoster page the person ever sees.
+  if (api === "auth/change-password" && req.method === "POST") {
+    if (!auth.principal) return json({ error: "Sign in required", sign_in: true }, 401);
+    if (!validateCsrf(req, auth.token)) return json({ error: "Invalid CSRF token" }, 403);
+    const body = await readJson<{ current?: unknown; password?: unknown }>(req);
+    if (!body || typeof body.current !== "string" || typeof body.password !== "string" || !body.current || !body.password) {
+      return json({ error: "Both current and new password required" }, 400);
+    }
+    if (isRateLimited(ctx.ip)) return json({ error: "Too many attempts. Try again later." }, 429);
+    if (!(await verifyPasswordForUser(auth.principal.userId, body.current, ctx.ip))) return json({ error: "Current password is incorrect" }, 401);
+    try { await setUserPassword(auth.principal.userId, body.password); }
+    catch (e: any) { return json({ error: e.message }, 400); }
+    audit("password_changed", auth.principal.mustChangePassword ? `replaced temporary password via ${site.slug}` : `via ${site.slug}`);
+    return json({ ok: true });
+  }
+
+  if (auth.principal?.mustChangePassword) {
+    return json({ error: "Choose a new password to continue", must_change_password: true }, 403);
   }
 
   // Everything below needs read access at minimum.

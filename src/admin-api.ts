@@ -12,7 +12,7 @@ import {
   recordLoginAttempt,
   auditLog, getAuditLog,
   getSessionUser, destroySessionsForUser, pruneSessionsForUser, verifyUserPassword, verifyPasswordForUser,
-  setUserPassword, getUser,
+  setUserPassword, getUser, generatePassword,
   getUserSiteSlugs, listAdminUsers, createAdminUser, updateAdminUser, deleteAdminUser,
   type Principal,
 } from "./auth";
@@ -89,7 +89,10 @@ function sessionResponse(ip: string, userId: number): Response {
   // in. Only the oldest sessions past the per-account cap are dropped.
   pruneSessionsForUser(userId);
   const { sessionToken, csrfToken } = createSession(ip, userId);
-  return json({ ok: true, csrf_token: csrfToken }, 200, { "Set-Cookie": sessionCookie(sessionToken) });
+  // Tell the client up front when the account is on a temporary password so
+  // it can go straight to the "choose a new password" screen.
+  const mustChange = !!getUser(userId)?.mustChangePassword;
+  return json({ ok: true, csrf_token: csrfToken, must_change_password: mustChange }, 200, { "Set-Cookie": sessionCookie(sessionToken) });
 }
 
 function clampInt(value: string | null, defaultVal: number, min: number, max: number): number {
@@ -239,6 +242,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
       is_super_admin: !!who && who.isAdmin,
       is_admin: !!who && who.isAdmin,
       username: who?.username ?? null,
+      must_change_password: !!who && who.mustChangePassword,
       totp_enabled: who ? isTotpEnabled(who.userId) : false,
       passkey_supported: rp !== null,
       passkey_enabled: rp !== null && hasCredentialsForRp(rp.rpId),
@@ -262,6 +266,12 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   // sites and are blocked from platform-wide surfaces.
   const principal: Principal | null = getSessionUser(sessionToken);
   if (!principal) return unauthorized(); // account deleted while session alive
+
+  // An account still on a temporary password may do exactly one thing:
+  // replace it. Everything else waits, whatever the role.
+  if (principal.mustChangePassword && path !== "/_admin/api/change-password") {
+    return json({ error: "Choose a new password to continue", must_change_password: true }, 403);
+  }
   const isSuper = principal.isAdmin;
   const actor = principal.username;
   const allowedSlugs: Set<string> | null = isSuper ? null : new Set(getUserSiteSlugs(principal.userId));
@@ -332,7 +342,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     } catch (e: any) {
       return json({ error: e.message }, 400);
     }
-    audit("password_changed", null);
+    audit("password_changed", principal.mustChangePassword ? "replaced temporary password" : null);
     return json({ ok: true });
   }
 
@@ -1220,16 +1230,22 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   if (path === "/_admin/api/users" && req.method === "GET") {
     return json({ users: listAdminUsers() });
   }
+  // A fresh temporary password for the "Generate" buttons. Never stored: the
+  // client sends it back with the create/reset request like any other password.
+  if (path === "/_admin/api/users/generate-password" && req.method === "POST") {
+    return json({ password: generatePassword(16) });
+  }
   if (path === "/_admin/api/users" && req.method === "POST") {
-    const body = await readJsonBodyOrEmpty<{ username?: string; password?: string; sites?: string[]; is_admin?: boolean; confirm_password?: string }>(req);
+    const body = await readJsonBodyOrEmpty<{ username?: string; password?: string; sites?: string[]; is_admin?: boolean; must_change_password?: boolean; confirm_password?: string }>(req);
     const makeAdmin = body.is_admin === true;
     if (makeAdmin) {
       const denied = await stepUp(body.confirm_password);
       if (denied) return denied;
     }
+    const mustChange = body.must_change_password === true;
     try {
-      const id = await createAdminUser(body.username || "", body.password || "", { isAdmin: makeAdmin, sites: body.sites || [] });
-      audit("admin_user_created", `${(body.username || "").toLowerCase()} (${makeAdmin ? "administrator" : `${(body.sites || []).length} sites`})`);
+      const id = await createAdminUser(body.username || "", body.password || "", { isAdmin: makeAdmin, sites: body.sites || [], mustChangePassword: mustChange });
+      audit("admin_user_created", `${(body.username || "").toLowerCase()} (${makeAdmin ? "administrator" : `${(body.sites || []).length} sites`}${mustChange ? ", must change password" : ""})`);
       return json({ ok: true, id, users: listAdminUsers() });
     } catch (e: any) {
       return json({ error: e.message }, 400);
@@ -1241,7 +1257,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     const target = getUser(id);
     if (!target) return json({ error: "User not found" }, 404);
     const body = await readJsonBodyOrEmpty<{
-      password?: string; sites?: string[]; is_admin?: boolean;
+      password?: string; sites?: string[]; is_admin?: boolean; must_change_password?: boolean;
       disable_totp?: boolean; remove_passkeys?: boolean; confirm_password?: string;
     }>(req);
 
@@ -1256,14 +1272,16 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
       if (denied) return denied;
     }
     try {
-      const opts: { password?: string; sites?: string[]; isAdmin?: boolean } = {};
+      const opts: { password?: string; sites?: string[]; isAdmin?: boolean; mustChangePassword?: boolean } = {};
       if (typeof body.password === "string" && body.password.length) opts.password = body.password;
       if (Array.isArray(body.sites)) opts.sites = body.sites;
       if (typeof body.is_admin === "boolean") opts.isAdmin = body.is_admin;
+      if (typeof body.must_change_password === "boolean") opts.mustChangePassword = body.must_change_password;
       const ok = await updateAdminUser(id, opts);
       if (!ok) return json({ error: "User not found" }, 404);
       const changed: string[] = [];
-      if (opts.password) { destroySessionsForUser(id); changed.push("password reset"); }
+      if (opts.password) { destroySessionsForUser(id); changed.push(opts.mustChangePassword ? "temporary password set" : "password reset"); }
+      else if (opts.mustChangePassword !== undefined) changed.push(opts.mustChangePassword ? "must change password" : "password change no longer required");
       if (opts.sites) changed.push(`${opts.sites.length} sites`);
       if (changesRole) changed.push(body.is_admin ? "promoted to administrator" : "demoted to site user");
       if (body.disable_totp === true) { disableTotp(id); changed.push("2FA disabled"); }

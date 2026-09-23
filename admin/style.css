@@ -319,6 +319,14 @@ input:focus, textarea:focus, select:focus {
 
 .theme-toggle button:hover { opacity: 0.8; }
 
+.sidebar-version {
+  color: var(--sidebar-text);
+  opacity: 0.6;
+  font-size: 0.7rem;
+  text-align: center;
+  letter-spacing: 0.02em;
+}
+
 #logout-btn {
   color: var(--sidebar-text);
   font-size: 0.8rem;
@@ -1094,6 +1102,19 @@ tr:hover td { background: var(--bg-hover); }
 
 .file-drop strong { color: var(--accent); }
 
+.file-drop.has-file {
+  border-style: solid;
+  border-color: var(--success);
+  background: var(--success-bg);
+}
+.file-drop.has-file.dragover { border-color: var(--accent); background: var(--accent-bg); }
+.file-drop.bad-file { border-color: var(--danger); }
+.file-drop.bad-file p { color: var(--danger); }
+.file-drop-check { color: var(--success); font-weight: 700; }
+.file-drop-name { color: var(--text); font-weight: 600; word-break: break-all; }
+.file-drop-size { color: var(--text-secondary); font-size: 0.8rem; }
+.file-drop-hint { color: var(--text-secondary); font-size: 0.75rem; }
+
 /* --- Upload Progress --- */
 .upload-progress {
   display: flex;
@@ -1166,6 +1187,7 @@ tr:hover td { background: var(--bg-hover); }
   .sidebar-footer { padding: 12px 8px; }
   .theme-toggle button { font-size: 0.7rem; }
   #logout-btn { font-size: 0; padding: 8px; }
+  .sidebar-version { font-size: 0.6rem; letter-spacing: 0; }
 
   .content { margin-left: 60px; padding: 20px; }
 }

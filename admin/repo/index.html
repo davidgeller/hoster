@@ -169,6 +169,23 @@
     </form>
   </div>
 
+  <!-- Forced password change: the account is on a temporary password -->
+  <div class="modal" id="pwchange-modal" hidden>
+    <div class="modal-backdrop"></div>
+    <form class="modal-card" id="pwchange-form" autocomplete="on">
+      <h2>Choose a new password</h2>
+      <p class="muted">Your account was set up with a temporary password. Pick your own to continue.</p>
+      <label>Temporary password <input type="password" id="pwchange-current" autocomplete="current-password" required></label>
+      <label>New password <input type="password" id="pwchange-new" autocomplete="new-password" required minlength="8" placeholder="8+ characters"></label>
+      <label>Confirm new password <input type="password" id="pwchange-confirm" autocomplete="new-password" required></label>
+      <div class="form-error" id="pwchange-error"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="pwchange-signout">Sign out</button>
+        <button type="submit" class="btn btn-primary">Set password</button>
+      </div>
+    </form>
+  </div>
+
   <!-- Prompt dialog (new folder / rename / new file name) -->
   <div class="modal" id="prompt-modal" hidden>
     <div class="modal-backdrop" data-close></div>

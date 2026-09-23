@@ -71,6 +71,9 @@ try { db.exec("ALTER TABLE admin_users ADD COLUMN totp_enabled INTEGER NOT NULL 
 try { db.exec("ALTER TABLE admin_users ADD COLUMN totp_recovery_codes TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE admin_users ADD COLUMN totp_pending_secret TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE admin_users ADD COLUMN webauthn_user_handle TEXT"); } catch (_) {}
+// Set when an administrator hands out a temporary password: the account must
+// choose its own before it can do anything else.
+try { db.exec("ALTER TABLE admin_users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"); } catch (_) {}
 // Who performed an audited action. NULL for pre-v1.5 rows and system events.
 try { db.exec("ALTER TABLE audit_log ADD COLUMN actor TEXT"); } catch (_) {}
 // Which account a pending 2FA token belongs to.
@@ -118,6 +121,10 @@ export interface Principal {
   userId: number;
   username: string;
   isAdmin: boolean;
+  // True while the account is still on a temporary password an administrator
+  // set. Every authenticated surface except "change my password" is closed
+  // until the user picks their own.
+  mustChangePassword: boolean;
 }
 
 interface UserRow {
@@ -130,6 +137,7 @@ interface UserRow {
   totp_recovery_codes: string | null;
   totp_pending_secret: string | null;
   webauthn_user_handle: string | null;
+  must_change_password: number;
   created_at: string;
   last_login: string | null;
 }
@@ -145,7 +153,7 @@ function getUserRowByUsername(username: string): UserRow | null {
 }
 
 function toPrincipal(row: UserRow): Principal {
-  return { userId: row.id, username: row.username, isAdmin: row.is_admin === 1 };
+  return { userId: row.id, username: row.username, isAdmin: row.is_admin === 1, mustChangePassword: row.must_change_password === 1 };
 }
 
 export function getUser(id: number): Principal | null {
@@ -283,10 +291,34 @@ export async function verifyPasswordForUser(userId: number, password: string, ip
   return valid;
 }
 
-export async function setUserPassword(userId: number, password: string): Promise<void> {
+// Set a password. By default this clears the "must change" flag (the user
+// chose it themselves); an administrator issuing a temporary password passes
+// `mustChange: true` so the account is forced to replace it at next sign-in.
+export async function setUserPassword(userId: number, password: string, opts: { mustChange?: boolean } = {}): Promise<void> {
   validatePassword(password);
   const hash = await hashPassword(password);
-  db.run("UPDATE admin_users SET password_hash = ? WHERE id = ?", hash, userId);
+  db.run("UPDATE admin_users SET password_hash = ?, must_change_password = ? WHERE id = ?", hash, opts.mustChange ? 1 : 0, userId);
+}
+
+export function setMustChangePassword(userId: number, required: boolean): void {
+  db.run("UPDATE admin_users SET must_change_password = ? WHERE id = ?", required ? 1 : 0, userId);
+}
+
+// A temporary password an administrator can hand out. Drawn from an alphabet
+// without look-alike characters (0/O, 1/l/I) so it survives being read aloud
+// or retyped, and always mixes letters, digits, and a symbol.
+const PASSWORD_ALPHABET = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%&*?";
+export function generatePassword(length: number = 16): string {
+  const n = Math.max(12, Math.min(64, length));
+  for (;;) {
+    const bytes = randomBytes(n * 2);
+    let out = "";
+    for (let i = 0; i < bytes.length && out.length < n; i++) {
+      // Reject-sample so each character is drawn uniformly.
+      if (bytes[i] < 256 - (256 % PASSWORD_ALPHABET.length)) out += PASSWORD_ALPHABET[bytes[i] % PASSWORD_ALPHABET.length];
+    }
+    if (out.length === n && /[a-z]/.test(out) && /[A-Z]/.test(out) && /[0-9]/.test(out) && /[!@#$%&*?]/.test(out)) return out;
+  }
 }
 
 // --- Sessions ---
@@ -338,12 +370,12 @@ function touchSession(token: string, ip?: string): void {
 export function getSessionUser(token: string | undefined): Principal | null {
   if (!token) return null;
   const row = db.query(
-    `SELECT u.id, u.username, u.is_admin
+    `SELECT u.id, u.username, u.is_admin, u.must_change_password
      FROM sessions s JOIN admin_users u ON u.id = s.user_id
      WHERE s.token = ? AND s.expires_at > datetime('now')`
-  ).get(token) as { id: number; username: string; is_admin: number } | null;
+  ).get(token) as { id: number; username: string; is_admin: number; must_change_password: number } | null;
   if (!row) return null;
-  return { userId: row.id, username: row.username, isAdmin: row.is_admin === 1 };
+  return { userId: row.id, username: row.username, isAdmin: row.is_admin === 1, mustChangePassword: row.must_change_password === 1 };
 }
 
 // Delete sessions belonging to one account. Used to rotate a principal's
@@ -639,6 +671,7 @@ export interface AdminUser {
   is_admin: boolean;
   totp_enabled: boolean;
   passkey_count: number;
+  must_change_password: boolean;
   created_at: string;
   last_login: string | null;
   sites: string[];
@@ -666,16 +699,17 @@ export function setUserSites(userId: number, slugs: string[]): void {
 
 export function listAdminUsers(): AdminUser[] {
   const rows = db.query(
-    `SELECT u.id, u.username, u.is_admin, u.totp_enabled, u.created_at, u.last_login,
+    `SELECT u.id, u.username, u.is_admin, u.totp_enabled, u.must_change_password, u.created_at, u.last_login,
             (SELECT COUNT(*) FROM webauthn_credentials c WHERE c.user_id = u.id) AS passkey_count
      FROM admin_users u ORDER BY u.is_admin DESC, u.username`
-  ).all() as Array<{ id: number; username: string; is_admin: number; totp_enabled: number; created_at: string; last_login: string | null; passkey_count: number }>;
+  ).all() as Array<{ id: number; username: string; is_admin: number; totp_enabled: number; must_change_password: number; created_at: string; last_login: string | null; passkey_count: number }>;
   return rows.map(r => ({
     id: r.id,
     username: r.username,
     is_admin: r.is_admin === 1,
     totp_enabled: r.totp_enabled === 1,
     passkey_count: r.passkey_count,
+    must_change_password: r.must_change_password === 1,
     created_at: r.created_at,
     last_login: r.last_login,
     sites: r.is_admin === 1 ? [] : getUserSiteSlugs(r.id),
@@ -685,15 +719,15 @@ export function listAdminUsers(): AdminUser[] {
 // Create an account. The very first administrator is created through the
 // unauthenticated setup endpoint; everything after that goes through an admin.
 export async function createAdminUser(
-  username: string, password: string, opts: { isAdmin?: boolean; sites?: string[] } = {}
+  username: string, password: string, opts: { isAdmin?: boolean; sites?: string[]; mustChangePassword?: boolean } = {}
 ): Promise<number> {
   const normalized = validateUsername(username);
   validatePassword(password);
   if (getUserRowByUsername(normalized)) throw new Error(`User '${normalized}' already exists`);
   const hash = await hashPassword(password);
   const result = db.run(
-    "INSERT INTO admin_users (username, password_hash, is_admin) VALUES (?, ?, ?)",
-    normalized, hash, opts.isAdmin ? 1 : 0
+    "INSERT INTO admin_users (username, password_hash, is_admin, must_change_password) VALUES (?, ?, ?, ?)",
+    normalized, hash, opts.isAdmin ? 1 : 0, opts.mustChangePassword ? 1 : 0
   );
   const userId = Number(result.lastInsertRowid);
   if (!opts.isAdmin) setUserSites(userId, opts.sites || []);
@@ -701,12 +735,15 @@ export async function createAdminUser(
 }
 
 export async function updateAdminUser(
-  id: number, opts: { password?: string; sites?: string[]; isAdmin?: boolean }
+  id: number, opts: { password?: string; sites?: string[]; isAdmin?: boolean; mustChangePassword?: boolean }
 ): Promise<boolean> {
   const existing = getUserRow(id);
   if (!existing) return false;
   if (opts.password !== undefined) {
-    await setUserPassword(id, opts.password);
+    // An administrator's reset is a temporary password unless they say otherwise.
+    await setUserPassword(id, opts.password, { mustChange: opts.mustChangePassword === true });
+  } else if (opts.mustChangePassword !== undefined) {
+    setMustChangePassword(id, opts.mustChangePassword);
   }
   if (opts.isAdmin !== undefined) {
     const wantAdmin = opts.isAdmin ? 1 : 0;

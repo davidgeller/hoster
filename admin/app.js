@@ -8,6 +8,9 @@ const API = "/_admin/api";
 // site-scoped user sees only their sites and no platform Settings.
 let isSuperAdmin = true;
 let currentUsername = null;
+// True while the signed-in account is on a temporary password; the app stays
+// on the "choose a new password" screen until it's replaced.
+let mustChangePassword = false;
 
 // Refresh the principal from the server and apply UI scoping. Called on initial
 // load and after every successful login (the SPA doesn't reload on login).
@@ -17,11 +20,29 @@ async function refreshAuthScoping() {
     if (auth.csrf_token) csrfToken = auth.csrf_token;
     isSuperAdmin = auth.is_super_admin !== false;
     currentUsername = auth.username || null;
+    mustChangePassword = !!auth.must_change_password;
   } catch (_) {
     isSuperAdmin = true;
     currentUsername = null;
+    mustChangePassword = false;
   }
   applyAuthScoping();
+}
+
+// Land in the app after sign-in (or on load with a live session): either the
+// dashboard, or the mandatory new-password screen when the account is still on
+// a temporary password.
+function enterApp() {
+  if (mustChangePassword) {
+    ["pwchange-current", "pwchange-new", "pwchange-confirm"].forEach(id => { document.getElementById(id).value = ""; });
+    document.getElementById("pwchange-error").textContent = "";
+    showScreen("pwchange-screen");
+    document.getElementById("pwchange-current").focus();
+    return;
+  }
+  showScreen("main-screen");
+  loadSidebarVersion();
+  navigateTo("dashboard");
 }
 
 // Toggle UI surfaces that only administrators may use. Every account can open
@@ -209,13 +230,36 @@ document.addEventListener("DOMContentLoaded", async () => {
     } else {
       isSuperAdmin = auth.is_super_admin !== false;
       currentUsername = auth.username || null;
+      mustChangePassword = !!auth.must_change_password;
       applyAuthScoping();
-      showScreen("main-screen");
-      navigateTo("dashboard");
+      enterApp();
     }
   } catch (e) {
     showScreen("login-screen");
   }
+
+  // --- Forced password change (temporary password) ---
+  document.getElementById("pwchange-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const errEl = document.getElementById("pwchange-error");
+    errEl.textContent = "";
+    const current = document.getElementById("pwchange-current").value;
+    const newPw = document.getElementById("pwchange-new").value;
+    const confirm = document.getElementById("pwchange-confirm").value;
+    if (newPw !== confirm) { errEl.textContent = "Passwords do not match"; return; }
+    if (newPw === current) { errEl.textContent = "Choose a password different from the temporary one"; return; }
+    try {
+      await api("/change-password", { method: "POST", body: JSON.stringify({ current, password: newPw }) });
+      await refreshAuthScoping();
+      enterApp();
+    } catch (err) { errEl.textContent = err.message; }
+  });
+  document.getElementById("pwchange-signout-btn").addEventListener("click", async () => {
+    try { await api("/logout", { method: "POST" }); } catch (_) {}
+    csrfToken = null;
+    mustChangePassword = false;
+    showScreen("login-screen");
+  });
 
   // --- Setup Form ---
   document.getElementById("setup-form").addEventListener("submit", async (e) => {
@@ -261,8 +305,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       if (data.csrf_token) csrfToken = data.csrf_token;
       await refreshAuthScoping();
-      showScreen("main-screen");
-      navigateTo("dashboard");
+      enterApp();
     } catch (err) { errEl.textContent = err.message; }
   });
 
@@ -279,8 +322,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       });
       pendingTotpToken = null;
       await refreshAuthScoping();
-      showScreen("main-screen");
-      navigateTo("dashboard");
+      enterApp();
     } catch (err) { errEl.textContent = err.message; }
   });
 
@@ -301,8 +343,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         body: JSON.stringify({ response: encodeAssertion(assertion) }),
       });
       await refreshAuthScoping();
-      showScreen("main-screen");
-      navigateTo("dashboard");
+      enterApp();
     } catch (err) {
       // NotAllowedError is the user dismissing the OS prompt — not worth an error.
       errEl.textContent = err.name === "NotAllowedError" ? "" : err.message;
@@ -407,16 +448,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  // File drop visual
-  const dropZone = document.getElementById("file-drop");
-  dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("dragover"); });
-  dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
-  dropZone.addEventListener("drop", (e) => {
-    e.preventDefault();
-    dropZone.classList.remove("dragover");
-    const file = e.dataTransfer.files[0];
-    if (file) document.getElementById("upload-file").files = e.dataTransfer.files;
-  });
+  // File drop: show the chosen ZIP so it's obvious something was picked.
+  attachFileDrop(document.getElementById("file-drop"), document.getElementById("upload-file"), { ext: ".zip" });
 
   // --- Upload Form ---
   document.getElementById("upload-form").addEventListener("submit", async (e) => {
@@ -627,6 +660,145 @@ function pickedSlugs(containerId) {
   return Array.from(el.querySelectorAll('input[type="checkbox"]:checked')).map(i => i.value);
 }
 
+// Fill a password field with a server-generated temporary password and reveal
+// it, so the admin can see what they're about to hand out.
+async function fillGeneratedPassword(input, errEl) {
+  try {
+    const { password } = await api("/users/generate-password", { method: "POST", body: "{}" });
+    input.value = password;
+    input.type = "text";
+    const reveal = input.closest(".pw-wrap")?.querySelector(".pw-reveal input");
+    if (reveal) reveal.checked = true;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  } catch (e) {
+    if (errEl) errEl.textContent = e.message;
+  }
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (_) {
+    // Clipboard API needs a secure context; fall back to a hidden textarea.
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (_) {}
+    ta.remove();
+    return ok;
+  }
+}
+
+// After an account is created or its password reset: show the sign-in details
+// once, with copy buttons, so the admin can pass them on by whatever channel
+// they like. The password is never shown again after this closes.
+function showCredentialsModal({ title, username, password, signInUrl, mustChange, note }) {
+  const lines = [
+    `Sign in at: ${signInUrl}`,
+    `Username: ${username}`,
+    `Password: ${password}`,
+  ];
+  if (mustChange) lines.push("You'll be asked to choose a new password the first time you sign in.");
+  const all = lines.join("\n");
+  const modal = document.createElement("div");
+  modal.className = "modal credentials-modal";
+  const row = (label, value, id) => `
+      <div style="display:grid;grid-template-columns:90px 1fr auto;gap:8px;align-items:center;margin-bottom:8px">
+        <span class="text-sm text-muted">${label}</span>
+        <code id="${id}" style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:0.9rem;word-break:break-all;user-select:all">${esc(value)}</code>
+        <button type="button" class="btn btn-sm" data-copy="${id}">Copy</button>
+      </div>`;
+  modal.innerHTML = `
+    <div class="modal-backdrop"></div>
+    <div class="modal-content" style="max-width:520px">
+      <h2>${esc(title || "Account ready")}</h2>
+      <p class="text-sm text-muted" style="margin-bottom:14px">${note ? esc(note) + " " : ""}These details are shown once — copy them now and share them with the user however you like.</p>
+      ${row("Sign in at", signInUrl, "cred-url")}
+      ${row("Username", username, "cred-user")}
+      ${row("Password", password, "cred-pass")}
+      ${mustChange ? '<p class="text-sm text-muted" style="margin-top:4px">They will be asked to choose a new password the first time they sign in.</p>' : ""}
+      <div class="modal-actions" style="margin-top:14px;gap:8px">
+        <button type="button" class="btn btn-primary" id="cred-copy-all">Copy all</button>
+        <button type="button" class="btn btn-ghost close-modal">Done</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  const flash = (btn, label) => { const was = btn.textContent; btn.textContent = label; setTimeout(() => { btn.textContent = was; }, 1400); };
+  modal.querySelectorAll("[data-copy]").forEach(btn => btn.addEventListener("click", async () => {
+    const ok = await copyText(modal.querySelector("#" + btn.dataset.copy).textContent);
+    flash(btn, ok ? "Copied" : "Copy failed");
+  }));
+  modal.querySelector("#cred-copy-all").addEventListener("click", async (e) => {
+    flash(e.currentTarget, (await copyText(all)) ? "Copied" : "Copy failed");
+  });
+  const close = () => modal.remove();
+  modal.querySelector(".modal-backdrop").addEventListener("click", close);
+  modal.querySelector(".close-modal").addEventListener("click", close);
+  return modal;
+}
+
+// Reset another account's password: type one or generate it, optionally make
+// it temporary, then hand the details over via the credentials pop-up.
+function openPasswordResetModal(u, onDone) {
+  const modal = document.createElement("div");
+  modal.className = "modal";
+  modal.innerHTML = `
+    <div class="modal-backdrop"></div>
+    <div class="modal-content" style="max-width:440px">
+      <h2>Reset password</h2>
+      <p class="text-sm text-muted" style="margin-bottom:14px">Set a new password for <strong>${esc(u.username)}</strong>. They will be signed out everywhere.</p>
+      <form id="pwreset-form">
+        <div style="display:flex;gap:8px;align-items:flex-start">
+          <input type="password" id="pwreset-password" placeholder="New password (min 8 chars)" minlength="8" autocomplete="new-password" required style="flex:1">
+          <button type="button" class="btn btn-sm" id="pwreset-generate">Generate</button>
+        </div>
+        <label style="display:flex;align-items:center;gap:6px;font-weight:normal;margin:10px 0 0;flex-direction:row">
+          <input type="checkbox" id="pwreset-must-change" checked style="width:auto;margin:0"> Require a new password at next sign-in
+        </label>
+        ${u.is_admin ? `
+        <label style="margin-top:12px">Your password <small>Required because this is an administrator account.</small>
+          <input type="password" id="pwreset-confirm" autocomplete="current-password" required>
+        </label>` : ""}
+        <div class="modal-actions" style="margin-top:14px;gap:8px">
+          <button type="button" class="btn btn-ghost close-modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Reset password</button>
+        </div>
+        <div class="form-error" id="pwreset-error" style="margin-top:8px"></div>
+      </form>
+    </div>`;
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.querySelector(".modal-backdrop").addEventListener("click", close);
+  modal.querySelector(".close-modal").addEventListener("click", close);
+  const pwEl = modal.querySelector("#pwreset-password");
+  const errEl = modal.querySelector("#pwreset-error");
+  modal.querySelector("#pwreset-generate").addEventListener("click", () => fillGeneratedPassword(pwEl, errEl));
+  setTimeout(() => pwEl.focus(), 0);
+  modal.querySelector("#pwreset-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    errEl.textContent = "";
+    const password = pwEl.value;
+    const mustChange = modal.querySelector("#pwreset-must-change").checked;
+    const body = { password, must_change_password: mustChange };
+    if (u.is_admin) body.confirm_password = modal.querySelector("#pwreset-confirm").value;
+    try {
+      await api(`/users/${u.id}`, { method: "PUT", body: JSON.stringify(body) });
+      close();
+      showCredentialsModal({ title: "Password reset", username: u.username, password, signInUrl: adminSignInUrl(), mustChange });
+      if (onDone) onDone();
+    } catch (err) { errEl.textContent = err.message; }
+  });
+}
+
+function adminSignInUrl() {
+  return `${location.origin}/_admin/`;
+}
+
 // Ask the acting admin for their own password when the server will demand it.
 function confirmPasswordPrompt(what) {
   const pw = prompt(`${what}\n\nEnter YOUR password to confirm:`);
@@ -646,6 +818,7 @@ function renderUsersList(users) {
     const factors = [
       u.totp_enabled ? "2FA on" : null,
       u.passkey_count ? `${u.passkey_count} passkey${u.passkey_count === 1 ? "" : "s"}` : null,
+      u.must_change_password ? "must set a new password" : null,
     ].filter(Boolean).join(" · ");
     return `
     <div class="user-row" data-user-id="${u.id}" data-admin="${u.is_admin ? 1 : 0}">
@@ -701,15 +874,7 @@ function renderUsersList(users) {
       put({ sites: slugs });
     });
     row.querySelector('[data-act="reset"]').addEventListener("click", () => {
-      const pw = prompt(`New password for "${u.username}" (min 8 chars):`);
-      if (!pw) return;
-      const body = { password: pw };
-      if (u.is_admin) {
-        const confirm_password = confirmPasswordPrompt(`Reset the password of administrator "${u.username}"? They will be signed out everywhere.`);
-        if (!confirm_password) return;
-        body.confirm_password = confirm_password;
-      }
-      put(body);
+      openPasswordResetModal(u, () => loadUsers());
     });
     row.querySelector('[data-act="role"]')?.addEventListener("click", () => {
       const toAdmin = !u.is_admin;
@@ -766,16 +931,20 @@ function bindUserAddForm() {
   form.dataset.bound = "1";
   const adminBox = document.getElementById("user-new-admin");
   const sitesWrap = document.getElementById("user-new-sites-wrap");
+  const pwEl = document.getElementById("user-new-password");
+  const mustChangeBox = document.getElementById("user-new-must-change");
   adminBox.addEventListener("change", () => { sitesWrap.hidden = adminBox.checked; });
+  document.getElementById("user-new-generate").addEventListener("click", () => fillGeneratedPassword(pwEl, document.getElementById("users-error")));
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const errEl = document.getElementById("users-error");
     errEl.textContent = "";
     const username = document.getElementById("user-new-username").value.trim();
-    const password = document.getElementById("user-new-password").value;
+    const password = pwEl.value;
     const is_admin = adminBox.checked;
     const sites = is_admin ? [] : pickedSlugs("user-new-sites");
-    const body = { username, password, is_admin, sites };
+    const must_change_password = mustChangeBox.checked;
+    const body = { username, password, is_admin, sites, must_change_password };
     if (is_admin) {
       const confirm_password = confirmPasswordPrompt(`Create administrator "${username}" with access to everything?`);
       if (!confirm_password) return;
@@ -783,10 +952,10 @@ function bindUserAddForm() {
     }
     try {
       await api("/users", { method: "POST", body: JSON.stringify(body) });
-      document.getElementById("user-new-username").value = "";
-      document.getElementById("user-new-password").value = "";
-      adminBox.checked = false;
+      form.reset();
+      mustChangeBox.checked = true;
       sitesWrap.hidden = false;
+      showCredentialsModal({ title: "Account created", username: username.toLowerCase(), password, signInUrl: adminSignInUrl(), mustChange: must_change_password });
       loadUsers();
     } catch (e) { errEl.textContent = e.message; }
   });
@@ -2223,20 +2392,72 @@ function showMcpSetup(label) {
   });
 }
 
+function releaseVersion(data) {
+  return data.app_version && data.app_version !== "dev" ? data.app_version : null;
+}
+
 async function loadAbout() {
   try {
     const data = await api("/version");
     const el = document.getElementById("about-version");
-    const rel = data.app_version && data.app_version !== "dev" ? data.app_version : null;
+    const rel = releaseVersion(data);
     el.innerHTML = rel
       ? `Version <strong>${esc(rel)}</strong> · build ${esc(data.version)} · <a href="https://github.com/davidgeller/hoster/releases/tag/v${esc(rel)}" target="_blank" rel="noopener">release notes</a>`
       : `Development build ${esc(data.version)}`;
   } catch (_) {}
 }
 
+async function loadSidebarVersion() {
+  const el = document.getElementById("sidebar-version");
+  if (!el) return;
+  try {
+    const data = await api("/version");
+    const rel = releaseVersion(data);
+    el.textContent = rel ? `Hoster v${rel}` : "Hoster dev build";
+    el.title = `Build ${data.version}`;
+  } catch (_) {}
+}
+
+// Wire a .file-drop zone to its file input and show what was chosen — name,
+// size, and a check — so a drop or a pick visibly registers. A file that
+// doesn't match `ext` is rejected with an inline message. Returns a reset().
+function attachFileDrop(drop, input, { ext, onChange } = {}) {
+  const prompt = drop.querySelector("p");
+  const emptyHtml = prompt.innerHTML;
+  const setEmpty = () => { drop.classList.remove("has-file", "bad-file"); prompt.innerHTML = emptyHtml; };
+  const render = () => {
+    const file = input.files && input.files[0];
+    if (!file) { setEmpty(); return; }
+    if (ext && !file.name.toLowerCase().endsWith(ext)) {
+      input.value = "";
+      drop.classList.remove("has-file");
+      drop.classList.add("bad-file");
+      prompt.innerHTML = `<span class="file-drop-name">${esc(file.name)}</span> isn't a <strong>${esc(ext)}</strong> file — drop a ${esc(ext)} file or click to browse`;
+      return;
+    }
+    drop.classList.remove("bad-file");
+    drop.classList.add("has-file");
+    prompt.innerHTML = `<span class="file-drop-check">✓</span> <span class="file-drop-name">${esc(file.name)}</span> <span class="file-drop-size">${formatBytes(file.size)}</span><br><span class="file-drop-hint">Ready — click or drop to choose a different file</span>`;
+  };
+  input.addEventListener("change", () => { render(); if (onChange) onChange(); });
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("dragover"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("dragover"));
+  drop.addEventListener("drop", (e) => {
+    e.preventDefault();
+    drop.classList.remove("dragover");
+    if (!e.dataTransfer.files.length) return;
+    input.files = e.dataTransfer.files;
+    input.dispatchEvent(new Event("change"));
+  });
+  drop._resetFileDrop = () => { input.value = ""; setEmpty(); };
+  return drop._resetFileDrop;
+}
+
 function closeUploadModal() {
   document.getElementById("upload-modal").hidden = true;
   document.getElementById("upload-form").reset();
+  document.getElementById("file-drop")._resetFileDrop?.();
+  document.getElementById("upload-title").textContent = "Deploy New Site";
   document.getElementById("upload-error").textContent = "";
   document.getElementById("upload-progress").hidden = true;
 }
@@ -3027,11 +3248,15 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
             Add a new site user with access
             <small>Creates the account and grants it this ${isRepo ? "repository" : "site"} right away. They sign in with these credentials${isRepo ? " — on the repository page or at /_admin" : " at /_admin"}.</small>
           </label>
-          <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:6px;align-items:center">
+          <div style="display:grid;grid-template-columns:1fr 1fr auto auto;gap:6px;align-items:start">
             <input type="text" id="settings-user-new-name" placeholder="username or email" pattern="[A-Za-z0-9._+\\-]{1,64}(@[A-Za-z0-9\\-]+(\\.[A-Za-z0-9\\-]+)+)?" title="A handle or an email address" autocomplete="off">
             <input type="password" id="settings-user-new-password" placeholder="password (min 8 chars)" minlength="8" autocomplete="new-password">
+            <button type="button" class="btn btn-sm" id="settings-user-generate-btn" title="Fill in a random 16-character password">Generate</button>
             <button type="button" class="btn btn-sm btn-primary" id="settings-user-add-btn">Add</button>
           </div>
+          <label style="display:flex;align-items:center;gap:6px;font-weight:normal;margin:8px 0 0;flex-direction:row;color:var(--text)">
+            <input type="checkbox" id="settings-user-must-change" checked style="width:auto;margin:0"> Require a new password at first sign-in
+          </label>
           <div class="form-error" id="settings-users-error" style="margin-top:4px"></div>
           <p class="text-sm text-muted" style="margin-top:10px">Passwords, 2FA, and administrator rights for every account are managed under <a href="#" id="settings-users-go">Settings → Users</a>.</p>
         </div>` : ""}
@@ -3487,17 +3712,31 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
       listEl.innerHTML = `<span style="color:var(--danger)">${esc(err.message)}</span>`;
     }
   }
+  modal.querySelector("#settings-user-generate-btn")?.addEventListener("click", () => {
+    fillGeneratedPassword(modal.querySelector("#settings-user-new-password"), modal.querySelector("#settings-users-error"));
+  });
   modal.querySelector("#settings-user-add-btn")?.addEventListener("click", async () => {
     const nameEl = modal.querySelector("#settings-user-new-name");
     const pwEl = modal.querySelector("#settings-user-new-password");
+    const mustChangeBox = modal.querySelector("#settings-user-must-change");
     const errEl = modal.querySelector("#settings-users-error");
     errEl.textContent = "";
     const username = nameEl.value.trim().toLowerCase();
+    const password = pwEl.value;
+    const mustChange = mustChangeBox.checked;
     if (!username) { errEl.textContent = "Username is required"; return; }
-    if (pwEl.value.length < 8) { errEl.textContent = "Password must be at least 8 characters"; return; }
+    if (password.length < 8) { errEl.textContent = "Password must be at least 8 characters"; return; }
     try {
-      await api("/users", { method: "POST", body: JSON.stringify({ username, password: pwEl.value, is_admin: false, sites: [slug] }) });
-      nameEl.value = ""; pwEl.value = "";
+      await api("/users", { method: "POST", body: JSON.stringify({ username, password, is_admin: false, sites: [slug], must_change_password: mustChange }) });
+      nameEl.value = ""; pwEl.value = ""; pwEl.type = "password";
+      const reveal = pwEl.closest(".pw-wrap")?.querySelector(".pw-reveal input");
+      if (reveal) reveal.checked = false;
+      // Repository users sign in on the repository page itself (its custom
+      // domain when it has one); everyone else uses the admin panel.
+      const signInUrl = isRepo
+        ? (hostAliases.length ? `https://${hostAliases[0]}/` : `${location.origin}/${slug}/`)
+        : adminSignInUrl();
+      showCredentialsModal({ title: "Account created", username, password, signInUrl, mustChange, note: `${username} can now manage this ${isRepo ? "repository" : "site"}.` });
       loadSiteUsers();
     } catch (err) { errEl.textContent = err.message; }
   });
@@ -3548,10 +3787,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
     const restoreErr = modal.querySelector("#settings-repo-restore-error");
     const restoreOk = modal.querySelector("#settings-repo-restore-success");
     const syncRestoreBtn = () => { restoreBtn.disabled = !(restoreFile.files && restoreFile.files.length) || !isSuperAdmin; };
-    restoreFile.addEventListener("change", syncRestoreBtn);
-    restoreDrop.addEventListener("dragover", (e) => { e.preventDefault(); restoreDrop.classList.add("dragover"); });
-    restoreDrop.addEventListener("dragleave", () => restoreDrop.classList.remove("dragover"));
-    restoreDrop.addEventListener("drop", (e) => { e.preventDefault(); restoreDrop.classList.remove("dragover"); if (e.dataTransfer.files.length) { restoreFile.files = e.dataTransfer.files; syncRestoreBtn(); } });
+    attachFileDrop(restoreDrop, restoreFile, { ext: ".zip", onChange: syncRestoreBtn });
     if (!isSuperAdmin) restoreDrop.insertAdjacentHTML("afterend", '<div class="text-sm text-muted">Only administrators can restore a repository.</div>');
     restoreBtn.addEventListener("click", async () => {
       restoreErr.textContent = ""; restoreOk.textContent = "";
@@ -3631,6 +3867,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
 };
 
 window.redeploySite = function (slug, name) {
+  document.getElementById("upload-title").textContent = `Update ${name || slug}`;
   document.getElementById("upload-slug").value = slug;
   document.getElementById("upload-name").value = name;
   document.getElementById("upload-modal").hidden = false;

@@ -273,7 +273,33 @@
       $("gate-signin").classList.toggle("btn-primary", info.auth.authenticated || !passkeyAvailable());
       $("gate-error").textContent = "";
     }
+    // Signed in on a temporary password: nothing else works until it's
+    // replaced, so the dialog comes up over whatever the page shows.
+    if (info.auth.authenticated && info.auth.must_change_password) openPasswordChange();
+    else $("pwchange-modal").hidden = true;
   }
+
+  function openPasswordChange() {
+    ["pwchange-current", "pwchange-new", "pwchange-confirm"].forEach(id => { $(id).value = ""; });
+    $("pwchange-error").textContent = "";
+    $("pwchange-modal").hidden = false;
+    setTimeout(() => $("pwchange-current").focus(), 0);
+  }
+  $("pwchange-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const errEl = $("pwchange-error");
+    errEl.textContent = "";
+    const current = $("pwchange-current").value, password = $("pwchange-new").value;
+    if (password !== $("pwchange-confirm").value) { errEl.textContent = "Passwords do not match"; return; }
+    if (password === current) { errEl.textContent = "Choose a password different from the temporary one"; return; }
+    try {
+      await api("auth/change-password", { method: "POST", body: JSON.stringify({ current, password }) });
+      closeModals();
+      await boot();
+      toast("Password set — you're all signed in");
+    } catch (err) { errEl.textContent = err.message; }
+  });
+  $("pwchange-signout").addEventListener("click", async () => { closeModals(); await signOut(); });
 
   function renderWho() {
     const a = state.info.auth;
@@ -767,7 +793,7 @@
 
   document.addEventListener("keydown", (e) => {
     if (e.target.matches("input, textarea, select")) return;
-    if (document.querySelector(".modal:not([hidden])")) { if (e.key === "Escape") closeModals(); return; }
+    if (document.querySelector(".modal:not([hidden])")) { if (e.key === "Escape" && $("pwchange-modal").hidden) closeModals(); return; }
     if (e.key === "Escape") { if (state.selected.size) { state.selected.clear(); render(); } else closePreview(); }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a" && state.canRead && !state.trashMode) {
       e.preventDefault();
@@ -984,7 +1010,7 @@
   }
   const nameCheck = (v) => {
     if (!v) return "Name is required";
-    if (v.includes("/") || v.includes("\\")) return "Use Rename / Move to change folders";
+    if (v.includes("/") || v.includes("\\")) return "Use Move to… to change folders";
     if (v === "." || v === "..") return "Invalid name";
     if (/[\x00-\x1f]/.test(v)) return "Name contains invalid characters";
     return null;
@@ -1015,13 +1041,17 @@
   async function promptRename(path) {
     const f = entryAt(path);
     if (!f) return;
-    const to = await promptDialog({
+    const dir = parentOf(path);
+    const oldName = baseName(path);
+    const name = await promptDialog({
       title: f.kind === "dir" ? "Rename folder" : "Rename file",
-      text: "Edit the name. You can also type a full path (e.g. archive/2025/report.pdf) to move it at the same time.",
-      label: "Path", value: path, ok: "Save",
-      validate: (v) => (!v ? "Path is required" : v === path ? "Unchanged" : null),
+      text: dir ? `In ${dir}. Use "Move to…" to put it in a different folder.` : `Use "Move to…" to put it in a different folder.`,
+      label: "Name", value: oldName, ok: "Save",
+      validate: (v) => nameCheck(v) || (v === oldName ? "Unchanged" : null),
     });
-    if (!to) return;
+    if (!name) return;
+    const to = joinPath(dir, name);
+    if (entryAt(to)) { toast(`'${name}' already exists`, true); return; }
     try {
       const r = await api("rename", { method: "POST", body: JSON.stringify({ from: path, to }) });
       state.selected.clear();

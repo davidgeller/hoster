@@ -15,4 +15,11 @@
 // cross-compiled Linux binary cannot be run on the build Mac — which is why
 // build-pi.sh boot-tests a natively-compiled binary before packaging.
 await import("reflect-metadata");
+
+// `hoster <command> ...` runs a local CLI operation instead of the server.
+const args = process.argv.slice(2);
+if (args.length > 0) {
+  const { runCli } = await import("./cli");
+  process.exit(await runCli(args));
+}
 await import("./index");

@@ -70,6 +70,22 @@
       </div>
     </div>
 
+    <!-- Forced password change (account is on a temporary password) -->
+    <div id="pwchange-screen" class="screen" hidden>
+      <div class="auth-card">
+        <div class="logo">HOSTER</div>
+        <p class="subtitle">Your account was set up with a temporary password. Choose your own to continue.</p>
+        <form id="pwchange-form">
+          <input type="password" id="pwchange-current" placeholder="Temporary password" autocomplete="current-password" required>
+          <input type="password" id="pwchange-new" placeholder="New password (8+ chars)" autocomplete="new-password" required minlength="8">
+          <input type="password" id="pwchange-confirm" placeholder="Confirm new password" autocomplete="new-password" required>
+          <button type="submit" class="btn btn-primary btn-block">Set password</button>
+          <div class="form-error" id="pwchange-error"></div>
+        </form>
+        <button class="btn btn-ghost btn-sm" id="pwchange-signout-btn" style="display:block;margin:12px auto 0">Sign out</button>
+      </div>
+    </div>
+
     <!-- Main app -->
     <div id="main-screen" class="screen" hidden>
       <nav class="sidebar">
@@ -114,6 +130,7 @@
           </div>
           <div id="current-user-label" class="text-sm text-muted" style="padding:4px 0"></div>
           <button id="logout-btn" class="btn btn-ghost btn-sm">Sign Out</button>
+          <div id="sidebar-version" class="sidebar-version"></div>
         </div>
       </nav>
 
@@ -304,7 +321,7 @@
         <div id="upload-modal" class="modal" hidden>
           <div class="modal-backdrop"></div>
           <div class="modal-content">
-            <h2>Deploy New Site</h2>
+            <h2 id="upload-title">Deploy New Site</h2>
             <form id="upload-form">
               <label>
                 Slug (URL path)
@@ -479,11 +496,16 @@
               <form id="user-add-form" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
                 <input type="text" id="user-new-username" placeholder="username or email" pattern="[A-Za-z0-9._+\-]{1,64}(@[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)+)?" title="A handle or an email address" autocomplete="off" style="flex:1;min-width:140px">
                 <input type="password" id="user-new-password" placeholder="password (min 8 chars)" minlength="8" autocomplete="new-password" style="flex:1;min-width:160px">
+                <button type="button" class="btn btn-sm" id="user-new-generate" title="Fill in a random 16-character password">Generate</button>
                 <label style="display:inline-flex;align-items:center;gap:6px;font-weight:normal;margin:0">
                   <input type="checkbox" id="user-new-admin" style="width:auto;margin:0"> Administrator
                 </label>
                 <button type="submit" class="btn btn-sm btn-primary">Add User</button>
+                <label style="display:inline-flex;align-items:center;gap:6px;font-weight:normal;margin:0;flex-basis:100%">
+                  <input type="checkbox" id="user-new-must-change" checked style="width:auto;margin:0"> Require a new password at first sign-in
+                </label>
               </form>
+              <p class="text-sm text-muted" style="margin-top:6px">After the account is created you'll get its sign-in details to copy and send however you like.</p>
               <div id="user-new-sites-wrap">
                 <div class="text-sm text-muted" style="margin-top:8px">Sites this user may manage:</div>
                 <div id="user-new-sites" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px"></div>

@@ -290,7 +290,7 @@ function updateCurrentSymlink(slug: string, version: string) {
   symlinkSync(versionDir, currentLink);
 }
 
-const MAX_UPLOAD_SIZE = 500 * 1024 * 1024; // 500 MB
+export const MAX_UPLOAD_SIZE = 500 * 1024 * 1024; // 500 MB
 
 export function validateSlug(slug: string): void {
   if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(slug)) {

@@ -346,7 +346,7 @@ Hoster has two kinds of accounts, both managed under **Settings → Users** (adm
 - **Administrators** see and control everything: every site, Settings, users, MCP/OAuth, backups. There can be as many as you like, and the last one can never be demoted or deleted.
 - **Site users** sign in the same way but see the full admin panel for their assigned sites only. They can upload and manage files, snapshot and roll back versions, edit site settings, and read that site's analytics — but cannot create or delete sites, and never see the platform-wide Settings tabs.
 
-To add an account, enter a username and password, tick **Administrator** if it should be one (you'll be asked for *your* password to confirm), or pick the sites a site user may manage. From the same panel you can promote or demote accounts, reset passwords, reassign sites, delete accounts, and — for someone who has lost their phone or security key — disable their 2FA or remove their passkeys so they can sign in again. Every account manages its own password, 2FA, and passkeys under **Settings → Account**.
+To add an account, enter a username and a password — or click **Generate** for a random 16-character one — tick **Administrator** if it should be one (you'll be asked for *your* password to confirm), or pick the sites a site user may manage. Leave **Require a new password at first sign-in** ticked to make the password temporary: the account can do nothing but choose its own password until it has (in the admin panel, or on a repository's own page). Once the account exists, a pop-up shows the sign-in address, username, and password with copy buttons, so you can pass them on by email, chat, or whatever you like; the password is not shown again after that. **Reset password** on an existing account works the same way (generate or type, temporary or not, then the same pop-up). From the same panel you can also promote or demote accounts, reassign sites, delete accounts, and — for someone who has lost their phone or security key — disable their 2FA or remove their passkeys so they can sign in again. Every account manages its own password, 2FA, and passkeys under **Settings → Account**.
 
 Anything that touches an administrator account asks for your own password again, so a briefly hijacked session can't quietly take over a peer. All of these actions are written to the audit log with the acting username.
 
@@ -366,6 +366,14 @@ Anything that touches an administrator account asks for your own password again,
 ### Updating a Site
 
 Click **Update** on a site card, upload a new ZIP. This creates a new version while keeping previous versions available for rollback.
+
+From a shell on the host, the same deploy works without signing in:
+
+```bash
+sudo -u <service-user> /path/to/hoster deploy <slug> /absolute/path/to/site.zip [--label "..."] [--notes "..."] [--yes] [--dry-run]
+```
+
+It only updates existing web sites (it never creates one), must run as the account that owns `data/hoster.db` (never root), checks the ZIP (a real file with a ZIP signature, under 500 MB, containing an `index.html`, and enough free disk space) and asks for confirmation. When there's no terminal, `--yes` is required. Each run is recorded in the audit log as `site_updated_cli` with the OS user and the ZIP's SHA-256. When running from source, set `HOSTER_HOME`.
 
 For piecemeal edits to an existing version, use **Upload File** instead — the modal accepts one or more files at once and supports dropping entire folders (directory structure is preserved). Use the **Destination Path** field as an optional prefix to place the dropped files into a subdirectory.
 
