@@ -539,6 +539,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   // --- Default landing page form ---
   bindLandingForm();
 
+  bindSystemView();
+
   // --- Bot protection (shield) form ---
   document.getElementById("shield-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -623,6 +625,7 @@ function navigateTo(view) {
   else if (view === "analytics") loadAnalytics();
   else if (view === "logs") loadLogs();
   else if (view === "settings") loadSettings();
+  else if (view === "system") loadSystem();
   else if (view === "about") loadAbout();
 }
 
@@ -2463,6 +2466,144 @@ function releaseVersion(data) {
   return data.app_version && data.app_version !== "dev" ? data.app_version : null;
 }
 
+// --- System (health) ---
+function meterBar(pct) {
+  const cls = pct >= 95 ? "critical" : pct >= 85 ? "warn" : "";
+  return `<div class="meter"><div class="meter-fill ${cls}" style="width:${Math.min(100, Math.max(0, pct))}%"></div></div>`;
+}
+
+function formatUptime(sec) {
+  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
+  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
+}
+
+function kvRows(rows) {
+  return `<dl class="kv">${rows.filter(Boolean).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>`;
+}
+
+async function loadSystem() {
+  let h;
+  try { h = await api("/system/health"); }
+  catch (err) { document.getElementById("system-warnings").innerHTML = `<div class="health-banner critical">${esc(err.message)}</div>`; return; }
+
+  document.getElementById("system-warnings").innerHTML = h.warnings.map(w =>
+    `<div class="health-banner ${w.level}">${esc(w.message)}</div>`).join("");
+
+  const db = h.database, disk = h.disk, mem = h.host.memory, log = db.request_log;
+  const logPct = Math.round((log.rows / log.cap) * 100);
+  document.getElementById("system-stats").innerHTML = `
+    <div class="stat-card"><div class="stat-label">Disk free</div><div class="stat-value">${disk ? formatBytes(disk.free_bytes) : "—"}</div><div class="stat-detail">${disk ? `${disk.used_pct}% used of ${formatBytes(disk.total_bytes)}` : "unavailable"}</div></div>
+    <div class="stat-card"><div class="stat-label">Database</div><div class="stat-value">${formatBytes(db.size_bytes + db.wal_bytes)}</div><div class="stat-detail">${formatBytes(db.reclaimable_bytes)} reclaimable</div></div>
+    <div class="stat-card"><div class="stat-label">Memory available</div><div class="stat-value">${formatBytes(mem.available_bytes)}</div><div class="stat-detail">${mem.used_pct}% used of ${formatBytes(mem.total_bytes)}</div></div>
+    <div class="stat-card"><div class="stat-label">Hoster uptime</div><div class="stat-value">${formatUptime(h.process.uptime_seconds)}</div><div class="stat-detail">host up ${formatUptime(h.host.uptime_seconds)}</div></div>`;
+
+  const st = h.storage;
+  document.getElementById("system-disk").innerHTML = disk ? `
+    ${meterBar(disk.used_pct)}
+    <p class="text-sm" style="margin:6px 0 14px"><strong>${formatBytes(disk.used_bytes)}</strong> used · <strong>${formatBytes(disk.free_bytes)}</strong> free · ${formatBytes(disk.total_bytes)} total</p>
+    ${h.sites_disk ? `<p class="text-sm text-muted">Sites volume: ${h.sites_disk.used_pct}% used, ${formatBytes(h.sites_disk.free_bytes)} free</p>` : ""}
+    ${kvRows([
+      ["Live site versions", `${formatBytes(st.live_versions.bytes)} <span class="text-muted">(${st.web_sites} site${st.web_sites === 1 ? "" : "s"})</span>`],
+      ["Older site versions", `${formatBytes(st.older_versions.bytes)} <span class="text-muted">(${st.older_versions.count} version${st.older_versions.count === 1 ? "" : "s"} — delete old ones from each site's Versions list to reclaim)</span>`],
+      ["Repository documents", `${formatBytes(st.repository_blobs.bytes)} <span class="text-muted">(${st.repositories} repositor${st.repositories === 1 ? "y" : "ies"})</span>`],
+      ["Database files", formatBytes(db.size_bytes + db.wal_bytes + db.shm_bytes)],
+      ["Install directory", `<code>${esc(disk.path)}</code>`],
+    ])}` : '<p class="text-muted text-sm">Disk statistics aren\'t available on this platform.</p>';
+
+  const load = h.host.load_avg;
+  document.getElementById("system-host").innerHTML = `
+    ${meterBar(mem.used_pct)}
+    <p class="text-sm" style="margin:6px 0 14px">Memory: <strong>${formatBytes(mem.total_bytes - mem.available_bytes)}</strong> in use of ${formatBytes(mem.total_bytes)}</p>
+    ${kvRows([
+      ["Hostname", esc(h.host.hostname)],
+      ["System", `${esc(h.host.platform)} ${esc(h.host.arch)} · ${esc(h.host.os_release)}`],
+      ["CPU", `${h.host.cpu_count} × ${esc(h.host.cpu_model || "unknown")}`],
+      ["Load average", `${load.join(" · ")} <span class="text-muted">(1 · 5 · 15 min${load[0] > h.host.cpu_count ? " — busier than the CPU count" : ""})</span>`],
+      ["Hoster process", `PID ${h.process.pid} · ${formatBytes(h.process.rss_bytes)} resident · Bun ${esc(h.process.bun_version || "?")}`],
+    ])}`;
+
+  const retention = log.oldest ? timeAgo(log.oldest).replace(" ago", "") : "—";
+  document.getElementById("system-db").innerHTML = `
+    ${kvRows([
+      ["Main file", formatBytes(db.size_bytes)],
+      ["Write-ahead log", formatBytes(db.wal_bytes)],
+      ["Free space inside", `${formatBytes(db.reclaimable_bytes)} <span class="text-muted">(${db.free_pages.toLocaleString()} of ${db.page_count.toLocaleString()} pages)</span>`],
+      ["Journal mode", esc(String(db.journal_mode || "?").toUpperCase())],
+      ["SQLite", esc(db.sqlite_version)],
+      ["Location", `<code>${esc(db.path)}</code>`],
+    ])}
+    <h4 class="kv-heading">Request log</h4>
+    ${meterBar(logPct)}
+    ${kvRows([
+      ["Rows kept", `${log.rows.toLocaleString()} of ${log.cap.toLocaleString()} <span class="text-muted">(oldest rows are dropped past the cap)</span>`],
+      ["Reaches back", retention],
+      ["Last 24 hours", `${log.last_24h.toLocaleString()} requests${log.last_24h ? ` <span class="text-muted">— at this rate the log holds about ${Math.max(1, Math.round(log.cap / log.last_24h))} days</span>` : ""}`],
+    ])}`;
+
+  renderSystemTables(db.tables, null);
+}
+
+function renderSystemTables(tables, sizes) {
+  const sizeOf = {};
+  (sizes || []).forEach(t => { sizeOf[t.name] = t.bytes; });
+  const el = document.getElementById("system-tables");
+  el.innerHTML = `<table class="kv-table"><thead><tr><th>Table</th><th style="text-align:right">Rows</th>${sizes ? '<th style="text-align:right">Size</th>' : ""}</tr></thead><tbody>${
+    tables.map(t => `<tr><td><code>${esc(t.name)}</code></td><td style="text-align:right">${t.rows < 0 ? "—" : t.rows.toLocaleString()}</td>${sizes ? `<td style="text-align:right">${sizeOf[t.name] != null ? formatBytes(sizeOf[t.name]) : "—"}</td>` : ""}</tr>`).join("")
+  }</tbody></table>`;
+  el.dataset.tables = JSON.stringify(tables);
+}
+
+function bindSystemView() {
+  document.getElementById("system-refresh").addEventListener("click", loadSystem);
+  document.getElementById("system-table-sizes").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      const { tables: sizes } = await api("/system/table-sizes");
+      const tables = JSON.parse(document.getElementById("system-tables").dataset.tables || "[]");
+      if (!sizes) { btn.textContent = "Not supported by this SQLite build"; return; }
+      renderSystemTables(tables, sizes);
+    } catch (err) { alert(err.message); }
+    finally { btn.disabled = false; }
+  });
+  document.querySelectorAll("[data-maint]").forEach(btn => btn.addEventListener("click", async () => {
+    const action = btn.dataset.maint;
+    const okEl = document.getElementById("maint-result");
+    const errEl = document.getElementById("maint-error");
+    okEl.textContent = ""; errEl.textContent = "";
+    const days = parseInt(document.getElementById("maint-prune-days").value, 10);
+    if (action === "prune" && !confirm(`Delete every logged request older than ${days} days? This can't be undone.`)) return;
+    if (action === "vacuum" && !confirm("Compact the database now? Writes pause until it finishes.")) return;
+    btn.disabled = true;
+    try {
+      const r = await api(`/system/db/${action}`, { method: "POST", body: JSON.stringify(action === "prune" ? { days } : {}) });
+      okEl.textContent =
+        action === "check" ? (r.ok ? `Integrity check passed (${r.ms} ms).` : `Problems found: ${r.messages.join("; ")}`) :
+        action === "checkpoint" ? `Checkpoint done — write-ahead log ${formatBytes(r.wal_before_bytes)} → ${formatBytes(r.wal_after_bytes)}.` :
+        action === "prune" ? `Deleted ${r.deleted.toLocaleString()} requests older than ${r.days} days. Compact the database to give the space back to the disk.` :
+        `Compacted ${formatBytes(r.before_bytes)} → ${formatBytes(r.after_bytes)} in ${(r.ms / 1000).toFixed(1)} s.`;
+      if (action === "check" && !r.ok) { errEl.textContent = okEl.textContent; okEl.textContent = ""; }
+      loadSystem();
+    } catch (err) { errEl.textContent = err.message; }
+    finally { btn.disabled = false; }
+  }));
+}
+
+// Dashboard: one-line disk warning for administrators.
+async function loadHealthBanner() {
+  const el = document.getElementById("dash-health-banner");
+  if (!el) return;
+  if (!isSuperAdmin) { el.hidden = true; return; }
+  try {
+    const s = await api("/system/summary");
+    if (s.level === "ok") { el.hidden = true; return; }
+    el.className = `health-banner ${s.level}`;
+    el.innerHTML = `Disk is <strong>${s.disk_used_pct}%</strong> full (${formatBytes(s.disk_free_bytes)} free). <a href="#" data-goto-system>Open System</a>`;
+    el.querySelector("[data-goto-system]").addEventListener("click", (e) => { e.preventDefault(); navigateTo("system"); });
+    el.hidden = false;
+  } catch (_) { el.hidden = true; }
+}
+
 async function loadAbout() {
   try {
     const data = await api("/version");
@@ -2538,6 +2679,7 @@ function closeBlankModal() {
 // --- Dashboard ---
 async function loadDashboard() {
   const hours = document.getElementById("dash-range").value;
+  loadHealthBanner();
 
   const [overview, topSites, traffic, bandwidth, countries, statusCodes, blocked] = await Promise.all([
     api(`/analytics/overview?hours=${hours}`),
@@ -4994,7 +5136,7 @@ function fmt(n) {
 
 function formatBytes(bytes) {
   if (!bytes) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
+  const units = ["B", "KB", "MB", "GB", "TB"];
   let i = 0;
   while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
   return `${bytes.toFixed(i > 0 ? 1 : 0)} ${units[i]}`;

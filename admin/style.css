@@ -1401,3 +1401,23 @@ tr:hover td { background: var(--bg-hover); }
 .chip-soft { background: var(--bg-hover); color: var(--text-muted); }
 .log-block { opacity: 0; transition: opacity .15s; }
 tr:hover .log-block, .log-block:focus { opacity: 1; }
+
+/* --- System (health) --- */
+.health-banner { border-radius: var(--radius); padding: 10px 14px; margin-bottom: 16px; font-size: 0.9rem; border: 1px solid transparent; }
+.health-banner.warn { background: var(--warning-bg); color: var(--warning); border-color: var(--warning); }
+.health-banner.critical { background: var(--danger-bg); color: var(--danger); border-color: var(--danger); }
+.health-banner a { color: inherit; font-weight: 600; margin-left: 6px; }
+.meter { height: 8px; background: var(--bg-hover); border-radius: 4px; overflow: hidden; }
+.meter-fill { height: 100%; background: var(--accent); border-radius: 4px; }
+.meter-fill.warn { background: var(--warning); }
+.meter-fill.critical { background: var(--danger); }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 0; font-size: 0.85rem; }
+.kv dt { color: var(--text-muted); }
+.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.kv-heading { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin: 18px 0 8px; }
+.kv-table { width: 100%; font-size: 0.85rem; border-collapse: collapse; }
+.kv-table th { text-align: left; font-size: 0.75rem; color: var(--text-muted); font-weight: 600; padding: 4px 0; }
+.kv-table td { padding: 4px 0; border-top: 1px solid var(--border); }
+.maint-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 18px; }
+.maint-grid p { margin: 4px 0 10px; }
+@media (max-width: 600px) { .kv { grid-template-columns: 1fr; } .kv dt { margin-top: 6px; } }

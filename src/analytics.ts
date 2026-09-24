@@ -92,7 +92,7 @@ export function parseUserAgent(ua: string | null): string {
   return `${browser} (${device})`;
 }
 
-const MAX_LOG_ROWS = 500_000;
+export const MAX_LOG_ROWS = 500_000;
 let logCount = 0;
 let lastPruneCheck = 0;
 

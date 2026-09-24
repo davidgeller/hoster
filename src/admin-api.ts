@@ -42,6 +42,7 @@ import {
   getAllowedCountries, setAllowedCountries,
   getAutoBlockConfig, setAutoBlockConfig, getBlockedIps, unblockIp, blockIp,
 } from "./analytics";
+import { getHealth, getHealthSummary, checkpointWal, quickCheck, tableSizes, pruneRequests, vacuum } from "./health";
 import { getShieldConfig, setShieldConfig, resetShieldCounters, isValidIp } from "./shield";
 import { listCountries } from "./countries";
 import { listRules, createRule, updateRule, deleteRule, addCode, updateCode, deleteCode, generateCode } from "./protect";
@@ -292,6 +293,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
       path === "/_admin/api/audit" ||
       path === "/_admin/api/cleanup" ||
       path.startsWith("/_admin/api/config/") ||
+      path.startsWith("/_admin/api/system/") ||
       path === "/_admin/api/cms-lib" || path.startsWith("/_admin/api/cms-lib/") ||
       path === "/_admin/api/host-aliases" ||
       path === "/_admin/api/users" || path.startsWith("/_admin/api/users/") ||
@@ -1125,6 +1127,47 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
       const updated = setDefaultSite({ target: body.target, footer: body.footer });
       audit("default_site_updated", JSON.stringify(updated));
       return json({ ok: true, config: updated });
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
+  }
+
+  // --- System health (administrators only; see isPlatformPath) ---
+  if (path === "/_admin/api/system/health" && req.method === "GET") {
+    return json(getHealth());
+  }
+  if (path === "/_admin/api/system/summary" && req.method === "GET") {
+    return json(getHealthSummary());
+  }
+  if (path === "/_admin/api/system/table-sizes" && req.method === "GET") {
+    return json({ tables: tableSizes() });
+  }
+  const sysAction = path.match(/^\/_admin\/api\/system\/db\/(checkpoint|check|prune|vacuum)$/);
+  if (sysAction && req.method === "POST") {
+    try {
+      switch (sysAction[1]) {
+        case "checkpoint": {
+          const r = checkpointWal();
+          audit("db_checkpoint", `WAL ${r.wal_before_bytes} -> ${r.wal_after_bytes} bytes`);
+          return json({ ok: true, ...r });
+        }
+        case "check": {
+          const r = quickCheck();
+          audit("db_integrity_check", r.ok ? "ok" : r.messages.slice(0, 3).join("; "));
+          return json({ ok: true, ...r });
+        }
+        case "prune": {
+          const body = await readJsonBodyOrEmpty<{ days?: number }>(req);
+          const r = pruneRequests(Number(body.days) || 90);
+          audit("analytics_pruned", `${r.deleted} requests older than ${r.days} days`);
+          return json({ ok: true, ...r });
+        }
+        case "vacuum": {
+          const r = vacuum();
+          audit("db_vacuum", `${r.before_bytes} -> ${r.after_bytes} bytes in ${r.ms}ms`);
+          return json({ ok: true, ...r });
+        }
+      }
     } catch (e: any) {
       return json({ error: e.message }, 400);
     }
