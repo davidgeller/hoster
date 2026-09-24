@@ -1421,3 +1421,31 @@ tr:hover .log-block, .log-block:focus { opacity: 1; }
 .maint-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 18px; }
 .maint-grid p { margin: 4px 0 10px; }
 @media (max-width: 600px) { .kv { grid-template-columns: 1fr; } .kv dt { margin-top: 6px; } }
+
+/* --- Analytics --- */
+.analytics-controls { display: flex; gap: 8px; flex-wrap: wrap; }
+.analytics-filters { display: flex; flex-wrap: wrap; gap: 6px 24px; margin: -8px 0 18px; }
+.analytics-filters .toggle-label { margin: 0; }
+.analytics-crumb { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+.analytics-crumb-path code { font-size: 0.95rem; overflow-wrap: anywhere; }
+.analytics-stat-text { font-size: 1.25rem !important; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-top: 6px; }
+.analytics-pages { width: 100%; border-collapse: collapse; font-size: 0.88rem; table-layout: fixed; }
+.analytics-pages th { text-align: left; font-size: 0.75rem; color: var(--text-muted); font-weight: 600; padding: 6px 8px 6px 0; }
+.analytics-pages th:nth-child(1) { width: auto; }
+.analytics-pages th:nth-child(2) { width: 22%; }
+.analytics-pages th.num { width: 80px; }
+.analytics-pages td { padding: 8px 8px 8px 0; border-top: 1px solid var(--border); vertical-align: top; }
+.analytics-pages td:first-child { position: relative; }
+.analytics-pages .num { text-align: right; font-variant-numeric: tabular-nums; }
+.analytics-pages tbody tr { cursor: pointer; }
+.analytics-pages tbody tr:hover, .analytics-pages tbody tr:focus { background: var(--bg-hover); outline: none; }
+.analytics-pages .ranked-bar { display: block; margin-top: 4px; }
+.heatmap { display: grid; gap: 3px; overflow-x: auto; }
+.heatmap-row { display: grid; grid-template-columns: 36px repeat(24, minmax(12px, 1fr)); gap: 3px; align-items: center; }
+.heatmap-day, .heatmap-hour { font-size: 0.7rem; color: var(--text-muted); }
+.heatmap-hour { white-space: nowrap; }
+.heatmap-cell { height: 18px; border-radius: 3px; background: var(--bg-hover); background-image: linear-gradient(color-mix(in srgb, var(--accent) var(--level), transparent), color-mix(in srgb, var(--accent) var(--level), transparent)); }
+@media (max-width: 600px) {
+  .analytics-pages th:nth-child(2), .analytics-pages td:nth-child(2) { display: none; }
+  .heatmap-row { grid-template-columns: 30px repeat(24, minmax(9px, 1fr)); gap: 2px; }
+}

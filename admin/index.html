@@ -369,8 +369,11 @@
         <div id="view-analytics" class="view" hidden>
           <div class="view-header">
             <h1>Analytics</h1>
-            <div class="time-range">
-              <select id="analytics-range">
+            <div class="time-range analytics-controls">
+              <select id="analytics-site" aria-label="Site">
+                <option value="">All sites</option>
+              </select>
+              <select id="analytics-range" aria-label="Time range">
                 <option value="1">Last hour</option>
                 <option value="24" selected>Last 24h</option>
                 <option value="168">Last 7 days</option>
@@ -378,13 +381,39 @@
               </select>
             </div>
           </div>
+          <div class="analytics-filters">
+            <label class="toggle-label"><input type="checkbox" id="analytics-humans" checked> People only <span class="text-muted text-sm">(hide bots, scripts, and scanners)</span></label>
+            <label class="toggle-label"><input type="checkbox" id="analytics-pages" checked> Page views only <span class="text-muted text-sm">(skip files, errors, and background polling)</span></label>
+          </div>
+          <div id="analytics-crumb" class="analytics-crumb" hidden></div>
+          <div class="stat-cards" id="analytics-stats"></div>
           <div class="card">
-            <h3>Top Paths</h3>
-            <div id="analytics-paths"></div>
+            <h3 id="analytics-traffic-title">Traffic</h3>
+            <div id="analytics-traffic-chart" class="chart-container"></div>
+          </div>
+          <div class="card" id="analytics-pages-card">
+            <h3>Top pages <span class="text-sm text-muted" style="text-transform:none;letter-spacing:0;font-weight:400">— select one for its details</span></h3>
+            <div id="analytics-pages-table"></div>
+          </div>
+          <div class="grid-2">
+            <div class="card"><h3>Countries</h3><div id="analytics-countries"></div></div>
+            <div class="card"><h3>Referrers</h3><div id="analytics-referrers"></div></div>
+          </div>
+          <div class="grid-2">
+            <div class="card"><h3>Browsers</h3><div id="analytics-browsers"></div></div>
+            <div class="card"><h3>Operating systems</h3><div id="analytics-os"></div></div>
+          </div>
+          <div class="grid-2">
+            <div class="card"><h3>Devices</h3><div id="analytics-devices"></div></div>
+            <div class="card"><h3>Languages</h3><div id="analytics-languages"></div></div>
           </div>
           <div class="card">
-            <h3>Browsers</h3>
-            <div id="analytics-browsers"></div>
+            <h3>When visits happen <span class="text-sm text-muted" id="analytics-tz" style="text-transform:none;letter-spacing:0;font-weight:400"></span></h3>
+            <div id="analytics-heatmap"></div>
+          </div>
+          <div class="grid-2">
+            <div class="card"><h3>Bots &amp; scripts</h3><div id="analytics-bots"></div></div>
+            <div class="card"><h3 id="analytics-extra-title">Access codes</h3><div id="analytics-extra"></div></div>
           </div>
         </div>
 

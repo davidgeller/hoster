@@ -42,6 +42,7 @@ import {
   getAllowedCountries, setAllowedCountries,
   getAutoBlockConfig, setAutoBlockConfig, getBlockedIps, unblockIp, blockIp,
 } from "./analytics";
+import { getInsights } from "./insights";
 import { getHealth, getHealthSummary, checkpointWal, quickCheck, tableSizes, pruneRequests, vacuum } from "./health";
 import { getShieldConfig, setShieldConfig, resetShieldCounters, isValidIp } from "./shield";
 import { listCountries } from "./countries";
@@ -1018,6 +1019,21 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   if (path === "/_admin/api/analytics/top-sites") {
     const hours = clampInt(new URL(req.url).searchParams.get("hours"), 24, 1, 8760);
     return json(getTopSites(hours, 10, scopeSlugs));
+  }
+
+  if (path === "/_admin/api/analytics/insights" && req.method === "GET") {
+    const url = new URL(req.url);
+    const site = url.searchParams.get("site") || null;
+    if (site && !isSuper && !canSite(site)) return forbidden();
+    const pagePath = url.searchParams.get("path");
+    return json(getInsights({
+      hours: clampInt(url.searchParams.get("hours"), 24, 1, 8760),
+      slugs: scopeSlugs,
+      site,
+      path: pagePath ? pagePath.slice(0, 2048) : null,
+      humans: url.searchParams.get("humans") !== "0",
+      pages: url.searchParams.get("pages") !== "0",
+    }));
   }
 
   if (path === "/_admin/api/analytics/top-paths") {

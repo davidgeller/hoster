@@ -540,6 +540,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindLandingForm();
 
   bindSystemView();
+  bindAnalyticsView();
 
   // --- Bot protection (shield) form ---
   document.getElementById("shield-form").addEventListener("submit", async (e) => {
@@ -4882,16 +4883,153 @@ window.reloadSiteCache = async function (slug, btn) {
 };
 
 // --- Analytics ---
+// Which page the Analytics view is drilled into (null = overview).
+const analyticsState = { path: null, site: null };
+let analyticsSitesLoaded = false;
+const languageNames = (() => { try { return new Intl.DisplayNames([navigator.language || "en"], { type: "language" }); } catch { return null; } })();
+
+async function loadAnalyticsSites() {
+  if (analyticsSitesLoaded) return;
+  try {
+    const sites = await api("/sites");
+    const sel = document.getElementById("analytics-site");
+    sel.innerHTML = '<option value="">All sites</option>' +
+      sites.map(site => `<option value="${esc(site.slug)}">${esc(site.name || site.slug)}</option>`).join("");
+    analyticsSitesLoaded = true;
+  } catch (_) {}
+}
+
+function bindAnalyticsView() {
+  const reload = () => { analyticsState.path = null; analyticsState.site = null; loadAnalytics(); };
+  document.getElementById("analytics-site").addEventListener("change", reload);
+  ["analytics-humans", "analytics-pages"].forEach(id => document.getElementById(id).addEventListener("change", () => loadAnalytics()));
+}
+
+function openAnalyticsPage(site, path) {
+  analyticsState.site = site;
+  analyticsState.path = path;
+  loadAnalytics();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
 async function loadAnalytics() {
+  await loadAnalyticsSites();
   const hours = document.getElementById("analytics-range").value;
+  const site = analyticsState.path ? analyticsState.site : document.getElementById("analytics-site").value;
+  const params = new URLSearchParams({
+    hours,
+    humans: document.getElementById("analytics-humans").checked ? "1" : "0",
+    pages: document.getElementById("analytics-pages").checked ? "1" : "0",
+  });
+  if (site) params.set("site", site);
+  if (analyticsState.path) params.set("path", analyticsState.path);
 
-  const [paths, browsers] = await Promise.all([
-    api(`/analytics/top-paths?hours=${hours}`),
-    api(`/analytics/browsers?hours=${hours}`),
-  ]);
+  let r;
+  try { r = await api(`/analytics/insights?${params}`); }
+  catch (err) { document.getElementById("analytics-stats").innerHTML = `<div class="text-sm" style="color:var(--danger)">${esc(err.message)}</div>`; return; }
 
-  renderRankedList("analytics-paths", paths, "path", "hits");
-  renderRankedList("analytics-browsers", browsers, "browser", "hits");
+  // Breadcrumb when drilled into one page.
+  const crumb = document.getElementById("analytics-crumb");
+  if (analyticsState.path) {
+    crumb.hidden = false;
+    crumb.innerHTML = `<button type="button" class="btn btn-ghost btn-sm" id="analytics-back">&larr; All pages</button>
+      <span class="analytics-crumb-path"><code>${esc(analyticsState.path)}</code>${analyticsState.site ? ` <span class="text-muted text-sm">on ${esc(analyticsState.site)}</span>` : ""}</span>`;
+    document.getElementById("analytics-back").addEventListener("click", () => { analyticsState.path = null; analyticsState.site = null; loadAnalytics(); });
+  } else {
+    crumb.hidden = true;
+  }
+  document.getElementById("analytics-pages-card").hidden = !!analyticsState.path;
+  document.getElementById("analytics-traffic-title").textContent = analyticsState.path ? "Views of this page" : "Traffic";
+
+  const t = r.totals;
+  const botPct = t.all_hits ? Math.round((t.bot_hits / t.all_hits) * 100) : 0;
+  const topCountry = r.countries[0];
+  const topRef = r.referrers[0];
+  const unit = r.filter.pages ? "Page views" : "Requests";
+  document.getElementById("analytics-stats").innerHTML = `
+    <div class="stat-card"><div class="stat-label">${unit}</div><div class="stat-value">${fmt(t.hits)}</div><div class="stat-detail">${r.filter.humans ? "people only" : "everyone"}</div></div>
+    <div class="stat-card"><div class="stat-label">Visitors</div><div class="stat-value">${fmt(t.visitors)}</div><div class="stat-detail">distinct IP addresses</div></div>
+    <div class="stat-card"><div class="stat-label">Bots &amp; scripts</div><div class="stat-value">${botPct}%</div><div class="stat-detail">${fmt(t.bot_hits)} of ${fmt(t.all_hits)} ${r.filter.pages ? "page fetches" : "requests"}</div></div>
+    <div class="stat-card"><div class="stat-label">Top source</div><div class="stat-value analytics-stat-text">${topRef ? esc(topRef.key) : "Direct"}</div><div class="stat-detail">${topCountry ? `most visits from ${esc(countryName(topCountry.key))}` : "no country data"}</div></div>`;
+
+  renderBarChart("analytics-traffic-chart", r.traffic, "hits", "bucket");
+
+  if (!analyticsState.path) {
+    const el = document.getElementById("analytics-pages-table");
+    if (!r.pages.length) el.innerHTML = '<div class="empty-state"><p>No page views in this range</p></div>';
+    else {
+      const max = Math.max(...r.pages.map(p => p.hits), 1);
+      el.innerHTML = `<table class="analytics-pages"><thead><tr><th>Page</th><th>Site</th><th class="num">Views</th><th class="num">Visitors</th></tr></thead><tbody>${
+        r.pages.map((p, i) => `<tr data-page-row="${i}" tabindex="0" title="Show details for ${esc(p.path)}">
+          <td><div class="truncate">${esc(p.path)}</div><span class="ranked-bar" style="width:${(p.hits / max) * 100}%"></span></td>
+          <td class="text-sm text-muted">${esc(p.site_slug || "—")}</td>
+          <td class="num">${fmt(p.hits)}</td><td class="num">${fmt(p.visitors)}</td></tr>`).join("")
+      }</tbody></table>`;
+      el.querySelectorAll("[data-page-row]").forEach(row => {
+        const p = r.pages[row.dataset.pageRow];
+        const open = () => openAnalyticsPage(p.site_slug, p.path);
+        row.addEventListener("click", open);
+        row.addEventListener("keydown", e => { if (e.key === "Enter") open(); });
+      });
+    }
+  }
+
+  const labeled = (rows, label) => rows.map(x => ({ label: label(x.key), hits: x.hits }));
+  renderRankedList("analytics-countries", labeled(r.countries, k => countryName(k)), "label", "hits");
+  const refs = labeled(r.referrers, k => k);
+  if (r.direct_hits) refs.push({ label: "Direct / no referrer", hits: r.direct_hits });
+  refs.sort((a, b) => b.hits - a.hits);
+  renderRankedList("analytics-referrers", refs, "label", "hits", true);
+  renderRankedList("analytics-browsers", labeled(r.browsers, k => k), "label", "hits");
+  renderRankedList("analytics-os", labeled(r.os, k => k), "label", "hits");
+  renderRankedList("analytics-devices", labeled(r.devices, k => k), "label", "hits");
+  renderRankedList("analytics-languages", labeled(r.languages, k => {
+    try { return `${languageNames?.of(k) || k} (${k})`; } catch { return k; }
+  }), "label", "hits");
+  renderRankedList("analytics-bots", r.bots.map(b => ({ label: `${b.name} · ${fmt(b.ips)} IP${b.ips === 1 ? "" : "s"}`, hits: b.hits })), "label", "hits", true);
+
+  renderHeatmap("analytics-heatmap", r.heatmap);
+
+  // Access codes when any were used; otherwise status codes (useful for a single page).
+  const extraTitle = document.getElementById("analytics-extra-title");
+  if (r.access_codes.length) {
+    extraTitle.textContent = "Access codes";
+    renderRankedList("analytics-extra", r.access_codes.map(c => ({ label: `🔑 ${c.key} · ${fmt(c.visitors)} visitor${c.visitors === 1 ? "" : "s"}, last ${timeAgo(c.last_seen)}`, hits: c.hits })), "label", "hits", true);
+  } else {
+    extraTitle.textContent = "Status codes";
+    renderRankedList("analytics-extra", labeled(r.statuses, k => String(k)), "label", "hits");
+  }
+}
+
+// Day-of-week × hour grid in the viewer's local time. The server groups by
+// UTC; shift by the local offset (rounded to the hour) here.
+function renderHeatmap(containerId, cells) {
+  const el = document.getElementById(containerId);
+  const offsetMin = -new Date().getTimezoneOffset();
+  const shift = Math.round(offsetMin / 60);
+  let tzName = "";
+  try { tzName = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (_) {}
+  const tzEl = document.getElementById("analytics-tz");
+  if (tzEl) tzEl.textContent = `— your local time${tzName ? ` (${tzName})` : ""}`;
+  if (!cells.length) { el.innerHTML = '<div class="empty-state"><p>No data</p></div>'; return; }
+  const grid = Array.from({ length: 7 }, () => new Array(24).fill(0));
+  for (const c of cells) {
+    let h = c.hour + shift, d = c.dow;
+    if (h < 0) { h += 24; d = (d + 6) % 7; }
+    if (h > 23) { h -= 24; d = (d + 1) % 7; }
+    grid[d][h] += c.hits;
+  }
+  const max = Math.max(1, ...grid.flat());
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const order = [1, 2, 3, 4, 5, 6, 0]; // Monday first
+  const hourLabel = h => h === 0 ? "12a" : h < 12 ? `${h}a` : h === 12 ? "12p" : `${h - 12}p`;
+  el.innerHTML = `<div class="heatmap" role="table" aria-label="Visits by day and hour">
+    <div class="heatmap-row heatmap-head" role="row"><span></span>${Array.from({ length: 24 }, (_, h) => `<span class="heatmap-hour">${h % 3 === 0 ? hourLabel(h) : ""}</span>`).join("")}</div>
+    ${order.map(d => `<div class="heatmap-row" role="row"><span class="heatmap-day">${days[d]}</span>${grid[d].map((v, h) => {
+      const pct = v ? Math.max(12, Math.round((v / max) * 100)) : 0;
+      return `<span class="heatmap-cell" style="--level:${pct}%" title="${days[d]} ${hourLabel(h)}–${hourLabel((h + 1) % 24)}: ${fmt(v)}"></span>`;
+    }).join("")}</div>`).join("")}
+  </div>`;
 }
 
 // --- Logs ---
@@ -5004,7 +5142,7 @@ function renderBarChart(containerId, data, valueKey, labelKey) {
         ${data.map((d, i) => {
           const pct = (d[valueKey] / max) * 100;
           const label = d[labelKey]?.replace("T", " ").substring(5, 16) || "";
-          return `<div class="bar" style="height:${Math.max(pct, 2)}%" title="${label}: ${d[valueKey]}">
+          return `<div class="bar" style="height:${d[valueKey] ? Math.max(pct, 2) : 0}%" title="${label}: ${d[valueKey]}">
             <div class="bar-tooltip">${label}<br>${d[valueKey]} hits</div>
           </div>`;
         }).join("")}
