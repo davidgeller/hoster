@@ -1392,3 +1392,12 @@ tr:hover td { background: var(--bg-hover); }
   .protect-add-code { grid-template-columns: 1fr; }
   .protect-rule-head { flex-direction: column; }
 }
+
+/* --- Bot protection --- */
+.shield-row { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 0 0 12px 26px; }
+.shield-row label { display: flex; align-items: center; gap: 6px; flex-direction: row; margin: 0; }
+.shield-row input[type="number"] { width: 84px; margin: 0; }
+.chip-trap { background: var(--warning-bg); color: var(--warning); }
+.chip-soft { background: var(--bg-hover); color: var(--text-muted); }
+.log-block { opacity: 0; transition: opacity .15s; }
+tr:hover .log-block, .log-block:focus { opacity: 1; }

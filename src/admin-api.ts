@@ -26,7 +26,7 @@ import {
   deleteSitePaths, renameSitePath, copySitePath, createSiteDirectory,
   checkSiteHealth, rebuildCurrentSymlinks,
   getCmsStatus, cmsInit,
-  setSiteAllowedCountries, updateRepoSettings,
+  setSiteAllowedCountries, updateRepoSettings, setSiteBlockAiBots,
 } from "./sites";
 import {
   createRepositorySite, repoStats, exportRepoBackup, importRepoBackup, setRepoBanner, clearRepoBanner,
@@ -40,8 +40,9 @@ import {
   getTopCountries, getTopBrowsers, getRecentRequests,
   getStatusCodeBreakdown, getSiteStats, getBlockedRequests,
   getAllowedCountries, setAllowedCountries,
-  getAutoBlockConfig, setAutoBlockConfig, getBlockedIps, unblockIp
+  getAutoBlockConfig, setAutoBlockConfig, getBlockedIps, unblockIp, blockIp,
 } from "./analytics";
+import { getShieldConfig, setShieldConfig, resetShieldCounters, isValidIp } from "./shield";
 import { listCountries } from "./countries";
 import { listRules, createRule, updateRule, deleteRule, addCode, updateCode, deleteCode, generateCode } from "./protect";
 import { getDefaultSite, setDefaultSite } from "./sites";
@@ -584,6 +585,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     const body = await readJsonBody<{
       name?: string; root_dir?: string | null; spa?: boolean; mcp_enabled?: boolean; mcp_read_only?: boolean; mcp_auto_commit?: boolean; cms_enabled?: boolean;
       allowed_countries?: string[] | null;
+      block_ai_bots?: boolean;
       repo?: { quota_bytes?: number; max_versions?: number; visibility?: "public" | "private"; description?: string | null };
     }>(req);
     if (!body) return json({ error: "Invalid request body" }, 400);
@@ -606,6 +608,10 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
         setSiteAllowedCountries(slug, value);
         const after = getSite(slug)!.allowed_countries;
         if (before !== after) audit("site_countries_updated", `${slug}: ${after === null ? "inherit global" : after === "" ? "allow all" : after}`);
+      }
+      if ("block_ai_bots" in body && !!body.block_ai_bots !== !!site.block_ai_bots) {
+        setSiteBlockAiBots(slug, !!body.block_ai_bots);
+        audit("site_ai_bots_updated", `${slug}: ${body.block_ai_bots ? "blocked" : "allowed"}`);
       }
       if (site.site_type === "repository") {
         if (body.repo && typeof body.repo === "object") {
@@ -1124,14 +1130,43 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     }
   }
 
+  // --- Bot shield (trap paths, 404 limit, rate limit, allow-list) ---
+  if (path === "/_admin/api/settings/shield" && req.method === "GET") {
+    return json(getShieldConfig());
+  }
+  if (path === "/_admin/api/settings/shield" && req.method === "POST") {
+    const body = await readJsonBody(req);
+    if (!body || typeof body !== "object") return json({ error: "Invalid request body" }, 400);
+    try {
+      const updated = setShieldConfig(body);
+      audit("shield_updated", JSON.stringify(updated));
+      return json({ ok: true, config: updated });
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
+  }
+
   // --- Blocked IPs management ---
   if (path === "/_admin/api/settings/blocked-ips" && req.method === "GET") {
     return json({ ips: getBlockedIps() });
   }
+  if (path === "/_admin/api/settings/blocked-ips" && req.method === "POST") {
+    const body = await readJsonBody<{ ip?: string; hours?: number; reason?: string }>(req);
+    if (!body) return json({ error: "Invalid request body" }, 400);
+    const target = String(body.ip || "").trim().toLowerCase();
+    if (!isValidIp(target)) return json({ error: "Enter a valid IP address" }, 400);
+    if (target === ip) return json({ error: "That's the address you're connected from" }, 400);
+    const hours = Math.min(8760, Math.max(0, Math.round(Number(body.hours ?? 24)) || 0));
+    const reason = String(body.reason || "").trim().slice(0, 200) || `Blocked by ${actor || "admin"}`;
+    blockIp(target, reason, hours);
+    audit("ip_blocked", `${target} (${hours ? hours + "h" : "permanent"})`);
+    return json({ ok: true });
+  }
   const unblockMatch = path.match(/^\/_admin\/api\/settings\/blocked-ips\/(\d+)$/);
   if (unblockMatch && req.method === "DELETE") {
-    unblockIp(parseInt(unblockMatch[1]));
-    audit("ip_unblocked", `id:${unblockMatch[1]}`);
+    const unblocked = unblockIp(parseInt(unblockMatch[1]));
+    if (unblocked) resetShieldCounters(unblocked);
+    audit("ip_unblocked", unblocked || `id:${unblockMatch[1]}`);
     return json({ ok: true });
   }
 

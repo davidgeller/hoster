@@ -539,6 +539,49 @@ document.addEventListener("DOMContentLoaded", async () => {
   // --- Default landing page form ---
   bindLandingForm();
 
+  // --- Bot protection (shield) form ---
+  document.getElementById("shield-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const errEl = document.getElementById("shield-error");
+    const successEl = document.getElementById("shield-success");
+    errEl.textContent = "";
+    successEl.textContent = "";
+    const num = id => parseInt(document.getElementById(id).value, 10);
+    try {
+      const { config } = await api("/settings/shield", {
+        method: "POST",
+        body: JSON.stringify({
+          traps_enabled: document.getElementById("shield-traps").checked,
+          trap_threshold: num("shield-trap-threshold"),
+          trap_block_hours: num("shield-trap-hours"),
+          notfound_enabled: document.getElementById("shield-notfound").checked,
+          notfound_threshold: num("shield-nf-threshold"),
+          notfound_window_minutes: num("shield-nf-window"),
+          notfound_block_hours: num("shield-nf-hours"),
+          rate_limit_enabled: document.getElementById("shield-rate").checked,
+          rate_limit_per_minute: num("shield-rate-limit"),
+          allowlist: document.getElementById("shield-allowlist").value,
+        }),
+      });
+      fillShieldForm(config);
+      successEl.textContent = "Bot protection saved";
+    } catch (err) { errEl.textContent = err.message; }
+  });
+
+  document.getElementById("manual-block-btn").addEventListener("click", async () => {
+    const errEl = document.getElementById("manual-block-error");
+    errEl.textContent = "";
+    const ipEl = document.getElementById("manual-block-ip");
+    try {
+      await api("/settings/blocked-ips", {
+        method: "POST",
+        body: JSON.stringify({ ip: ipEl.value.trim(), hours: parseInt(document.getElementById("manual-block-hours").value, 10) }),
+      });
+      ipEl.value = "";
+      loadBlockedIps();
+    } catch (err) { errEl.textContent = err.message; }
+  });
+
   // --- Auto-block form ---
   document.getElementById("autoblock-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -604,6 +647,8 @@ async function loadSettings() {
     document.getElementById("autoblock-window").value = config.window_minutes;
     document.getElementById("autoblock-duration").value = config.duration_hours;
   } catch (_) {}
+
+  try { fillShieldForm(await api("/settings/shield")); } catch (_) {}
 
   loadBlockedIps();
   loadMcpTokens();
@@ -1335,6 +1380,28 @@ function bindCountryPicker() {
         : "Saved. All countries allowed.";
     } catch (err) { errEl.textContent = err.message; }
   });
+}
+
+function fillShieldForm(c) {
+  document.getElementById("shield-traps").checked = c.traps_enabled;
+  document.getElementById("shield-trap-threshold").value = c.trap_threshold;
+  document.getElementById("shield-trap-hours").value = c.trap_block_hours;
+  document.getElementById("shield-notfound").checked = c.notfound_enabled;
+  document.getElementById("shield-nf-threshold").value = c.notfound_threshold;
+  document.getElementById("shield-nf-window").value = c.notfound_window_minutes;
+  document.getElementById("shield-nf-hours").value = c.notfound_block_hours;
+  document.getElementById("shield-rate").checked = c.rate_limit_enabled;
+  document.getElementById("shield-rate-limit").value = c.rate_limit_per_minute;
+  document.getElementById("shield-allowlist").value = (c.allowlist || []).join("\n");
+}
+
+// Block an IP straight from the Logs page.
+async function blockIpFromLogs(ip) {
+  if (!confirm(`Block ${ip} from every hosted site for 24 hours?\n\nUnblock it any time under Settings → Security.`)) return;
+  try {
+    await api("/settings/blocked-ips", { method: "POST", body: JSON.stringify({ ip, hours: 24, reason: "Blocked from the Logs page" }) });
+    loadLogs();
+  } catch (err) { alert(err.message); }
 }
 
 async function loadBlockedIps() {
@@ -3233,6 +3300,11 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
           </label>
           <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">` : ""}
           <div id="settings-access-countries"></div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
+          <label style="display:flex;align-items:center;gap:10px;flex-direction:row">
+            <input type="checkbox" id="settings-block-ai" ${siteRecord && siteRecord.block_ai_bots ? "checked" : ""} style="width:auto;margin:0">
+            <span>Refuse AI crawlers <small style="display:inline;margin:0">(GPTBot, ClaudeBot, CCBot, PerplexityBot, Bytespider, and similar get a 403; search engines and link previews are unaffected)</small></span>
+          </label>
         </div>
         ${isRepo ? "" : `
         <div class="settings-tab-panel" data-panel="protection">
@@ -3969,6 +4041,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
           body: JSON.stringify({
             name: newName,
             allowed_countries: accessPicker.value(),
+            block_ai_bots: modal.querySelector("#settings-block-ai").checked,
             repo: {
               description: modal.querySelector("#settings-repo-description").value,
               visibility: modal.querySelector("#settings-repo-visibility").value,
@@ -3994,7 +4067,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
       // Persist the settings (display name, root_dir, spa, mcp flags, cms_enabled).
       await api(`/sites/${slug}/settings`, {
         method: "POST",
-        body: JSON.stringify({ name: newName, root_dir: newRoot, spa: newSpa, mcp_enabled: newMcp, mcp_read_only: newMcpReadOnly, mcp_auto_commit: newMcpAutoCommit, cms_enabled: newCms, allowed_countries: accessPicker.value() }),
+        body: JSON.stringify({ name: newName, root_dir: newRoot, spa: newSpa, mcp_enabled: newMcp, mcp_read_only: newMcpReadOnly, mcp_auto_commit: newMcpAutoCommit, cms_enabled: newCms, allowed_countries: accessPicker.value(), block_ai_bots: modal.querySelector("#settings-block-ai").checked }),
       });
       // If CMS was just turned on and isn't scaffolded yet, lay the files down.
       if (newCms && !cmsEnabled) {
@@ -4706,7 +4779,8 @@ async function loadLogs() {
 
   tbody.innerHTML = logs.map((r) => {
     const statusClass = r.status < 300 ? "status-2xx" : r.status < 400 ? "status-3xx" : r.status < 500 ? "status-4xx" : "status-5xx";
-    const isBlocked = r.status === 403;
+    const isBlocked = r.status === 403 || r.flag === "blocked";
+    const flagChip = FLAG_CHIPS[r.flag] || (r.status === 403 ? FLAG_CHIPS.blocked : "");
     // Annotate /_mcp rows with the site(s) the call touched, when known.
     const isMcp = r.path === "/_mcp" || r.path?.startsWith("/_mcp/");
     const pathDisplay = isMcp && r.site_slug
@@ -4718,15 +4792,24 @@ async function loadLogs() {
         <td>${timeAgo(r.created_at)}</td>
         <td>${r.method}</td>
         <td class="truncate" title="${esc(pathTitle)}${r.access_code ? ` — access code: ${esc(r.access_code)}` : ""}">${pathDisplay}${r.access_code ? ` <span class="chip-access" title="Access code used">🔑 ${esc(r.access_code)}</span>` : ""}</td>
-        <td><span class="status-badge ${statusClass}">${r.status}</span>${isBlocked ? ' <span class="chip-blocked">Blocked</span>' : ""}</td>
+        <td><span class="status-badge ${statusClass}">${r.status}</span>${flagChip}</td>
         <td class="text-sm">${esc(r.browser || "—")}</td>
-        <td class="text-mono text-sm">${esc(r.ip)}</td>
+        <td class="text-mono text-sm log-ip">${esc(r.ip)}${isSuperAdmin && r.ip && r.ip !== "unknown" && r.flag !== "blocked" ? ` <button type="button" class="btn-link danger log-block" data-block-ip="${esc(r.ip)}" title="Block this IP for 24 hours">Block</button>` : ""}</td>
         <td>${countryName(r.country)}</td>
         <td class="text-mono text-sm">${r.response_time_ms?.toFixed(1) ?? "—"}ms</td>
       </tr>
     `;
   }).join("");
+  tbody.querySelectorAll("[data-block-ip]").forEach(btn => btn.addEventListener("click", () => blockIpFromLogs(btn.dataset.blockIp)));
 }
+
+const FLAG_CHIPS = {
+  blocked: ' <span class="chip-blocked" title="IP is blocked">Blocked</span>',
+  trap: ' <span class="chip-blocked chip-trap" title="Scanner probe — counted toward a block">Probe</span>',
+  ratelimited: ' <span class="chip-blocked chip-soft" title="Over the per-IP rate limit">Rate-limited</span>',
+  "ai-bot": ' <span class="chip-blocked chip-soft" title="AI crawler refused by this site">AI bot</span>',
+  geo: ' <span class="chip-blocked chip-soft" title="Country not allowed">Geo</span>',
+};
 
 function populateLogFilterOptions(logs) {
   // Countries

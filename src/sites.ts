@@ -36,6 +36,7 @@ export interface Site {
   repo_visibility: RepoVisibility;  // repository sites: who may browse/download
   repo_description: string | null;  // repository sites: blurb shown under the title
   repo_banner: string | null;       // repository sites: banner filename inside _repo/ (NULL = none)
+  block_ai_bots: number;            // 1 = refuse known AI-training crawlers (403)
 }
 
 // Site kinds. A "web" site is the classic versioned static tree served from
@@ -107,6 +108,7 @@ try { db.exec("ALTER TABLE sites ADD COLUMN cms_enabled INTEGER DEFAULT 0"); } c
 try { db.exec("ALTER TABLE sites ADD COLUMN cms_lib_version TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN pinned_at TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN site_type TEXT NOT NULL DEFAULT 'web'"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN block_ai_bots INTEGER NOT NULL DEFAULT 0"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN allowed_countries TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN repo_quota_bytes INTEGER NOT NULL DEFAULT 1073741824"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN repo_max_versions INTEGER NOT NULL DEFAULT 20"); } catch (_) {}
@@ -741,6 +743,12 @@ export function setSiteAllowedCountries(slug: string, countries: string[] | null
   return result.changes > 0;
 }
 
+export function setSiteBlockAiBots(slug: string, block: boolean): boolean {
+  const result = db.run("UPDATE sites SET block_ai_bots = ?, updated_at = datetime('now') WHERE slug = ?", block ? 1 : 0, slug);
+  invalidateSiteCache(slug);
+  return result.changes > 0;
+}
+
 // Effective allow-list for a site: the site's own override when set, else
 // the global list. Empty array = no restriction.
 export function effectiveAllowedCountries(site: Site | null | undefined, globalList: string[]): string[] {
@@ -1171,7 +1179,7 @@ export interface ResolvedSite {
   version: string | null;
 }
 
-export function resolveSitePath(slug: string, filePath: string): ResolvedSite | null {
+export function resolveSitePath(slug: string, filePath: string, opts: { spaFallback?: boolean } = {}): ResolvedSite | null {
   const site = getSite(slug);
   if (!site || !site.active) return null;
 
@@ -1226,7 +1234,7 @@ export function resolveSitePath(slug: string, filePath: string): ResolvedSite | 
   }
 
   // SPA fallback: serve index.html for any unmatched route
-  if (site.spa) {
+  if (site.spa && opts.spaFallback !== false) {
     const spaIndex = join(contentDir, "index.html");
     if (existsSync(spaIndex)) return { filePath: spaIndex, version: ver };
   }

@@ -18,6 +18,7 @@ export interface RequestLog {
   request_bytes: number;
   response_bytes: number;
   access_code?: string | null;
+  flag?: string | null;
 }
 
 // --- Extensions to track parsed browser info ---
@@ -27,10 +28,12 @@ try { db.exec("ALTER TABLE requests ADD COLUMN request_bytes INTEGER DEFAULT 0")
 try { db.exec("ALTER TABLE requests ADD COLUMN response_bytes INTEGER DEFAULT 0"); } catch (_) {}
 // --- Name of the access code a protected-path request was made under ---
 try { db.exec("ALTER TABLE requests ADD COLUMN access_code TEXT"); } catch (_) {}
+// --- Why the shield intervened, if it did: trap | blocked | ratelimited | ai-bot | geo ---
+try { db.exec("ALTER TABLE requests ADD COLUMN flag TEXT"); } catch (_) {}
 
 const insertStmt = db.prepare(`
-  INSERT INTO requests (site_slug, path, method, status, response_time_ms, ip, country, city, user_agent, referrer, content_type, accept_language, browser, request_bytes, response_bytes, access_code)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO requests (site_slug, path, method, status, response_time_ms, ip, country, city, user_agent, referrer, content_type, accept_language, browser, request_bytes, response_bytes, access_code, flag)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 // --- File extensions we DON'T want to track ---
@@ -100,7 +103,7 @@ export function logRequest(log: RequestLog): void {
       log.site_slug, log.path, log.method, log.status, log.response_time_ms,
       log.ip, log.country, log.city, log.user_agent, log.referrer,
       log.content_type, log.accept_language, browser,
-      log.request_bytes, log.response_bytes, log.access_code ?? null
+      log.request_bytes, log.response_bytes, log.access_code ?? null, log.flag ?? null
     );
 
     // Periodically prune old logs to prevent unbounded growth
@@ -331,6 +334,8 @@ export function getRecentRequests(limit: number = 50, filters: {
   if (scope.clause) { where += scope.clause; params.push(...scope.params); }
 
   if (filters.status === "blocked") { where += " AND status = 403"; }
+  else if (filters.status === "shield") { where += " AND flag IS NOT NULL"; }
+  else if (filters.status === "protected") { where += " AND access_code IS NOT NULL"; }
   else if (filters.status === "4xx") { where += " AND status >= 400 AND status < 500"; }
   else if (filters.status === "5xx") { where += " AND status >= 500"; }
   else if (filters.status === "2xx") { where += " AND status >= 200 AND status < 300"; }
@@ -345,7 +350,7 @@ export function getRecentRequests(limit: number = 50, filters: {
   }
 
   return db.query(`
-    SELECT site_slug, path, method, status, response_time_ms, ip, country, city, browser, referrer, access_code, created_at
+    SELECT site_slug, path, method, status, response_time_ms, ip, country, city, browser, referrer, access_code, flag, created_at
     FROM requests WHERE ${where} ORDER BY id DESC LIMIT ?
   `).all(...params, limit);
 }
@@ -479,11 +484,31 @@ export function setAutoBlockConfig(config: Partial<AutoBlockConfig>): AutoBlockC
 // All time comparisons use SQL-side datetime so they line up with column
 // values stored via datetime('now') / datetime('now', '+/-X')-style INSERTs.
 
+// Every hosted request asks "is this IP blocked?", so the active block list is
+// held in memory (ip -> expiry in ms, or null for permanent) and reloaded
+// every 30 seconds or whenever it changes here.
+let blockedCache: Map<string, number | null> | null = null;
+let blockedCacheAt = 0;
+
+export function invalidateBlockedCache(): void {
+  blockedCache = null;
+}
+
+function activeBlocks(): Map<string, number | null> {
+  if (blockedCache && Date.now() - blockedCacheAt < 30_000) return blockedCache;
+  const rows = db.query(
+    "SELECT ip, expires_at FROM blocked_ips WHERE expires_at IS NULL OR expires_at > datetime('now')"
+  ).all() as { ip: string; expires_at: string | null }[];
+  blockedCache = new Map(rows.map(r => [r.ip, r.expires_at ? Date.parse(r.expires_at.replace(" ", "T") + "Z") : null]));
+  blockedCacheAt = Date.now();
+  return blockedCache;
+}
+
 export function isIpBlocked(ip: string): boolean {
-  const row = db.query(
-    "SELECT id FROM blocked_ips WHERE ip = ? AND (expires_at IS NULL OR expires_at > datetime('now'))"
-  ).get(ip) as any;
-  return !!row;
+  const blocks = activeBlocks();
+  if (!blocks.has(ip)) return false;
+  const exp = blocks.get(ip);
+  return exp == null || exp > Date.now();
 }
 
 export function getBlockedIps(): any[] {
@@ -494,8 +519,11 @@ export function getBlockedIps(): any[] {
   ).all();
 }
 
-export function unblockIp(id: number): void {
+export function unblockIp(id: number): string | null {
+  const row = db.query("SELECT ip FROM blocked_ips WHERE id = ?").get(id) as { ip: string } | null;
   db.run("DELETE FROM blocked_ips WHERE id = ?", id);
+  invalidateBlockedCache();
+  return row?.ip ?? null;
 }
 
 export function blockIp(ip: string, reason: string, durationHours: number): void {
@@ -513,6 +541,7 @@ export function blockIp(ip: string, reason: string, durationHours: number): void
       ip, reason, reason
     );
   }
+  invalidateBlockedCache();
 }
 
 export function checkAndAutoBlock(ip: string): boolean {

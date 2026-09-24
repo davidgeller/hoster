@@ -2,6 +2,8 @@ import db from "./db";
 import { SITES_DIR, rebuildCurrentSymlinks, type RebuildResult } from "./sites";
 import { migrateLegacyAdmin } from "./auth";
 import { invalidateProtectCache, resetProtectSecretCache } from "./protect";
+import { invalidateBlockedCache } from "./analytics";
+import { invalidateShieldConfig } from "./shield";
 import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync, statSync, unlinkSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { randomBytes, createCipheriv, createDecipheriv, pbkdf2Sync } from "crypto";
@@ -164,12 +166,12 @@ function importDatabase(tables: Record<string, any[]>) {
     // Import sites
     if (tables.sites) {
       const cols = ["slug", "name", "created_at", "updated_at", "size_bytes", "file_count", "active", "current_version", "root_dir", "spa", "mcp_enabled", "mcp_read_only", "mcp_auto_commit", "cms_enabled", "cms_lib_version", "pinned_at",
-        "site_type", "allowed_countries", "repo_quota_bytes", "repo_max_versions", "repo_visibility", "repo_description", "repo_banner"];
+        "site_type", "allowed_countries", "repo_quota_bytes", "repo_max_versions", "repo_visibility", "repo_description", "repo_banner", "block_ai_bots"];
       const placeholders = cols.map(() => "?").join(", ");
       const stmt = db.prepare(`INSERT INTO sites (${cols.join(", ")}) VALUES (${placeholders})`);
       // Pre-2.0.1 backups lack the site-type/repository columns; fill in the
       // defaults the schema would have applied.
-      const defaults: Record<string, any> = { site_type: "web", repo_quota_bytes: 1073741824, repo_max_versions: 20, repo_visibility: "private" };
+      const defaults: Record<string, any> = { site_type: "web", repo_quota_bytes: 1073741824, repo_max_versions: 20, repo_visibility: "private", block_ai_bots: 0 };
       for (const row of tables.sites) {
         stmt.run(...cols.map(c => row[c] ?? defaults[c] ?? null));
       }
@@ -307,6 +309,8 @@ function importDatabase(tables: Record<string, any[]>) {
   // were just replaced.
   resetProtectSecretCache();
   invalidateProtectCache();
+  invalidateBlockedCache();
+  invalidateShieldConfig();
 }
 
 export async function createBackup(password?: string, allVersions = false): Promise<Buffer> {

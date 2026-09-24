@@ -51,7 +51,8 @@ In every case the Hoster binary itself is identical — only the front-end TLS l
 - **Self-healing site state** — `_current` symlinks rebuild at startup, after restore, or on demand from a database-driven repair pass; broken sites surface a red badge in the admin UI
 - **Analytics dashboard** — request logs, visitor stats, countries, top pages, status codes, blocked request intelligence, min/avg/max response times
 - **Country allow-list with a real picker** — search countries by name or code, add them from a list of who actually visited last week, and never look up an ISO code again; the server validates every code it saves
-- **IP auto-blocking** — automatically block IPs that accumulate too many denied requests, with configurable thresholds and duration
+- **Bot protection** — scanner "trap" paths (`/.env`, `/.git/`, `/wp-login.php`, `*.php`, …) get an instant 404 and a few of them block the IP; bursts of 404s block too (search and link-preview crawlers exempt); optional per-IP rate limit; per-site refusal of AI-training crawlers; an allow-list, and never blocking an IP with a signed-in administrator
+- **IP auto-blocking** — automatically block IPs that accumulate too many geo-denied requests, block any IP by hand (Settings → Security or straight from the Logs page), with configurable thresholds and duration
 - **Multiple administrators and site users** — every person gets their own username (a handle or an email address) and password; any number of accounts can be administrators, and site users see only the sites assigned to them. Every account can enable TOTP and register passkeys
 - **Secure auth** — Argon2id password hashing, passkeys (WebAuthn) for passwordless sign-in, TOTP two-factor authentication, session tokens, CSRF protection, rate-limited login, step-up password checks for sensitive changes, per-actor audit log
 - **File manager** — browse, upload, create folders, rename/move, duplicate, and delete files or whole folders in a site's working version, with bulk selection and auto-snapshot before the first destructive change
@@ -436,6 +437,20 @@ Site Settings → **Protection** puts a code in front of the whole site (`/`) or
 - Ten wrong codes from one IP in 15 minutes pauses attempts from it.
 - Protected responses are sent `Cache-Control: private` and `X-Robots-Tag: noindex`, so Cloudflare never caches them for other visitors and search engines don't index them. Link previews won't show protected pages.
 - Codes are stored so admins can look them up again — this is simple access control for sharing, not account security. Repository sites use their own sign-in instead.
+
+### Bot Protection
+
+Settings → Security → **Bot Protection** holds three defenses, all counted in memory so normal requests never wait on the database:
+
+- **Trap scanner paths** (on by default). Requests for well-known secret and admin paths — `.env*`, `.git/`, `.aws/`, `wp-admin`, `wp-login.php`, `xmlrpc.php`, any `.php`/`.asp(x)`/`.ashx`/`.jsp`, `phpmyadmin`, `secrets.yml`, `docker-compose.yml`, `*.sql`/`*.bak`, and so on — get an immediate bare 404 without touching the disk or the SPA fallback. Three in an hour (configurable) blocks the IP for 24 hours. A site that really ships one of those files still has it served.
+- **Limit not-found requests** (on by default). 30 page 404s in 5 minutes blocks an IP for an hour. Missing scripts, styles, and fonts aren't counted, and search and link-preview crawlers (Google, Bing, Facebook, X, Slack, LinkedIn, Discord, WhatsApp, …) are exempt.
+- **Rate-limit each IP** (off by default). Answers 429 above a per-minute ceiling without blocking.
+
+Safety rails: the admin panel, MCP, and OAuth are never blocked or limited; allow-listed IPs and any IP with a live administrator session are never blocked; every block records its reason. The Logs page tags shield actions (**Probe**, **Blocked**, **Rate-limited**, **AI bot**, **Geo**), filters to them with **Shield actions**, and has a **Block** link on each row.
+
+Each site's Settings → Access tab also has **Refuse AI crawlers**: GPTBot, ClaudeBot, CCBot, PerplexityBot, Bytespider, and similar get a 403 on that site.
+
+Behind Cloudflare, adding a free WAF custom rule for the obvious probes (URI path contains `/.env`, `/.git`, or `wp-`) stops them before they reach Hoster at all.
 
 ### Site Aliases
 

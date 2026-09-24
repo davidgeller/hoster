@@ -7,6 +7,7 @@ import {
   handleRegister, handleAuthorize, handleToken, handleRevoke,
 } from "./oauth";
 import { logRequest, extractRequestMeta, shouldTrack, isCountryAllowed, isIpBlocked, checkAndAutoBlock } from "./analytics";
+import { isTrapPath, recordTrapHit, recordNotFound, checkRateLimit, isAiCrawler } from "./shield";
 import { resolveSitePath, resolveAlias, resolveHostAlias, normalizeHost, getDefaultSite, getDefaultSiteFooterSlug, getSite } from "./sites";
 import { serveCmsLibFile } from "./cms-lib";
 import { handleRepoSite } from "./repo-site";
@@ -248,6 +249,8 @@ export function createServer(port: number) {
       let siteSlug: string | null = null;
       // Name of the access code this request was admitted under (protected paths).
       let accessCode: string | null = null;
+      // Why the shield stepped in, when it did (logged with the request).
+      let flag: string | null = null;
 
       // Resolve host alias once. If the incoming Host header maps to a site,
       // every non-reserved request on this host is served from that site,
@@ -298,7 +301,17 @@ export function createServer(port: number) {
         if (!isInfraPath) {
           if (isIpBlocked(meta.ip)) {
             status = 403;
+            flag = "blocked";
             const res = addSiteHeaders(new Response("Access denied", { status: 403 }));
+            logReq(res);
+            return res;
+          }
+          // Optional per-IP request ceiling (off by default).
+          const retryAfter = checkRateLimit(meta.ip);
+          if (retryAfter) {
+            status = 429;
+            flag = "ratelimited";
+            const res = addSiteHeaders(new Response("Too many requests", { status: 429, headers: { "Retry-After": String(retryAfter) } }));
             logReq(res);
             return res;
           }
@@ -318,6 +331,7 @@ export function createServer(port: number) {
               })();
           if (!isCountryAllowed(meta.country, gateSlug)) {
             status = 403;
+            flag = "geo";
             const res = addSiteHeaders(new Response("Access denied", { status: 403 }));
             logReq(res);
             checkAndAutoBlock(meta.ip);
@@ -467,9 +481,38 @@ export function createServer(port: number) {
           basePath = `/${parts[0]}/`;
         }
 
+        const candidateSite = getSite(candidateSlug);
+
+        // --- Shield: scanner trap paths (/.env, /.git/, /wp-login.php, …) ---
+        // Answered with a bare 404 before any disk walk or SPA fallback, and
+        // counted against the IP. A web site that really ships such a file
+        // still gets it served. Repository URLs have their own namespace and
+        // are left to the 404 limit instead.
+        if (!candidateSite || candidateSite.site_type !== "repository") {
+          const probe = candidateSite ? "/" + (hostAliasSlug ? parts : parts.slice(1)).join("/") : path;
+          if (isTrapPath(probe) && !(candidateSite && resolveSitePath(candidateSlug, reqPath, { spaFallback: false }))) {
+            status = 404;
+            flag = "trap";
+            if (candidateSite) siteSlug = candidateSlug;
+            recordTrapHit(meta.ip, path);
+            const res = addSiteHeaders(new Response("Not found", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } }));
+            logReq(res);
+            return res;
+          }
+        }
+
+        // --- Per-site refusal of AI-training crawlers ---
+        if (candidateSite && candidateSite.block_ai_bots && isAiCrawler(meta.user_agent)) {
+          status = 403;
+          flag = "ai-bot";
+          siteSlug = candidateSlug;
+          const res = addSiteHeaders(new Response("AI crawlers are not permitted on this site", { status: 403, headers: { "Content-Type": "text/plain; charset=utf-8" } }));
+          logReq(res);
+          return res;
+        }
+
         // --- Repository sites: built-in document library UI + API ---
         // Routed before any static-file logic; a repository has no _current tree.
-        const candidateSite = getSite(candidateSlug);
         if (candidateSite && candidateSite.site_type === "repository") {
           if (!candidateSite.active) {
             status = 404;
@@ -645,6 +688,13 @@ export function createServer(port: number) {
       function logReq(res?: Response | null) {
         if (res && accessCode && siteSlug && res.status < 400 && path !== "/_hoster/unlock") markProtected(res);
         if (!shouldTrack(path)) return;
+        // Bursts of 404s are the other scanner signature (trap hits are
+        // already counted). Static assets (.js/.css/fonts) aren't tracked, so a
+        // site with a broken asset link can't get its visitors blocked.
+        // Admin/MCP/OAuth surfaces are exempt, like the other shield checks.
+        if (status === 404 && flag !== "trap" && !/^\/(_admin|_mcp|oauth\/|\.well-known\/oauth-)/.test(path)) {
+          recordNotFound(meta.ip, meta.user_agent);
+        }
         const elapsed = performance.now() - start;
         // Best-effort byte counts. Only counted when Content-Length is present;
         // chunked/streamed bodies (rare here) report 0. Inline tiny responses
@@ -667,6 +717,7 @@ export function createServer(port: number) {
           request_bytes: requestBytes,
           response_bytes: responseBytes,
           access_code: accessCode,
+          flag,
         });
       }
     },

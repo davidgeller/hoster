@@ -397,6 +397,8 @@
                 <option value="3xx">3xx Redirect</option>
                 <option value="4xx">4xx Client Error</option>
                 <option value="blocked">403 Blocked</option>
+                <option value="shield">Shield actions</option>
+                <option value="protected">Access-code visits</option>
                 <option value="5xx">5xx Server Error</option>
               </select>
               <select id="log-filter-country">
@@ -595,9 +597,50 @@
                 <div class="form-success" id="country-success"></div>
               </form>
             </div>
-            <div class="card mt-4" style="max-width:480px">
+            <div class="card mt-4" style="max-width:560px">
+              <h3>Bot Protection</h3>
+              <p class="text-sm text-muted mb-2">Stops vulnerability scanners that walk lists like <code>/.env</code>, <code>/.git/config</code>, and <code>/wp-login.php</code>. Everything runs in memory, applies to every hosted site, and never touches the admin panel, MCP, or OAuth. Blocked IPs appear in the list below with the reason.</p>
+              <form id="shield-form">
+                <label class="toggle-label">
+                  <input type="checkbox" id="shield-traps">
+                  Trap scanner paths
+                </label>
+                <p class="text-sm text-muted" style="margin:-4px 0 8px 26px">Requests for secrets, version-control folders, WordPress/PHP/ASP endpoints and the like get an instant 404 and count as a strike — unless the site really has that file.</p>
+                <div class="shield-row">
+                  <label>Block after <input type="number" id="shield-trap-threshold" min="1" max="100"> <span class="text-sm text-muted">probes in an hour</span></label>
+                  <label>for <input type="number" id="shield-trap-hours" min="0" max="8760"> <span class="text-sm text-muted">hours (0 = permanent)</span></label>
+                </div>
+                <label class="toggle-label">
+                  <input type="checkbox" id="shield-notfound">
+                  Limit not-found requests
+                </label>
+                <p class="text-sm text-muted" style="margin:-4px 0 8px 26px">An IP collecting a burst of 404s is blocked for a while. Search and link-preview crawlers (Google, Bing, Facebook, Slack, LinkedIn, X, Discord, …) are exempt; missing scripts, styles, and fonts don't count.</p>
+                <div class="shield-row">
+                  <label>Block after <input type="number" id="shield-nf-threshold" min="5" max="10000"> <span class="text-sm text-muted">404s in</span></label>
+                  <label><input type="number" id="shield-nf-window" min="1" max="1440"> <span class="text-sm text-muted">minutes, for</span></label>
+                  <label><input type="number" id="shield-nf-hours" min="0" max="8760"> <span class="text-sm text-muted">hours</span></label>
+                </div>
+                <label class="toggle-label">
+                  <input type="checkbox" id="shield-rate">
+                  Rate-limit each IP
+                </label>
+                <p class="text-sm text-muted" style="margin:-4px 0 8px 26px">Answers 429 past the limit (no block). Off by default: app-style sites load many files per page, and visitors on mobile networks often share one IP — keep this generous.</p>
+                <div class="shield-row">
+                  <label>At most <input type="number" id="shield-rate-limit" min="60" max="100000"> <span class="text-sm text-muted">requests per minute</span></label>
+                </div>
+                <label>
+                  Never block these IPs
+                  <textarea id="shield-allowlist" rows="2" placeholder="One per line — e.g. your office or monitoring service" spellcheck="false" class="text-mono"></textarea>
+                  <small>Also never blocked: any IP with a signed-in administrator session.</small>
+                </label>
+                <button type="submit" class="btn btn-primary">Save</button>
+                <div class="form-error" id="shield-error"></div>
+                <div class="form-success" id="shield-success"></div>
+              </form>
+            </div>
+            <div class="card mt-4" style="max-width:560px">
               <h3>IP Auto-Blocking</h3>
-              <p class="text-sm text-muted mb-2">Automatically block IP addresses that accumulate too many denied requests. Uses the real client IP from Cloudflare headers.</p>
+              <p class="text-sm text-muted mb-2">Automatically block IP addresses that accumulate too many requests refused by the country restrictions above. Uses the real client IP from Cloudflare headers.</p>
               <form id="autoblock-form">
                 <label class="toggle-label">
                   <input type="checkbox" id="autoblock-enabled">
@@ -623,6 +666,18 @@
                 <div class="form-success" id="autoblock-success"></div>
               </form>
               <div id="blocked-ips-list" style="margin-top:16px"></div>
+              <div style="display:grid;grid-template-columns:1fr 110px auto;gap:6px;margin-top:10px;align-items:center">
+                <input type="text" id="manual-block-ip" placeholder="Block an IP address…" spellcheck="false" class="text-mono">
+                <select id="manual-block-hours">
+                  <option value="1">1 hour</option>
+                  <option value="24" selected>24 hours</option>
+                  <option value="168">7 days</option>
+                  <option value="720">30 days</option>
+                  <option value="0">Permanent</option>
+                </select>
+                <button type="button" class="btn btn-sm" id="manual-block-btn">Block</button>
+              </div>
+              <div class="form-error" id="manual-block-error"></div>
             </div>
           </div>
 
