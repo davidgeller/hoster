@@ -676,10 +676,53 @@ Regression tests for P2–P5 and P7 are in `test/protect.test.ts`. Also covered 
 
 ### Known limitations / accepted risks
 
-- **Pre-existing, highest priority: hosted sites share the admin panel's origin.** Every path-routed site (`https://<canonical host>/<slug>/`) runs in the same origin as `/_admin`. Any script on any such site can `fetch('/_admin/api/auth-check')` with a signed-in administrator's cookie, read the CSRF token from the response, and then call any admin API as that administrator. It can also `window.open('/_admin')` and script the page directly. Cookie flags, CSRF tokens, and Referer checks cannot stop same-origin script. **Anyone who can put a file on a path-routed site (site users, MCP delegates, AI tools with write access) can take over an administrator who visits that site while signed in.** For the same reason, a script on one path-routed site can read another site's access-code-protected pages once the visitor has unlocked them. Mitigations today: serve untrusted sites only on their own custom domains (host aliases are separate origins), and don't browse path-routed sites in a browser signed in to `/_admin`. The real fix is origin isolation: serve the admin panel on a dedicated hostname and refuse `/_admin` everywhere else, or stop serving path-routed sites on the admin's hostname. It is tracked as a follow-up.
+- **Hosted sites shared the admin panel's origin — mitigated in v2.7.0 when an admin hostname is configured** (see the next section). Without that setting the exposure below still applies. Every path-routed site (`https://<canonical host>/<slug>/`) runs in the same origin as `/_admin`. Any script on any such site can `fetch('/_admin/api/auth-check')` with a signed-in administrator's cookie, read the CSRF token from the response, and call any admin API as that administrator. **Anyone who can put a file on a path-routed site can take over an administrator who visits it while signed in.**
 - **Header trust depends on the firewall.** Client IPs come from `cf-connecting-ip` when `cf-ipcountry` is present, otherwise from `X-Real-IP`. Both are trusted at face value. If the origin is reachable directly rather than only from Cloudflare or your proxy, an attacker can dodge IP blocks by rotating fake addresses, or get a victim's IP blocked from hosted sites (not from the admin panel). Keep the origin firewalled to Cloudflare's ranges (as production is).
 - **Codes are shared secrets, stored readable, and included in platform backups**, as is the cookie-signing secret. Encrypt backups that leave the host. Anyone holding a code can pass it on; give each audience its own code so it can be revoked alone.
 - **Enabling protection on a folder whose assets were previously public** doesn't evict copies Cloudflare already cached under the old `public, immutable` headers. Purge the Cloudflare cache for that path after protecting it.
 - **User-agent checks are advisory.** The AI-crawler refusal and the link-preview exemption trust the `User-Agent` header, which is trivially spoofed. They manage well-behaved bots; the trap and 404 limits are what stop hostile ones.
 
 *Verified by `bun test` (250 tests across 18 files) and by the compile-and-boot preflight in `build-pi.sh`.*
+
+
+---
+
+## Fix — Admin origin isolation (2026-09-24, v2.7.0)
+
+**Scope:** `src/origin.ts` (new), the origin gate at the top of `src/server.ts`, `src/oauth.ts` (authorization endpoint in discovery), `src/admin-api.ts` (`/settings/origin`, `sites_origin` in auth-check), `src/cli.ts` (`hoster admin-host`), and `admin/app.js` / `admin/index.html` (settings card, absolute site links).
+
+### Design
+
+Settings → Security → **Admin Hostname** stores `admin_host` and `sites_host` in `config`. When set:
+
+| Request | On the admin hostname | On any other non-alias hostname | On a custom domain (host alias) |
+|---|---|---|---|
+| `/_admin` pages | served | 302 → admin hostname | 404 (unchanged) |
+| `/_admin/api/*` | served | **404** (never redirected) | 404 (unchanged) |
+| `/_admin/api/version` | served | served (public, as before) | 404 (unchanged) |
+| `/oauth/authorize` (password consent) | served | 302 → admin hostname, query kept | 404 (unchanged) |
+| `/_mcp*`, `/oauth/token\|register\|revoke`, `/.well-known/oauth-*`, `/_cms/*` | served | served | 404 / `_cms` served (unchanged) |
+| Hosted sites, `/_hoster/unlock`, anything else | 302 → sites hostname (`/` → `/_admin`) | served | served |
+
+- **Why this closes the hole.** The session cookie is host-only (no `Domain`), so a session created on the admin hostname is only ever sent to that hostname, and the admin hostname serves no content anyone else controls. A hosted page is now cross-origin to the admin panel:
+  - it can't read admin API responses (no CORS headers);
+  - it can't send the `X-CSRF-Token` header (the preflight fails);
+  - it can't script an admin window, and the admin pages still send `X-Frame-Options: DENY`.
+- **Verified in a browser** with `admin.localhost` / `sites.localhost`: from a hosted page, the same-origin `fetch('/_admin/api/auth-check')` returns 404, and cross-origin reads and a forged POST to the admin hostname fail.
+- **Bearer-token surfaces stay shared.** MCP and OAuth token/registration/revocation authenticate with bearer tokens or client credentials, never cookies, so sharing an origin with hosted sites grants a script nothing it doesn't already hold. Leaving them on every hostname keeps every existing MCP connector URL and refresh token working. Discovery still reports the host that was asked as `issuer`, so clients' issuer checks keep passing. Only `authorization_endpoint` points to the admin hostname.
+- **Lock-out protection:**
+  - Enabling needs an administrator and a password step-up.
+  - The server first fetches `/_hoster/instance` through the new hostname and compares a random installation id. On a mismatch or an unreachable name it refuses with 409 unless the admin explicitly overrides.
+  - Loopback `Host` values (`localhost`, `127.0.0.1`, `::1`) always reach the admin panel. That keeps the deploy scripts' version checks working and gives SSH-tunnel access.
+  - `hoster admin-host --clear` turns the setting off from the server shell.
+  - The admin and sites hostnames must differ and can't be site custom domains.
+- **Why loopback access is safe.** Isolation protects browsers, and a browser page on the sites hostname can't make a request that carries `Host: localhost` to this server. An outside client that forges `Host: localhost` only reaches the same admin login it could reach on the admin hostname.
+
+### Residual risks
+
+- **Path-routed sites still share one origin with each other.** One site's script can read another site's pages, including access-code-protected pages a visitor has unlocked, and act inside a **repository** site on the same hostname with a session made there. Repository sign-in issues a normal session cookie on the sites hostname. With the admin API unreachable there, that session can do only what the repository's own `_repo/api` allows, but that includes uploads for a writer. Put repositories and any site you don't fully trust on their own custom domains.
+- **Sessions made before switching** are all ended when the admin hostname is set or changed. Their cookies were scoped to hostnames that no longer serve the admin API, and everyone signs in again on the new hostname anyway.
+- **Passkeys are per hostname.** They don't follow the admin panel to its new hostname; sign in with a password and 2FA, then register a new one.
+- **The reachability check is an outbound request** from the server to an administrator-supplied hostname (admin-only, with password step-up, a 6 s timeout, and a response capped at 1 KB). It's the same trust level as every other admin action.
+
+*Verified by `bun test` (267 tests across 19 files, including `test/origin.test.ts`), by the browser run described above, and by the compile-and-boot preflight in `build-pi.sh`.*

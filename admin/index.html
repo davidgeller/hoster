@@ -631,6 +631,34 @@
                 <div class="form-success" id="country-success"></div>
               </form>
             </div>
+            <div class="card mt-4" style="max-width:560px" id="origin-card">
+              <h3>Admin Hostname</h3>
+              <p class="text-sm text-muted mb-2">Sites served at <code>/&lt;slug&gt;/</code> share a browser origin with everything else on their hostname. While the admin panel lives there too, a script on <em>any</em> of those sites can act as a signed-in administrator. Give the admin panel its own hostname (for example <code>admin.example.com</code>) to close that off: the panel and the OAuth consent screen are then served only there, and that hostname serves no sites. MCP connectors and existing OAuth grants keep working unchanged.</p>
+              <div id="origin-status" class="text-sm" style="margin-bottom:10px"></div>
+              <form id="origin-form">
+                <label>
+                  Admin hostname
+                  <input type="text" id="origin-admin-host" placeholder="admin.example.com" autocomplete="off" spellcheck="false">
+                  <small>Point this name at this server first (DNS / Cloudflare), exactly like the address you use now. Hoster checks it reaches this installation before switching.</small>
+                </label>
+                <label>
+                  Sites hostname
+                  <input type="text" id="origin-sites-host" placeholder="hoster.example.com" autocomplete="off" spellcheck="false">
+                  <small>Where your <code>/&lt;slug&gt;/</code> sites stay — usually the address you're on now. Custom domains aren't affected.</small>
+                </label>
+                <label>
+                  Your password
+                  <input type="password" id="origin-password" autocomplete="current-password">
+                </label>
+                <p class="text-sm text-muted" style="margin:0 0 10px">After switching you sign in again on the new hostname. Passkeys belong to the hostname they were made on, so sign in with your password (and 2FA) the first time, then register a passkey there. Locked out? From the server shell: <code>hoster admin-host --clear</code>, or reach the panel over an SSH tunnel to <code>localhost</code>.</p>
+                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                  <button type="submit" class="btn btn-primary" id="origin-save">Check and switch</button>
+                  <button type="button" class="btn btn-ghost" id="origin-off" hidden>Turn off (serve the admin panel on every hostname again)</button>
+                </div>
+                <div class="form-error" id="origin-error"></div>
+                <div class="form-success" id="origin-success"></div>
+              </form>
+            </div>
             <div class="card mt-4" style="max-width:560px">
               <h3>Bot Protection</h3>
               <p class="text-sm text-muted mb-2">Stops vulnerability scanners that walk lists like <code>/.env</code>, <code>/.git/config</code>, and <code>/wp-login.php</code>. Everything runs in memory, applies to every hosted site, and never touches the admin panel, MCP, or OAuth. Blocked IPs appear in the list below with the reason.</p>

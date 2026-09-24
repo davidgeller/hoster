@@ -25,6 +25,7 @@ import {
   getUserByUsername, userCanAccessSite, recordLoginAttempt,
 } from "./auth";
 import { getSite } from "./sites";
+import { adminOrigin } from "./origin";
 
 // --- Schema ---
 
@@ -208,7 +209,10 @@ export function handleAsMetadata(req: Request): Response {
   const origin = originOf(req);
   return jsonResponse({
     issuer: origin,
-    authorization_endpoint: `${origin}/oauth/authorize`,
+    // The consent screen collects an administrator's password, so with an
+    // admin hostname configured it lives there (see origin.ts); the other
+    // endpoints are cookie-less and stay on the host being asked.
+    authorization_endpoint: `${adminOrigin() || origin}/oauth/authorize`,
     token_endpoint: `${origin}/oauth/token`,
     registration_endpoint: `${origin}/oauth/register`,
     revocation_endpoint: `${origin}/oauth/revoke`,

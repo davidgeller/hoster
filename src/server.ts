@@ -7,6 +7,7 @@ import {
   handleRegister, handleAuthorize, handleToken, handleRevoke,
 } from "./oauth";
 import { logRequest, extractRequestMeta, shouldTrack, isCountryAllowed, isIpBlocked, checkAndAutoBlock } from "./analytics";
+import { getOriginConfig, hostOnly, isAdminOnlyPath, isSharedInfraPath, adminOrigin, sitesOrigin, instanceId } from "./origin";
 import { isTrapPath, recordTrapHit, recordNotFound, checkRateLimit, isAiCrawler } from "./shield";
 import { resolveSitePath, resolveAlias, resolveHostAlias, normalizeHost, getDefaultSite, getDefaultSiteFooterSlug, getSite } from "./sites";
 import { serveCmsLibFile } from "./cms-lib";
@@ -158,7 +159,7 @@ function checkNotModified(req: Request, etag: string | null): Response | null {
 // "/?utm_source=x" survive; for external URLs the admin's URL wins verbatim.
 function rootRedirectLocation(search: string): string {
   const { target } = getDefaultSite();
-  if (!target) return "/_admin";
+  if (!target) return (adminOrigin() || "") + "/_admin";
   if (/^https?:\/\//i.test(target)) return target;
   return `/${target}/${search}`;
 }
@@ -169,13 +170,14 @@ function rootRedirectLocation(search: string): string {
 // site CSS. The close button hides it for the page view only.
 const ADMIN_FOOTER_HTML = `<div id="hoster-admin-footer" style="position:fixed;left:0;right:0;bottom:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;gap:12px;padding:6px 12px;font:13px/1.4 system-ui,-apple-system,sans-serif;color:#e8e8e8;background:rgba(20,20,24,.92);box-shadow:0 -1px 4px rgba(0,0,0,.25)">` +
   `<span style="opacity:.75">Hosted with Hoster</span>` +
-  `<a href="/_admin" style="color:#8ec5ff;text-decoration:none;font-weight:600">Admin panel &rarr;</a>` +
+  `<a href="__ADMIN_URL__" style="color:#8ec5ff;text-decoration:none;font-weight:600">Admin panel &rarr;</a>` +
   `<button type="button" aria-label="Hide" onclick="this.parentNode.remove()" style="margin-left:4px;border:0;background:transparent;color:#aaa;font-size:16px;line-height:1;cursor:pointer;padding:0 4px">&times;</button>` +
   `</div>`;
 
 function injectAdminFooter(html: string): string {
+  const footer = ADMIN_FOOTER_HTML.replace("__ADMIN_URL__", (adminOrigin() || "") + "/_admin");
   const idx = html.search(/<\/body\s*>/i);
-  return idx === -1 ? html + ADMIN_FOOTER_HTML : html.slice(0, idx) + ADMIN_FOOTER_HTML + html.slice(idx);
+  return idx === -1 ? html + footer : html.slice(0, idx) + footer + html.slice(idx);
 }
 
 async function serveHtml(filePath: string, basePath: string, req: Request, version?: string | null, adminFooter = false): Promise<Response> {
@@ -184,7 +186,8 @@ async function serveHtml(filePath: string, basePath: string, req: Request, versi
     // a browser that cached the page before the footer was enabled keeps
     // getting 304s and never sees it.
     const baseEtag = generateEtag(filePath, version);
-    const etag = baseEtag && adminFooter ? baseEtag.replace(/"$/, '-af"') : baseEtag;
+    // The footer's link depends on the admin hostname, so that's in the tag too.
+    const etag = baseEtag && adminFooter ? baseEtag.replace(/"$/, `-af${getOriginConfig().admin_host ? "-" + Bun.hash(getOriginConfig().admin_host!).toString(36) : ""}"`) : baseEtag;
     const notModified = checkNotModified(req, etag);
     if (notModified) return notModified;
 
@@ -275,6 +278,49 @@ export function createServer(port: number) {
       const hostAliasSlug = resolveHostAlias(normalizeHost(req.headers.get("host")));
 
       try {
+        // --- Origin isolation: the admin panel lives on its own hostname ---
+        // See origin.ts. Loopback hosts keep full access (deploy scripts curl
+        // the version endpoint there, and an SSH tunnel is the break-glass
+        // way in if the admin hostname stops resolving).
+        const iso = getOriginConfig();
+        if (iso.admin_host && !hostAliasSlug) {
+          const host = normalizeHost(req.headers.get("host"));
+          const loopback = host === "localhost" || host === "127.0.0.1" || host === "::1";
+          const onAdminHost = host === hostOnly(iso.admin_host);
+          if (onAdminHost) {
+            // Only admin and shared infrastructure here — never a hosted site.
+            if (!isAdminOnlyPath(path) && !isSharedInfraPath(path)) {
+              const target = path === "/" ? "/_admin" : (sitesOrigin() ? sitesOrigin() + path + url.search : null);
+              status = target ? 302 : 404;
+              const res = addSecurityHeaders(target
+                ? new Response(null, { status: 302, headers: { Location: target, "Cache-Control": "no-store" } })
+                : new Response("Not found", { status: 404 }));
+              logReq(res);
+              return res;
+            }
+          } else if (!loopback && isAdminOnlyPath(path) && path !== "/_admin/api/version") {
+            // The API never follows a redirect usefully (and must not answer
+            // here); pages and the OAuth consent screen move to the admin host.
+            const isApi = path.startsWith("/_admin/api/");
+            status = isApi ? 404 : 302;
+            const res = addSecurityHeaders(isApi
+              ? new Response(JSON.stringify({ error: "Not found" }), { status: 404, headers: { "Content-Type": "application/json" } })
+              : new Response(null, { status: 302, headers: { Location: adminOrigin() + path + url.search, "Cache-Control": "no-store" } }));
+            logReq(res);
+            return res;
+          }
+        }
+
+        // Installation id for the admin-hostname reachability check (non-secret).
+        if (path === "/_hoster/instance") {
+          status = 200;
+          const res = new Response(JSON.stringify({ instance: instanceId() }), {
+            headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+          });
+          logReq(res);
+          return addSiteHeaders(res);
+        }
+
         // The global CMS library at `/_cms/<file>` serves every site's blog
         // templates and MUST be reachable on every host — canonical and
         // host-aliased — because the templates load it via an absolute URL.

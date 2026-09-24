@@ -43,6 +43,7 @@ import {
   getAutoBlockConfig, setAutoBlockConfig, getBlockedIps, unblockIp, blockIp,
 } from "./analytics";
 import { getInsights } from "./insights";
+import { getOriginConfig, setOriginConfig, instanceId, adminOrigin, sitesOrigin, normalizeHostSetting, verifyReachesThisServer } from "./origin";
 import { getHealth, getHealthSummary, checkpointWal, quickCheck, tableSizes, pruneRequests, vacuum } from "./health";
 import { getShieldConfig, setShieldConfig, resetShieldCounters, isValidIp } from "./shield";
 import { listCountries } from "./countries";
@@ -251,6 +252,8 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
       passkey_supported: rp !== null,
       passkey_enabled: rp !== null && hasCredentialsForRp(rp.rpId),
       rp_id: rp?.rpId ?? null,
+      // With a dedicated admin hostname, site links in the panel point here.
+      sites_origin: sitesOrigin(),
     });
   }
 
@@ -1184,6 +1187,40 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
           return json({ ok: true, ...r });
         }
       }
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
+  }
+
+  // --- Origin isolation: dedicated admin hostname (see origin.ts) ---
+  if (path === "/_admin/api/settings/origin" && req.method === "GET") {
+    const cfg = getOriginConfig();
+    return json({ ...cfg, current_host: req.headers.get("host") || "", instance_id: instanceId() });
+  }
+  if (path === "/_admin/api/settings/origin" && req.method === "POST") {
+    const body = await readJsonBody<{ admin_host?: string | null; sites_host?: string | null; confirm_password?: string; force?: boolean }>(req);
+    if (!body) return json({ error: "Invalid request body" }, 400);
+    const denied = await stepUp(body.confirm_password);
+    if (denied) return denied;
+    try {
+      // Switching to a hostname that doesn't reach this server would lock
+      // everyone out of the panel (short of the CLI or an SSH tunnel), so
+      // check first unless the admin has seen the warning and insists.
+      const target = normalizeHostSetting(body.admin_host, "Admin hostname");
+      if (target && target !== getOriginConfig().admin_host && !body.force) {
+        const check = await verifyReachesThisServer(target);
+        if (!check.ok) return json({ error: `Not switched: ${check.reason}.`, unverified: true }, 409);
+      }
+      const before = getOriginConfig();
+      const cfg = setOriginConfig(body, { hostAliases: listAllHostAliases().map(a => a.host) });
+      // Moving the panel to a (new) admin hostname: end every session. Old
+      // cookies are scoped to hostnames that no longer serve the admin API,
+      // and everyone signs in again on the new one anyway.
+      if (cfg.admin_host && cfg.admin_host !== before.admin_host) destroyAllSessions();
+      audit("origin_isolation_updated", cfg.admin_host
+        ? `admin on ${cfg.admin_host}, sites on ${cfg.sites_host}`
+        : `off (was ${before.admin_host || "off"})`);
+      return json({ ok: true, ...cfg, admin_origin: adminOrigin(), sites_origin: sitesOrigin() });
     } catch (e: any) {
       return json({ error: e.message }, 400);
     }

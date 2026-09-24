@@ -12,12 +12,18 @@ let currentUsername = null;
 // on the "choose a new password" screen until it's replaced.
 let mustChangePassword = false;
 
+// Where hosted sites live. Empty = this same host (no dedicated admin
+// hostname); otherwise e.g. "https://sites.example.com" — site links must be
+// absolute because the admin hostname itself serves no sites.
+let sitesBase = "";
+
 // Refresh the principal from the server and apply UI scoping. Called on initial
 // load and after every successful login (the SPA doesn't reload on login).
 async function refreshAuthScoping() {
   try {
     const auth = await api("/auth-check");
     if (auth.csrf_token) csrfToken = auth.csrf_token;
+    sitesBase = auth.sites_origin || "";
     isSuperAdmin = auth.is_super_admin !== false;
     currentUsername = auth.username || null;
     mustChangePassword = !!auth.must_change_password;
@@ -221,6 +227,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   try {
     const auth = await api("/auth-check");
     if (auth.csrf_token) csrfToken = auth.csrf_token;
+    sitesBase = auth.sites_origin || "";
     passkeyLoginAvailable = !!auth.passkey_enabled && passkeySupportedByBrowser();
     applyPasskeyLoginVisibility();
     if (!auth.setup) {
@@ -542,6 +549,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindSystemView();
   bindAnalyticsView();
 
+  // --- Admin hostname form ---
+  document.getElementById("origin-form").addEventListener("submit", (e) => { e.preventDefault(); submitOrigin(false); });
+  document.getElementById("origin-off").addEventListener("click", () => submitOrigin(true));
+
   // --- Bot protection (shield) form ---
   document.getElementById("shield-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -653,6 +664,7 @@ async function loadSettings() {
   } catch (_) {}
 
   try { fillShieldForm(await api("/settings/shield")); } catch (_) {}
+  loadOriginSettings();
 
   loadBlockedIps();
   loadMcpTokens();
@@ -1384,6 +1396,67 @@ function bindCountryPicker() {
         : "Saved. All countries allowed.";
     } catch (err) { errEl.textContent = err.message; }
   });
+}
+
+// --- Admin hostname (origin isolation) ---
+function originForHost(hostPort) {
+  const h = hostPort.replace(/:\d+$/, "");
+  const local = h === "localhost" || h === "127.0.0.1" || h === "[::1]" || h.endsWith(".localhost");
+  return `${local ? "http" : "https"}://${hostPort}`;
+}
+
+let originSettings = null;
+async function loadOriginSettings() {
+  try { originSettings = await api("/settings/origin"); } catch (_) { return; }
+  const c = originSettings;
+  const status = document.getElementById("origin-status");
+  document.getElementById("origin-admin-host").value = c.admin_host || "";
+  document.getElementById("origin-sites-host").value = c.sites_host || (c.current_host !== c.admin_host ? c.current_host : "");
+  document.getElementById("origin-off").hidden = !c.admin_host;
+  status.innerHTML = c.admin_host
+    ? `<span class="chip-access" style="margin:0">On</span> Admin panel only on <strong>${esc(c.admin_host)}</strong>; sites on <strong>${esc(c.sites_host || "")}</strong>.`
+    : `<span class="chip-blocked" style="margin:0">Off</span> The admin panel is reachable on every hostname that reaches this server, alongside your sites.`;
+}
+
+async function submitOrigin(turnOff) {
+  const errEl = document.getElementById("origin-error");
+  const okEl = document.getElementById("origin-success");
+  errEl.textContent = ""; okEl.textContent = "";
+  const password = document.getElementById("origin-password").value;
+  if (!password) { errEl.textContent = "Enter your password to confirm"; return; }
+  const adminHost = turnOff ? "" : document.getElementById("origin-admin-host").value.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+  const sitesHost = turnOff ? "" : document.getElementById("origin-sites-host").value.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+  if (!turnOff) {
+    if (!adminHost) { errEl.textContent = "Enter the admin hostname"; return; }
+    if (!confirm(`Move the admin panel to ${originForHost(adminHost)}?\n\nHoster first checks that ${adminHost} reaches this server. You'll sign in again there; sites stay on ${sitesHost || "this hostname"}.`)) return;
+  } else if (!confirm("Turn off the dedicated admin hostname? The admin panel will be reachable alongside your sites again.")) {
+    return;
+  }
+  const send = (force) => api("/settings/origin", { method: "POST", body: JSON.stringify({ admin_host: adminHost || null, sites_host: sitesHost || null, confirm_password: password, force }) });
+  try {
+    let r;
+    try {
+      r = await send(false);
+    } catch (err) {
+      // The server couldn't reach the new hostname itself (common when it
+      // can't loop back through Cloudflare). Offer to switch anyway.
+      if (!/^Not switched/.test(err.message)) throw err;
+      if (!confirm(`${err.message}\n\nSwitch anyway? Only do this if ${originForHost(adminHost)}/_hoster/instance opens in your browser. If the new hostname doesn't work, undo it from the server shell with "hoster admin-host --clear", or reach the panel through an SSH tunnel to localhost.`)) {
+        errEl.textContent = err.message;
+        return;
+      }
+      r = await send(true);
+    }
+    document.getElementById("origin-password").value = "";
+    if (r.admin_origin && location.host !== r.admin_host) {
+      okEl.textContent = `Switched. Taking you to ${r.admin_origin}/_admin …`;
+      setTimeout(() => { location.href = `${r.admin_origin}/_admin/`; }, 1200);
+      return;
+    }
+    okEl.textContent = r.admin_host ? "Saved." : "Turned off.";
+    sitesBase = r.sites_origin || "";
+    loadOriginSettings();
+  } catch (err) { errEl.textContent = err.message; }
 }
 
 function fillShieldForm(c) {
@@ -2818,7 +2891,7 @@ async function loadSites() {
         <span>${timeAgo(s.updated_at)}</span>
       </div>
       <div class="site-actions">
-        <a href="/${esc(s.slug)}/${s.current_version ? "?_v=" + esc(s.current_version) : ""}" target="_blank" rel="noopener" class="btn btn-sm">Visit</a>
+        <a href="${esc(sitesBase)}/${esc(s.slug)}/${s.current_version ? "?_v=" + esc(s.current_version) : ""}" target="_blank" rel="noopener" class="btn btn-sm">Visit</a>
         <button class="btn btn-sm" onclick="showSiteFiles(${jsArg(s.slug)}, ${jsArg(s.name)}, loadSites)">Files</button>
         <button class="btn btn-sm" onclick="showSiteDetail(${jsArg(s.slug)})">Versions</button>
         <button class="btn btn-sm" onclick="redeploySite(${jsArg(s.slug)}, ${jsArg(s.name)})">Update</button>
@@ -2876,7 +2949,7 @@ function renderRepositoryCard(s) {
       </div>
       ${s.repo_quota_bytes > 0 ? `<div class="repo-quota-bar" title="${pct}% of storage used"><div class="repo-quota-fill${pct >= 98 ? " full" : pct >= 85 ? " warn" : ""}" style="width:${pct}%"></div></div>` : ""}
       <div class="site-actions">
-        <a href="/${esc(s.slug)}/" target="_blank" rel="noopener" class="btn btn-sm btn-primary">Open</a>
+        <a href="${esc(sitesBase)}/${esc(s.slug)}/" target="_blank" rel="noopener" class="btn btn-sm btn-primary">Open</a>
         <button class="btn btn-sm" data-settings="${esc(s.slug)}">Settings</button>
         <button class="btn btn-sm" data-repo-backup="${esc(s.slug)}">Backup</button>
         <button class="btn btn-sm" onclick="toggleSitePinned(${jsArg(s.slug)}, ${s.pinned_at ? "false" : "true"}).then(()=>loadSites())">${s.pinned_at ? "Unpin" : "Pin"}</button>
@@ -3014,7 +3087,7 @@ function renderExplorerActions(site) {
       <dt>Hosts</dt><dd>${hostLine}</dd>
     </dl>
     <div class="action-group">
-      <a href="/${esc(site.slug)}/${site.current_version ? "?_v=" + esc(site.current_version) : ""}" target="_blank" rel="noopener" class="btn btn-sm">Visit</a>
+      <a href="${esc(sitesBase)}/${esc(site.slug)}/${site.current_version ? "?_v=" + esc(site.current_version) : ""}" target="_blank" rel="noopener" class="btn btn-sm">Visit</a>
       <button class="btn btn-sm" data-act="files">Files</button>
       <button class="btn btn-sm" data-act="versions">Versions</button>
       <button class="btn btn-sm" data-act="update">Update</button>
@@ -3071,7 +3144,7 @@ function renderExplorerRepositoryActions(site, el) {
       <dt>Hosts</dt><dd>${hostLine}</dd>
     </dl>
     <div class="action-group">
-      <a href="/${esc(site.slug)}/" target="_blank" rel="noopener" class="btn btn-sm btn-primary">Open</a>
+      <a href="${esc(sitesBase)}/${esc(site.slug)}/" target="_blank" rel="noopener" class="btn btn-sm btn-primary">Open</a>
       <button class="btn btn-sm" data-act="settings">Settings</button>
       <button class="btn btn-sm" data-act="backup">Backup</button>
       <button class="btn btn-sm" data-act="pin">${site.pinned_at ? "Unpin" : "Pin"}</button>
@@ -3180,7 +3253,7 @@ function renderExplorerPreview(site) {
   const openEl = document.getElementById("explorer-preview-open");
   const refreshEl = document.getElementById("explorer-preview-refresh");
 
-  const url = `/${site.slug}/${site.current_version ? "?_v=" + site.current_version : ""}`;
+  const url = `${sitesBase}/${site.slug}/${site.current_version ? "?_v=" + site.current_version : ""}`;
   urlEl.textContent = url;
   openEl.href = url;
   openEl.hidden = false;
@@ -3388,7 +3461,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
             Banner image
             <small>Shown as a full-width strip across the top of the repository page. <strong>Best at a 5:1 aspect ratio — 1600 × 320 px, or 2400 × 480 px for sharp high-DPI screens.</strong> The image always spans the full page width; on very wide or very narrow screens a little of the top and bottom is cropped (from the centre), so keep the subject in the middle. PNG, JPEG, WebP, or GIF up to 8 MB.</small>
           </label>
-          <div id="settings-banner-preview" style="margin-bottom:8px">${siteRecord.repo_banner ? `<img src="/${esc(slug)}/_repo/banner?t=${Date.now()}" alt="" style="max-width:100%;max-height:120px;border-radius:6px;border:1px solid var(--border)">` : '<span class="text-sm text-muted">No banner set.</span>'}</div>
+          <div id="settings-banner-preview" style="margin-bottom:8px">${siteRecord.repo_banner ? `<img src="${esc(sitesBase)}/${esc(slug)}/_repo/banner?t=${Date.now()}" alt="" style="max-width:100%;max-height:120px;border-radius:6px;border:1px solid var(--border)">` : '<span class="text-sm text-muted">No banner set.</span>'}</div>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
             <input type="file" id="settings-banner-file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
             <button type="button" class="btn btn-sm" id="settings-banner-upload">${siteRecord.repo_banner ? "Replace banner" : "Upload banner"}</button>
@@ -3975,7 +4048,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
     ];
     const urlList = status.list_url
       ? `<div style="margin-top:10px"><strong>URLs</strong><div class="text-sm" style="margin-top:4px;line-height:1.7">
-          <div>List: <a href="${esc(status.list_url)}" target="_blank" rel="noopener"><code>${esc(status.list_url)}</code></a></div>
+          <div>List: <a href="${esc(sitesBase + status.list_url)}" target="_blank" rel="noopener"><code>${esc(status.list_url)}</code></a></div>
           <div>Story: <code>${esc(status.story_url)}?slug=…</code></div>
           <div class="text-muted" style="font-size:0.85em">Add <code>?preview=1</code> to any CMS URL to reveal drafts.</div>
         </div></div>`
@@ -4098,7 +4171,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
       // Repository users sign in on the repository page itself (its custom
       // domain when it has one); everyone else uses the admin panel.
       const signInUrl = isRepo
-        ? (hostAliases.length ? `https://${hostAliases[0]}/` : `${location.origin}/${slug}/`)
+        ? (hostAliases.length ? `https://${hostAliases[0]}/` : `${sitesBase || location.origin}/${slug}/`)
         : adminSignInUrl();
       showCredentialsModal({ title: "Account created", username, password, signInUrl, mustChange, note: `${username} can now manage this ${isRepo ? "repository" : "site"}.` });
       loadSiteUsers();
@@ -4126,7 +4199,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
         const data = await res.json();
         if (!res.ok) { if (handleSessionLost(res, "/repo/banner")) throw new Error("Session ended — please sign in again"); throw new Error(data.error || "Upload failed"); }
         bannerStatus.textContent = "Banner updated.";
-        modal.querySelector("#settings-banner-preview").innerHTML = `<img src="/${esc(slug)}/_repo/banner?t=${Date.now()}" alt="" style="max-width:100%;max-height:120px;border-radius:6px;border:1px solid var(--border)">`;
+        modal.querySelector("#settings-banner-preview").innerHTML = `<img src="${esc(sitesBase)}/${esc(slug)}/_repo/banner?t=${Date.now()}" alt="" style="max-width:100%;max-height:120px;border-radius:6px;border:1px solid var(--border)">`;
       } catch (e) { bannerStatus.textContent = e.message; bannerStatus.style.color = "var(--danger)"; }
       bannerFile.value = "";
     });

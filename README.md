@@ -53,6 +53,7 @@ In every case the Hoster binary itself is identical — only the front-end TLS l
 - **Analytics dashboard** — request logs, visitor stats, countries, top pages, status codes, blocked request intelligence, min/avg/max response times
 - **Page analytics** — the Analytics page separates people from bots and page views from asset/polling noise, lists top pages per site, and breaks any site or single page down by country, referrer, browser, operating system, device, language, day-and-hour pattern (in your local time), bots, status codes, and access codes used. Works on existing history — nothing to backfill
 - **Country allow-list with a real picker** — search countries by name or code, add them from a list of who actually visited last week, and never look up an ISO code again; the server validates every code it saves
+- **Admin hostname** — serve the admin panel (and OAuth consent) on its own hostname so no hosted site can ever run script in the admin's origin; MCP connectors keep working unchanged, with a CLI and localhost escape hatch
 - **Bot protection** — scanner "trap" paths (`/.env`, `/.git/`, `/wp-login.php`, `*.php`, …) get an instant 404 and a few of them block the IP; bursts of 404s block too (search and link-preview crawlers exempt); optional per-IP rate limit; per-site refusal of AI-training crawlers; an allow-list, and never blocking an IP with a signed-in administrator
 - **IP auto-blocking** — automatically block IPs that accumulate too many geo-denied requests, block any IP by hand (Settings → Security or straight from the Logs page), with configurable thresholds and duration
 - **Multiple administrators and site users** — every person gets their own username (a handle or an email address) and password; any number of accounts can be administrators, and site users see only the sites assigned to them. Every account can enable TOTP and register passkeys
@@ -440,7 +441,7 @@ Site Settings → **Protection** puts a code in front of the whole site (`/`) or
 - Protected responses are sent `Cache-Control: private` and `X-Robots-Tag: noindex`, so Cloudflare never caches them for other visitors and search engines don't index them. Link previews won't show protected pages.
 - Codes are stored so admins can look them up again — this is simple access control for sharing, not account security. Repository sites use their own sign-in instead.
 - Protecting a folder whose files were already public? Purge that path in Cloudflare too — copies it cached earlier don't expire on their own.
-- Sites served at `/<slug>/` on the admin's hostname share one browser origin with each other and with `/_admin`, so a script on one of them can read another's unlocked pages (and act as a signed-in administrator). Give sites you don't fully trust their own custom domain. See `SECURITY-AUDIT.md`.
+- Sites served at `/<slug>/` share one browser origin with each other, so a script on one of them can read another's unlocked pages. Give sites you don't fully trust their own custom domain, and give the admin panel its own hostname (see **Admin Hostname** above).
 
 ### Bot Protection
 
@@ -477,6 +478,26 @@ By default, visiting the root of your Hoster hostname (`https://yourdomain.com/`
 The root then 302-redirects to `/<slug>/` (query strings are carried along) or to the URL. Custom domains mapped with host aliases are unaffected — they already serve their site at the domain root.
 
 When the landing page is a hosted site, a slim **admin footer bar** is added over the bottom of that site's pages on the canonical hostname, linking to `/_admin` so you can still find the panel once the root no longer points at it. Visitors can dismiss it for the page view, and you can turn it off with the checkbox on the same settings tab. The bar is never injected on host-aliased (custom domain) requests, where the admin panel is not reachable anyway. Deleting the default site resets the landing page to the admin sign-in.
+
+### Admin Hostname (recommended)
+
+Sites served at `/<slug>/` share one browser origin with everything else on their hostname. If the admin panel lives on that hostname too, a script on **any** of those sites can call the admin API as a signed-in administrator. Browser cookie and CSRF protections can't stop same-origin script. So anyone who can put a file on a site (a site user, an MCP delegate, an AI tool) could take over an administrator who visits that site while signed in.
+
+Give the admin panel its own hostname to close that off:
+
+1. Point a new name at this server, the same way your current one is. For example, add a proxied Cloudflare DNS record for `admin.example.com`, or a tunnel ingress rule, next to `hoster.example.com`.
+2. In Settings → Security → **Admin Hostname**, enter `admin.example.com`, check that **Sites hostname** shows the address your `/<slug>/` sites use, enter your password, and choose **Check and switch**. Hoster fetches the new hostname through DNS to confirm it reaches this installation before changing anything.
+3. Sign in again on the new hostname. Passkeys belong to the hostname they were created on, so sign in with your password (and 2FA) the first time, then register a passkey there.
+
+Afterwards:
+
+- The admin panel, its API, and the OAuth consent screen are served only on the admin hostname. Elsewhere `/_admin` redirects there and the API answers 404.
+- The admin hostname serves no sites; site paths redirect to the sites hostname.
+- MCP endpoints, OAuth token/registration/revocation, and OAuth discovery keep working on every hostname, so **existing MCP connectors and OAuth grants carry on unchanged**. New authorizations show the consent screen on the admin hostname.
+- `localhost` / `127.0.0.1` always reach the admin panel. That's how the deploy and update scripts check the running version, and it's your way in through an SSH tunnel (`ssh -L 3500:localhost:3500 you@server`, then open `http://localhost:3500/_admin`).
+- To undo it from the server shell, run `hoster admin-host --clear` and then `sudo systemctl restart hoster`. `hoster admin-host` shows the current setting.
+
+Custom domains (host aliases) were already separate origins and never serve the admin panel.
 
 ### Host Aliases (Custom Domains)
 

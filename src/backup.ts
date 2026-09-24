@@ -4,6 +4,7 @@ import { migrateLegacyAdmin } from "./auth";
 import { invalidateProtectCache, resetProtectSecretCache } from "./protect";
 import { invalidateBlockedCache } from "./analytics";
 import { invalidateShieldConfig } from "./shield";
+import { invalidateOriginConfig } from "./origin";
 import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync, statSync, unlinkSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { randomBytes, createCipheriv, createDecipheriv, pbkdf2Sync } from "crypto";
@@ -311,6 +312,8 @@ function importDatabase(tables: Record<string, any[]>) {
   invalidateProtectCache();
   invalidateBlockedCache();
   invalidateShieldConfig();
+  // admin_host / sites_host come back with the config table.
+  invalidateOriginConfig();
 }
 
 export async function createBackup(password?: string, allVersions = false): Promise<Buffer> {

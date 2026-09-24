@@ -32,6 +32,7 @@ const defaultIO: CliIO = {
 
 const USAGE = `Usage:
   hoster deploy <slug> <absolute-path-to.zip> [options]
+  hoster admin-host [--clear]
 
 Deploys a ZIP as a new version of an existing web site. The previous version
 is kept and can be re-activated from the admin UI.
@@ -42,12 +43,18 @@ Options:
   --yes            Skip the confirmation prompt (required when not on a terminal)
   --dry-run        Run every check, print the summary, change nothing
 
+admin-host shows the dedicated admin hostname (Settings → Security → Admin
+Hostname); --clear turns it off so the admin panel is served on every
+hostname again — the way back in if the admin hostname stops resolving.
+Restart the service afterwards (sudo systemctl restart hoster).
+
 Run as the account that owns the Hoster data directory (not root).
 Set HOSTER_HOME when running from source.`;
 
 export async function runCli(argv: string[], io: CliIO = defaultIO): Promise<number> {
   const [command, ...rest] = argv;
   if (command === "deploy") return runDeploy(rest, io);
+  if (command === "admin-host") return runAdminHost(rest, io);
   if (!command || command === "help" || command === "--help" || command === "-h") {
     io.out(USAGE);
     return command ? 0 : 1;
@@ -241,5 +248,34 @@ async function runDeploy(args: string[], io: CliIO): Promise<number> {
   if (previous) {
     io.out(`Previous version ${previous} is kept. To roll back: admin UI → ${slug} → Versions → Activate on ${previous}.`);
   }
+  return 0;
+}
+
+// `hoster admin-host [--clear]` — show or clear the dedicated admin hostname.
+async function runAdminHost(args: string[], io: CliIO): Promise<number> {
+  const unknown = args.filter(a => a !== "--clear");
+  if (unknown.length) { io.err(`Unknown option '${unknown[0]}'.\n\n${USAGE}`); return 1; }
+  const base = process.env.HOSTER_HOME || dirname(process.execPath);
+  const dbPath = join(base, "data", "hoster.db");
+  if (!existsSync(dbPath)) {
+    io.err(`No Hoster database at ${dbPath}. Run the installed hoster binary, or set HOSTER_HOME to the installation directory.`);
+    return 1;
+  }
+  const { getOriginConfig, setOriginConfig } = await import("./origin");
+  const cfg = getOriginConfig();
+  if (!args.includes("--clear")) {
+    io.out(cfg.admin_host
+      ? `Admin panel: ${cfg.admin_host} only. Sites: ${cfg.sites_host}.`
+      : "No dedicated admin hostname: the admin panel is served on every hostname.");
+    return 0;
+  }
+  if (!cfg.admin_host) { io.out("Already off; nothing to change."); return 0; }
+  setOriginConfig({ admin_host: null }, { hostAliases: [] });
+  const { auditLog } = await import("./auth");
+  let osUser = "unknown";
+  try { osUser = userInfo().username; } catch (_) {}
+  auditLog("origin_isolation_updated", `off via CLI (was ${cfg.admin_host})`, "cli", `cli:${osUser}`);
+  io.out(`Cleared. The admin panel is served on every hostname again (it was ${cfg.admin_host} only).`);
+  io.out("Restart the service so the running server picks this up: sudo systemctl restart hoster");
   return 0;
 }
