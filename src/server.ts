@@ -98,7 +98,12 @@ function addSiteHeaders(res: Response): Response {
   return res;
 }
 
-// Read a request body as text, giving up (null) once it passes `limit` bytes.
+// Read a request body as text, keeping at most `limit` bytes (null when it
+// was longer). The rest is read and discarded rather than abandoned: leaving
+// unread bytes on a kept-alive connection lets them be parsed as a *new*
+// request — and behind a proxy that reuses origin connections across
+// visitors (Cloudflare), that is request smuggling. Memory stays bounded;
+// the server-wide body cap bounds the time.
 async function readBodyCapped(req: Request, limit: number): Promise<string | null> {
   if (!req.body) return "";
   const reader = req.body.getReader();
@@ -108,10 +113,9 @@ async function readBodyCapped(req: Request, limit: number): Promise<string | nul
     const { done, value } = await reader.read();
     if (done) break;
     size += value.byteLength;
-    if (size > limit) { try { await reader.cancel(); } catch (_) {} return null; }
-    chunks.push(value);
+    if (size <= limit) chunks.push(value);
   }
-  return Buffer.concat(chunks).toString("utf8");
+  return size > limit ? null : Buffer.concat(chunks).toString("utf8");
 }
 
 // Responses behind an access code must never land in a shared cache
@@ -715,7 +719,8 @@ export function createServer(port: number) {
         if (req.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { Allow: "POST" } });
         // Read at most 8 KB whatever the client declares (or doesn't): the
         // server-wide body cap is sized for multi-GB uploads.
-        if (parseInt(req.headers.get("content-length") || "0", 10) > 8192) {
+        // A declared length over 1 MB isn't worth draining: refuse and close.
+        if (parseInt(req.headers.get("content-length") || "0", 10) > 1024 * 1024) {
           return new Response("Request too large", { status: 413, headers: { Connection: "close" } });
         }
         const raw = await readBodyCapped(req, 8192);

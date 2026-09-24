@@ -718,6 +718,28 @@ Settings → Security → **Admin Hostname** stores `admin_host` and `sites_host
   - The admin and sites hostnames must differ and can't be site custom domains.
 - **Why loopback access is safe.** Isolation protects browsers, and a browser page on the sites hostname can't make a request that carries `Host: localhost` to this server. An outside client that forges `Host: localhost` only reaches the same admin login it could reach on the admin hostname.
 
+### Password step-up for lasting access (defense in depth)
+
+Isolation only helps once an admin hostname is configured. Independently of it, v2.7.0 requires the acting administrator's password for every admin API action that would give a hijacked session a foothold that outlives it:
+
+| Action | Before | Now |
+|---|---|---|
+| Create an MCP token | no password | password |
+| Create an MCP delegate for a site | no password | password |
+| Create a site-user account | no password (administrator accounts already needed one) | password |
+| Grant a user access to additional sites | no password for site users | password (revoking access still doesn't need one) |
+| Set a site user's password, turn off their 2FA, remove their passkeys | no password | password |
+
+A script riding an administrator's session (the same-origin attack above, on installs that haven't set an admin hostname) can still act while the session lasts: deploy or delete sites, change settings. It can no longer mint credentials that keep working after the session ends. Step-ups go through the same per-IP lockout as sign-in. The prompts are the browser's unmasked `prompt()`, as noted in the September 2026 residual risks.
+
+### Found while testing: wrong step-up password signed the panel out
+
+The admin UI treated every 401 as an expired session. A mistyped password at any step-up prompt (401 "Incorrect password") dropped the panel to the sign-in screen and discarded its CSRF token, so the next action failed too. This was pre-existing, but it matters more now that step-ups are common. `handleSessionLost` now ignores a 401 whose body is "Incorrect password"; the session was never at risk.
+
+### Found while testing: request smuggling through the unlock endpoint
+
+v2.6.0's `readBodyCapped` stopped reading and **cancelled** the request stream once an unlock body passed 8 KB. Bun then parsed the unread remainder of a chunked body as a new request on the same connection. A raw-socket test confirmed that bytes after the cap were answered as a separate request. Behind a proxy that reuses origin connections across visitors (Cloudflare does), one visitor could inject a request whose response is delivered to another visitor (response desync). **Fix:** the body is now always read to the end. Only the first 8 KB is kept and the rest is discarded, so memory stays bounded. Declared lengths over 1 MB are refused outright with `Connection: close`. `test/smuggling.test.ts` sends chunked, declared-length, and oversized bodies with requests hidden inside them over a raw socket, and asserts that none is executed while a genuinely pipelined follow-up request still is. The same probe against routes that never read the body (unauthenticated admin API, MCP, unknown site paths) showed Bun discards the body correctly there; only a partially-read-then-abandoned body was affected.
+
 ### Residual risks
 
 - **Path-routed sites still share one origin with each other.** One site's script can read another site's pages, including access-code-protected pages a visitor has unlocked, and act inside a **repository** site on the same hostname with a session made there. Repository sign-in issues a normal session cookie on the sites hostname. With the admin API unreachable there, that session can do only what the repository's own `_repo/api` allows, but that includes uploads for a writer. Put repositories and any site you don't fully trust on their own custom domains.
@@ -725,4 +747,4 @@ Settings → Security → **Admin Hostname** stores `admin_host` and `sites_host
 - **Passkeys are per hostname.** They don't follow the admin panel to its new hostname; sign in with a password and 2FA, then register a new one.
 - **The reachability check is an outbound request** from the server to an administrator-supplied hostname (admin-only, with password step-up, a 6 s timeout, and a response capped at 1 KB). It's the same trust level as every other admin action.
 
-*Verified by `bun test` (267 tests across 19 files, including `test/origin.test.ts`), by the browser run described above, and by the compile-and-boot preflight in `build-pi.sh`.*
+*Verified by `bun test` (268 tests across 20 files, including `test/origin.test.ts` and `test/smuggling.test.ts`), by the browser run described above, and by the compile-and-boot preflight in `build-pi.sh`.*

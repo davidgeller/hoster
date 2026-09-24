@@ -272,15 +272,29 @@ describe("admin API authorization", () => {
     expect(r.status).toBe(200);
     expect(getUserByUsername("third")!.isAdmin).toBe(true);
 
-    // A plain site user needs no step-up.
+    // Since v2.7 a site user needs the step-up too: every new account is a
+    // way back in for a hijacked session.
     r = await asUser(root, "POST", "/_admin/api/users", { username: "editor", password: PW, sites: [] });
+    expect(r.status).toBe(400);
+    r = await asUser(root, "POST", "/_admin/api/users", { username: "editor", password: PW, sites: [], confirm_password: PW });
     expect(r.status).toBe(200);
 
-    // Resetting a peer admin's password requires it; resetting a site user's does not.
+    // Setting anyone's password requires it (admin or site user).
     const editor = getUserByUsername("editor")!.userId;
     expect((await asUser(root, "PUT", `/_admin/api/users/${peer}`, { password: "new-peer-password" })).status).toBe(400);
     expect((await asUser(root, "PUT", `/_admin/api/users/${peer}`, { password: "new-peer-password", confirm_password: PW })).status).toBe(200);
-    expect((await asUser(root, "PUT", `/_admin/api/users/${editor}`, { password: "new-editor-password" })).status).toBe(200);
+    expect((await asUser(root, "PUT", `/_admin/api/users/${editor}`, { password: "new-editor-password" })).status).toBe(400);
+    expect((await asUser(root, "PUT", `/_admin/api/users/${editor}`, { password: "new-editor-password", confirm_password: PW })).status).toBe(200);
+
+    // Granting a site needs it; revoking and "must change password" don't.
+    createBlankSite("grantme", "Grant me");
+    expect((await asUser(root, "PUT", `/_admin/api/users/${editor}`, { sites: ["grantme"] })).status).toBe(400);
+    expect((await asUser(root, "PUT", `/_admin/api/users/${editor}`, { sites: ["grantme"], confirm_password: PW })).status).toBe(200);
+    expect((await asUser(root, "PUT", `/_admin/api/users/${editor}`, { sites: [] })).status).toBe(200);
+    expect((await asUser(root, "PUT", `/_admin/api/users/${editor}`, { must_change_password: true })).status).toBe(200);
+    // Stripping 2FA or passkeys from anyone needs it.
+    expect((await asUser(root, "PUT", `/_admin/api/users/${editor}`, { disable_totp: true })).status).toBe(400);
+    expect((await asUser(root, "PUT", `/_admin/api/users/${editor}`, { remove_passkeys: true })).status).toBe(400);
 
     // Nobody changes their own role or deletes themself.
     expect((await asUser(root, "PUT", `/_admin/api/users/${root}`, { is_admin: false, confirm_password: PW })).status).toBe(400);

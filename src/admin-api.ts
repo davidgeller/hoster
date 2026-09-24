@@ -1271,9 +1271,12 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     return json({ tokens: listMcpTokens() });
   }
   if (path === "/_admin/api/mcp/tokens" && req.method === "POST") {
-    const body = await readJsonBodyOrEmpty<{ label?: string; site_slug?: string; expires_in_days?: number }>(req);
+    const body = await readJsonBodyOrEmpty<{ label?: string; site_slug?: string; expires_in_days?: number; confirm_password?: string }>(req);
     const label = body.label?.trim();
     if (!label) return json({ error: "Label is required" }, 400);
+    // A token is lasting file access that outlives the session: password first.
+    const denied = await stepUp(body.confirm_password);
+    if (denied) return denied;
     const token = createMcpToken(label, body.site_slug || null, body.expires_in_days || null);
     audit("mcp_token_created", `${label}${body.site_slug ? ` (${body.site_slug})` : ""}`);
     return json({ token });
@@ -1369,7 +1372,10 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   }
   if (siteDelegateMatch && req.method === "POST") {
     const slug = siteDelegateMatch[1];
-    const body = await readJsonBodyOrEmpty<{ label?: string; password?: string; expires_in_days?: number | null }>(req);
+    const body = await readJsonBodyOrEmpty<{ label?: string; password?: string; expires_in_days?: number | null; confirm_password?: string }>(req);
+    // A delegate is a standing credential for this site's MCP: password first.
+    const denied = await stepUp(body.confirm_password);
+    if (denied) return denied;
     try {
       const result = await createSiteDelegate({
         siteSlug: slug,
@@ -1428,7 +1434,10 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   if (path === "/_admin/api/users" && req.method === "POST") {
     const body = await readJsonBodyOrEmpty<{ username?: string; password?: string; sites?: string[]; is_admin?: boolean; must_change_password?: boolean; confirm_password?: string }>(req);
     const makeAdmin = body.is_admin === true;
-    if (makeAdmin) {
+    // Every new account is a way back in, so creating one — administrator or
+    // site user — needs the acting admin's password. A hijacked session (e.g.
+    // a hosted site's script riding an admin's cookie) can't mint one.
+    {
       const denied = await stepUp(body.confirm_password);
       if (denied) return denied;
     }
@@ -1455,8 +1464,15 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     if (id === principal.userId && changesRole) {
       return json({ error: "Use another administrator account to change your own role" }, 400);
     }
-    // Step-up when the target is (or becomes) an administrator.
-    const sensitive = target.isAdmin || body.is_admin === true;
+    // Step-up when the target is (or becomes) an administrator, and for any
+    // change that could hand someone lasting access: setting a password,
+    // granting sites, or stripping 2FA/passkeys. Only removing sites or
+    // toggling "must change password" goes through without it.
+    const currentSites = getUserSiteSlugs(id);
+    const addsSites = Array.isArray(body.sites) && body.sites.some(slug => !currentSites.includes(slug));
+    const sensitive = target.isAdmin || body.is_admin === true || addsSites ||
+      (typeof body.password === "string" && body.password.length > 0) ||
+      body.disable_totp === true || body.remove_passkeys === true;
     if (sensitive) {
       const denied = await stepUp(body.confirm_password);
       if (denied) return denied;

@@ -90,7 +90,7 @@ describe("must change password", () => {
   test("admin API: create with the flag, sign-in reports it, everything but change-password is closed", async () => {
     const root = await createAdminUser("root", PW, { isAdmin: true });
     createBlankSite("docs", "Docs");
-    const created = await asUser(root, "POST", "/_admin/api/users", { username: "newbie", password: PW, is_admin: false, sites: ["docs"], must_change_password: true });
+    const created = await asUser(root, "POST", "/_admin/api/users", { username: "newbie", password: PW, is_admin: false, sites: ["docs"], must_change_password: true, confirm_password: PW });
     expect(created.status).toBe(200);
     const newbie = getUserByUsername("newbie")!;
     expect(newbie.mustChangePassword).toBe(true);
@@ -144,13 +144,13 @@ describe("must change password", () => {
     const editorId = await createAdminUser("editor", PW, { sites: [] });
     const { sessionToken } = createSession(IP, editorId);
 
-    const reset = await asUser(root, "PUT", `/_admin/api/users/${editorId}`, { password: "temp-pass-word-2", must_change_password: true });
+    const reset = await asUser(root, "PUT", `/_admin/api/users/${editorId}`, { password: "temp-pass-word-2", must_change_password: true, confirm_password: PW });
     expect(reset.status).toBe(200);
     expect(getUser(editorId)?.mustChangePassword).toBe(true);
     expect(validateSession(sessionToken, IP)).toBe(false); // signed out everywhere
 
     // A plain reset without the flag is a normal password, no forced change.
-    const plain = await asUser(root, "PUT", `/_admin/api/users/${editorId}`, { password: "chosen-for-them-3" });
+    const plain = await asUser(root, "PUT", `/_admin/api/users/${editorId}`, { password: "chosen-for-them-3", confirm_password: PW });
     expect(plain.status).toBe(200);
     expect(getUser(editorId)?.mustChangePassword).toBe(false);
 

@@ -131,8 +131,11 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () 
 // pruned, or the account was removed). Rather than leaving the page half-alive
 // with every action failing, drop straight back to the sign-in screen once.
 let sessionLostShown = false;
-function handleSessionLost(res, path) {
+// `data` is the parsed error body: a wrong password at a step-up prompt is
+// also a 401, but the session is fine — don't bounce to the sign-in screen.
+function handleSessionLost(res, path, data) {
   if (res.status !== 401 || path === "/auth-check" || path === "/login" || path.startsWith("/login/")) return false;
+  if (data && data.error === "Incorrect password") return false;
   if (!sessionLostShown) {
     sessionLostShown = true;
     csrfToken = null;
@@ -153,7 +156,7 @@ async function api(path, opts = {}) {
   const res = await fetch(API + path, { ...opts, headers });
   const data = await res.json();
   if (!res.ok) {
-    if (handleSessionLost(res, path)) throw new Error("Session ended — please sign in again");
+    if (handleSessionLost(res, path, data)) throw new Error("Session ended — please sign in again");
     throw new Error(data.error || "Request failed");
   }
   // Capture CSRF token from responses that provide one
@@ -167,7 +170,7 @@ async function apiForm(path, formData) {
   const res = await fetch(API + path, { method: "POST", body: formData, headers });
   const data = await res.json();
   if (!res.ok) {
-    if (handleSessionLost(res, path)) throw new Error("Session ended — please sign in again");
+    if (handleSessionLost(res, path, data)) throw new Error("Session ended — please sign in again");
     throw new Error(data.error || "Upload failed");
   }
   return data;
@@ -821,10 +824,9 @@ function openPasswordResetModal(u, onDone) {
         <label style="display:flex;align-items:center;gap:6px;font-weight:normal;margin:10px 0 0;flex-direction:row">
           <input type="checkbox" id="pwreset-must-change" checked style="width:auto;margin:0"> Require a new password at next sign-in
         </label>
-        ${u.is_admin ? `
-        <label style="margin-top:12px">Your password <small>Required because this is an administrator account.</small>
+        <label style="margin-top:12px">Your password <small>Required to set someone's password.</small>
           <input type="password" id="pwreset-confirm" autocomplete="current-password" required>
-        </label>` : ""}
+        </label>
         <div class="modal-actions" style="margin-top:14px;gap:8px">
           <button type="button" class="btn btn-ghost close-modal">Cancel</button>
           <button type="submit" class="btn btn-primary">Reset password</button>
@@ -846,7 +848,7 @@ function openPasswordResetModal(u, onDone) {
     const password = pwEl.value;
     const mustChange = modal.querySelector("#pwreset-must-change").checked;
     const body = { password, must_change_password: mustChange };
-    if (u.is_admin) body.confirm_password = modal.querySelector("#pwreset-confirm").value;
+    body.confirm_password = modal.querySelector("#pwreset-confirm").value;
     try {
       await api(`/users/${u.id}`, { method: "PUT", body: JSON.stringify(body) });
       close();
@@ -932,7 +934,14 @@ function renderUsersList(users) {
 
     row.querySelector('[data-act="save-sites"]')?.addEventListener("click", () => {
       const slugs = Array.from(sitesBox.querySelectorAll('input:checked')).map(i => i.value);
-      put({ sites: slugs });
+      const body = { sites: slugs };
+      // Granting access needs your password; only removing it doesn't.
+      if (slugs.some(slug => !u.sites.includes(slug))) {
+        const confirm_password = confirmPasswordPrompt(`Give "${u.username}" access to the newly selected sites?`);
+        if (!confirm_password) return;
+        body.confirm_password = confirm_password;
+      }
+      put(body);
     });
     row.querySelector('[data-act="reset"]').addEventListener("click", () => {
       openPasswordResetModal(u, () => loadUsers());
@@ -952,21 +961,17 @@ function renderUsersList(users) {
     row.querySelector('[data-act="disable-totp"]').addEventListener("click", () => {
       if (!confirm(`Disable two-factor authentication for "${u.username}"? They should re-enable it once they can sign in.`)) return;
       const body = { disable_totp: true };
-      if (u.is_admin) {
-        const confirm_password = confirmPasswordPrompt(`"${u.username}" is an administrator.`);
-        if (!confirm_password) return;
-        body.confirm_password = confirm_password;
-      }
+      const confirm_password = confirmPasswordPrompt(`Turn off 2FA for "${u.username}".`);
+      if (!confirm_password) return;
+      body.confirm_password = confirm_password;
       put(body);
     });
     row.querySelector('[data-act="remove-passkeys"]').addEventListener("click", () => {
       if (!confirm(`Remove all passkeys registered by "${u.username}"?`)) return;
       const body = { remove_passkeys: true };
-      if (u.is_admin) {
-        const confirm_password = confirmPasswordPrompt(`"${u.username}" is an administrator.`);
-        if (!confirm_password) return;
-        body.confirm_password = confirm_password;
-      }
+      const confirm_password = confirmPasswordPrompt(`Remove the passkeys of "${u.username}".`);
+      if (!confirm_password) return;
+      body.confirm_password = confirm_password;
       put(body);
     });
     row.querySelector('[data-act="delete"]')?.addEventListener("click", async () => {
@@ -1006,11 +1011,11 @@ function bindUserAddForm() {
     const sites = is_admin ? [] : pickedSlugs("user-new-sites");
     const must_change_password = mustChangeBox.checked;
     const body = { username, password, is_admin, sites, must_change_password };
-    if (is_admin) {
-      const confirm_password = confirmPasswordPrompt(`Create administrator "${username}" with access to everything?`);
-      if (!confirm_password) return;
-      body.confirm_password = confirm_password;
-    }
+    const confirm_password = confirmPasswordPrompt(is_admin
+      ? `Create administrator "${username}" with access to everything?`
+      : `Create site user "${username}"?`);
+    if (!confirm_password) return;
+    body.confirm_password = confirm_password;
     try {
       await api("/users", { method: "POST", body: JSON.stringify(body) });
       form.reset();
@@ -1914,10 +1919,12 @@ async function loadMcpTokens() {
       const siteSlug = document.getElementById("mcp-token-scope").value || undefined;
       const expiresVal = document.getElementById("mcp-token-expires").value;
       const expiresInDays = expiresVal ? parseInt(expiresVal) : undefined;
+      const confirm_password = confirmPasswordPrompt(`Create MCP token "${label}" (${siteSlug ? `site ${siteSlug}` : "every site"})?`);
+      if (!confirm_password) return;
       try {
         const { token } = await api("/mcp/tokens", {
           method: "POST",
-          body: JSON.stringify({ label, site_slug: siteSlug, expires_in_days: expiresInDays }),
+          body: JSON.stringify({ label, site_slug: siteSlug, expires_in_days: expiresInDays, confirm_password }),
         });
         showMcpToken(token, label);
         loadMcpTokens();
@@ -2334,7 +2341,7 @@ async function loadMcpAudit() {
         headers: importHeaders,
       });
       const importData = await importRes.json();
-      if (!importRes.ok) { if (handleSessionLost(importRes, "/config/import")) throw new Error("Session ended — please sign in again"); throw new Error(importData.error || "Import failed"); }
+      if (!importRes.ok) { if (handleSessionLost(importRes, "/config/import", importData)) throw new Error("Session ended — please sign in again"); throw new Error(importData.error || "Import failed"); }
 
       fillEl.style.animation = "none";
       fillEl.style.width = "100%";
@@ -3989,10 +3996,12 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
     errEl.textContent = "";
     if (!label) { errEl.textContent = "Label is required"; return; }
     if (!password || password.length < 8) { errEl.textContent = "Password must be at least 8 characters"; return; }
+    const confirm_password = confirmPasswordPrompt(`Create delegate "${label}" with MCP access to ${slug}?`);
+    if (!confirm_password) return;
     try {
       await api(`/sites/${slug}/delegates`, {
         method: "POST",
-        body: JSON.stringify({ label, password, expires_in_days: expiresInDays }),
+        body: JSON.stringify({ label, password, expires_in_days: expiresInDays, confirm_password }),
       });
       // Show shareable instructions, then refresh the list
       const origin = window.location.origin;
@@ -4136,9 +4145,16 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
         errEl.textContent = "";
         const user = siteUsers.find(u => u.id === parseInt(cb.dataset.grantUser, 10));
         const sites = cb.checked ? Array.from(new Set([...user.sites, slug])) : user.sites.filter(x => x !== slug);
+        const body = { sites };
+        // Granting needs your password; revoking doesn't.
+        if (cb.checked) {
+          const confirm_password = confirmPasswordPrompt(`Give "${user.username}" access to ${slug}?`);
+          if (!confirm_password) { cb.checked = false; return; }
+          body.confirm_password = confirm_password;
+        }
         cb.disabled = true;
         try {
-          await api(`/users/${user.id}`, { method: "PUT", body: JSON.stringify({ sites }) });
+          await api(`/users/${user.id}`, { method: "PUT", body: JSON.stringify(body) });
           user.sites = sites;
         } catch (err) {
           cb.checked = !cb.checked;
@@ -4163,8 +4179,10 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
     const mustChange = mustChangeBox.checked;
     if (!username) { errEl.textContent = "Username is required"; return; }
     if (password.length < 8) { errEl.textContent = "Password must be at least 8 characters"; return; }
+    const confirm_password = confirmPasswordPrompt(`Create site user "${username}" with access to ${slug}?`);
+    if (!confirm_password) return;
     try {
-      await api("/users", { method: "POST", body: JSON.stringify({ username, password, is_admin: false, sites: [slug], must_change_password: mustChange }) });
+      await api("/users", { method: "POST", body: JSON.stringify({ username, password, is_admin: false, sites: [slug], must_change_password: mustChange, confirm_password }) });
       nameEl.value = ""; pwEl.value = ""; pwEl.type = "password";
       const reveal = pwEl.closest(".pw-wrap")?.querySelector(".pw-reveal input");
       if (reveal) reveal.checked = false;

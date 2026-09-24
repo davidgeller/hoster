@@ -178,7 +178,11 @@ Route your domain to the tunnel:
 
 ```bash
 cloudflared tunnel route dns hoster yourdomain.com
+# Recommended: a separate hostname for the admin panel (see "Admin Hostname")
+cloudflared tunnel route dns hoster admin.yourdomain.com
 ```
+
+Add `admin.yourdomain.com` to the tunnel's ingress rules too, pointing at the same `http://localhost:3500` service.
 
 This creates a CNAME record in Cloudflare DNS pointing your domain to the tunnel.
 
@@ -249,6 +253,8 @@ sudo journalctl -u hoster -f
 
 Open `https://yourdomain.com/_admin` in your browser. On first visit, you'll be prompted to create the first administrator account — a username (defaults to `admin`) and a password of at least 8 characters. You can add more administrators and site users later under **Settings → Users**.
 
+Next, if you created `admin.yourdomain.com`, open Settings → Security → **Admin Hostname** and move the admin panel there. That keeps every hosted site out of the admin panel's browser origin — see [Hosting content from people you don't fully trust](#hosting-content-from-people-you-dont-fully-trust).
+
 ## Setup Guide — VPS with a public IP
 
 If your machine has a publicly routable IP (DigitalOcean, Linode, Hetzner, EC2, …), you don't need Cloudflare Tunnel. Three popular front-ends:
@@ -258,7 +264,7 @@ If your machine has a publicly routable IP (DigitalOcean, Linode, Hetzner, EC2, 
 The simplest non-tunnel path. Cloudflare still terminates TLS at the edge and proxies HTTP to your origin.
 
 1. Open `:80` on the droplet's firewall.
-2. In Cloudflare DNS, create an `A` record pointing `yourdomain.com` at the droplet's public IP. Keep it proxied (orange cloud).
+2. In Cloudflare DNS, create an `A` record pointing `yourdomain.com` at the droplet's public IP. Keep it proxied (orange cloud). Add a second proxied record for `admin.yourdomain.com` pointing at the same IP. You'll turn it on as the admin panel's own hostname after setup (see [Admin Hostname](#admin-hostname-recommended)).
 3. Set SSL/TLS mode to **Flexible** (HTTPS to browser, HTTP origin) or **Full** if you also run TLS on the origin.
 4. Hoster listens on `:3500`. Either run a tiny proxy on `:80` (Caddy/nginx, see Option B/C) or change Hoster's port to `80` directly:
 
@@ -481,6 +487,8 @@ When the landing page is a hosted site, a slim **admin footer bar** is added ove
 
 ### Admin Hostname (recommended)
 
+*Why this matters, and what else to do: see [Hosting content from people you don't fully trust](#hosting-content-from-people-you-dont-fully-trust).*
+
 Sites served at `/<slug>/` share one browser origin with everything else on their hostname. If the admin panel lives on that hostname too, a script on **any** of those sites can call the admin API as a signed-in administrator. Browser cookie and CSRF protections can't stop same-origin script. So anyone who can put a file on a site (a site user, an MCP delegate, an AI tool) could take over an administrator who visits that site while signed in.
 
 Give the admin panel its own hostname to close that off:
@@ -498,6 +506,8 @@ Afterwards:
 - To undo it from the server shell, run `hoster admin-host --clear` and then `sudo systemctl restart hoster`. `hoster admin-host` shows the current setting.
 
 Custom domains (host aliases) were already separate origins and never serve the admin panel.
+
+Whether or not you set an admin hostname, the admin panel asks for your password before anything that would create lasting access: creating an MCP token, an MCP delegate, or any account; granting someone additional sites; or setting a site user's password or removing their 2FA/passkeys. So a hijacked session can't set up a way back in for later.
 
 ### Host Aliases (Custom Domains)
 
@@ -926,13 +936,32 @@ Runtime directories (created on the Pi, not in git):
 
 Hoster is designed to be safe for public exposure. Since the source code is public, security relies on defense in depth rather than obscurity.
 
+### Hosting content from people you don't fully trust
+
+**Read this if anyone besides you can put files on your sites.** That includes site users, MCP delegates, AI tools with write access, and any third-party script your sites load.
+
+**The risk.** A browser keeps pages apart by *origin*: scheme plus hostname plus port. Every site served at `https://hoster.example.com/<slug>/` shares one origin, and out of the box the admin panel at `https://hoster.example.com/_admin` shares it too. So a script on **any** of those sites can call the admin API using a signed-in administrator's session and read the answers. Cookie flags, CSRF tokens, Cloudflare Access, and Referer checks can't stop this, because to the browser the script *is* the admin panel. **No password is needed.** Anyone who can add a file to one site can take over an administrator who opens that site while signed in. They can deploy or delete sites, change settings, and read logs and access codes. For the same reason, sites on that hostname can read each other's pages, including pages you unlocked with an access code, and act inside a repository site you're signed in to.
+
+**Who's affected.** Only sites served at `/<slug>/` on a shared hostname. A site on its own custom domain (host alias) is a separate origin and can't do any of this.
+
+**To fully mitigate it:**
+
+1. **Give the admin panel its own hostname** — see [Admin Hostname](#admin-hostname-recommended). This is the fix for administrator takeover. The admin panel and the OAuth consent screen then live on an origin that serves no hosted content, and your MCP connectors keep working.
+2. **Put anything you don't fully trust on its own custom domain** — see [Host Aliases](#host-aliases-custom-domains). An admin hostname doesn't separate `/<slug>/` sites from *each other*. A site other people can edit should get its own domain, and so should a repository or a site with access-code-protected pages that must stay private from the other sites. That way it can't read them and they can't read it.
+3. **Keep the origin reachable only through Cloudflare** (or your reverse proxy). Hoster trusts `cf-connecting-ip` / `X-Real-IP` for client IPs. If the server is reachable directly, those headers can be forged to dodge IP blocks and lockouts.
+4. **Until step 1 is done,** use a separate browser profile for admin work, so pages you browse normally never carry an admin session.
+
+**Already in place regardless of the steps above:** the admin panel asks for your password before anything that creates lasting access — a new account, MCP token, or MCP delegate; granting someone more sites; resetting a site user's password or removing their 2FA/passkeys. A hijacked session can do damage while it lasts, but it can't leave itself a way back in.
+
+If you're the only person who ever puts files on your sites and they load no third-party scripts, the practical risk is low. Steps 1 and 3 are still worth doing. The full analysis is in `SECURITY-AUDIT.md`.
+
 ### Accounts & Roles
 
 Since v1.5 there is no special, anonymous administrator. Every principal is a row in one `admin_users` table with an `is_admin` flag, and every login names an account. Design decisions and why:
 
 - **Two roles, one code path.** Administrators see everything; site users see only their assigned sites. Authorization is decided once per request from the session's account, and every per-site route checks the slug against that account's grants. There is no "owner" tier — administrators are peers — so accountability comes from the audit log, which records the acting username on every entry.
 - **The last administrator is protected.** It can be neither demoted nor deleted, enforced in the account module itself so the rule holds for every caller. Nobody can change their own role or delete their own account.
-- **Step-up for anything that touches an administrator.** Creating an administrator, granting or revoking admin rights, resetting an administrator's password, disabling their 2FA or removing their passkeys, and deleting an administrator all require the acting admin's own password, rate-limited through the same lockout as login. A briefly hijacked admin session therefore cannot mint or capture a peer account and keep access after the session ends. Changes to site users carry no such risk and need no step-up.
+- **Step-up for anything that touches an administrator.** Creating an administrator, granting or revoking admin rights, resetting an administrator's password, disabling their 2FA or removing their passkeys, and deleting an administrator all require the acting admin's own password, rate-limited through the same lockout as login. Since v2.7 the same goes for anything else that creates lasting access: creating any account, MCP token, or MCP delegate; granting a user additional sites; and setting a site user's password or removing their 2FA/passkeys. A briefly hijacked admin session therefore cannot leave itself a way back in once the session ends. Revoking access and toggling "must change password" need no password.
 - **No username enumeration.** A login for a username that doesn't exist still performs a full Argon2id verification against a random dummy hash, and the OAuth consent screen returns the same error for a wrong account password and a wrong delegate password.
 - **Deleting an account is complete.** Its sessions, passkeys, pending 2FA tokens, and in-flight WebAuthn challenges go with it, and any session whose account has disappeared is rejected on its next request.
 - **Per-account 2FA and passkeys.** TOTP secrets and recovery codes live on the account; a pending 2FA token is bound to the account (and IP) it was issued for, so one user's recovery code can never complete another user's login. A passkey credential carries its owner, so passkey sign-in never asks for a username and can never be redeemed for a different account.
