@@ -45,6 +45,9 @@ const DEFAULTS: ShieldConfig = {
 };
 
 const TRAP_WINDOW_MS = 60 * 60_000;
+// Upper bound on IPs tracked per counter, so a distributed flood can't grow
+// memory without limit.
+const MAX_TRACKED = 20_000;
 
 let configCache: ShieldConfig | null = null;
 
@@ -159,8 +162,10 @@ function pushHit(map: Map<string, number[]>, ip: string, windowMs: number): numb
   const list = (map.get(ip) || []).filter(t => now - t < windowMs);
   list.push(now);
   map.set(ip, list);
-  if (map.size > 20_000) {
+  if (map.size > MAX_TRACKED) {
     for (const [k, v] of map) if (!v.some(t => now - t < windowMs)) map.delete(k);
+    // Still over the cap (a wide distributed flood): forget the oldest.
+    for (const k of map.keys()) { if (map.size <= MAX_TRACKED) break; map.delete(k); }
   }
   return list.length;
 }
@@ -224,8 +229,9 @@ export function checkRateLimit(ip: string): number {
   if (!w || now - w.start >= 60_000) {
     w = { start: now, count: 0 };
     rateWindows.set(ip, w);
-    if (rateWindows.size > 20_000) {
+    if (rateWindows.size > MAX_TRACKED) {
       for (const [k, v] of rateWindows) if (now - v.start >= 60_000) rateWindows.delete(k);
+      for (const k of rateWindows.keys()) { if (rateWindows.size <= MAX_TRACKED) break; rateWindows.delete(k); }
     }
   }
   w.count++;

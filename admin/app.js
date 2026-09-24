@@ -3795,7 +3795,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
             </tr>`).join("")}</tbody></table>` : ""}
         <div class="protect-add-code">
           <input type="text" placeholder="Name, e.g. Board members" maxlength="80" data-new-name="${r.id}">
-          <input type="text" placeholder="Code" value="${esc(suggested_code)}" maxlength="64" pattern="[A-Za-z0-9]{4,64}" data-new-code="${r.id}" class="text-mono">
+          <input type="text" placeholder="Code" value="${esc(suggested_code)}" maxlength="64" pattern="[A-Za-z0-9]{6,64}" data-new-code="${r.id}" class="text-mono">
           <button type="button" class="btn btn-sm" data-add-code="${r.id}">Add code</button>
         </div>
         <div class="form-error" data-rule-error="${r.id}"></div>
@@ -5245,10 +5245,12 @@ function renderRankedList(containerId, data, labelKey, valueKey, truncateLabel =
 }
 
 // --- Utility ---
+// HTML-escape for text *and* attribute contexts. Quotes must be escaped too:
+// values such as access-code names (editable by site users) and client IPs
+// (from request headers) are interpolated into quoted attributes, where an
+// unescaped " would let them break out and inject handlers.
 function esc(s) {
-  const d = document.createElement("div");
-  d.textContent = s;
-  return d.innerHTML;
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
 // Encode a value as a JavaScript string literal safe to embed inside an

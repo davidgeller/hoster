@@ -162,6 +162,17 @@ export function getHealth() {
   if (database.size_bytes > 0 && database.reclaimable_bytes / database.size_bytes > 0.3 && database.reclaimable_bytes > 32 * 1024 * 1024) {
     warnings.push({ level: "warn", message: "Over 30% of the database file is free space; compacting would reclaim it." });
   }
+  // Every per-IP defense (bot shield, login lockouts, auto-block) keys on the
+  // client IP. Without Cloudflare headers or X-Real-IP from a proxy, every
+  // request is "unknown" and those defenses quietly stand down.
+  const ipSeen = db.query(`
+    SELECT COUNT(*) AS n, SUM(ip = 'unknown' OR ip IS NULL) AS unknown
+    FROM requests WHERE created_at > datetime('now', '-1 day') AND path NOT LIKE '/_admin%'
+  `).get() as { n: number; unknown: number | null };
+  const unknownIps = { requests: ipSeen.n, unknown: ipSeen.unknown || 0 };
+  if (unknownIps.requests >= 20 && unknownIps.unknown / unknownIps.requests > 0.5) {
+    warnings.push({ level: "warn", message: "Most requests in the last day arrived without a client IP, so bot protection, rate limits, and sign-in lockouts can't tell visitors apart. Serve Hoster through Cloudflare, or have your reverse proxy set X-Real-IP." });
+  }
   if (sitesDisk && disk && sitesDisk.total_bytes !== disk.total_bytes && sitesDisk.used_pct >= 85) {
     warnings.push({ level: sitesDisk.used_pct >= 95 ? "critical" : "warn", message: `The volume holding sites is ${sitesDisk.used_pct}% full.` });
   }
@@ -174,6 +185,7 @@ export function getHealth() {
     storage,
     host,
     process: proc,
+    client_ips: unknownIps,
     warnings,
   };
 }

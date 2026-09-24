@@ -430,7 +430,7 @@ Every change is made to the working version only, is audit-logged with your user
 
 ### Protected Paths (Access Codes)
 
-Site Settings → **Protection** puts a code in front of the whole site (`/`) or a folder (`/members/`, `/docs/drafts/`). Each protected path takes any number of codes, each with a friendly name (for example "Board members" or "Contractor – Acme"). Codes are 4–64 letters or digits, aren't case-sensitive, and can be generated for you.
+Site Settings → **Protection** puts a code in front of the whole site (`/`) or a folder (`/members/`, `/docs/drafts/`). Each protected path takes any number of codes, each with a friendly name (for example "Board members" or "Contractor – Acme"). Codes are 6–64 letters or digits, aren't case-sensitive, and can be generated for you.
 
 - A visitor without a pass sees a small "enter your access code" page (non-page files such as images get a plain 401). A correct code sets a signed, HttpOnly cookie on that browser for the length you picked (1 day to 1 year).
 - Every request made under a code is logged with its name — look for the 🔑 chip on the Logs page. Each code also shows how many times it was used and when it was last seen.
@@ -439,6 +439,8 @@ Site Settings → **Protection** puts a code in front of the whole site (`/`) or
 - Ten wrong codes from one IP in 15 minutes pauses attempts from it.
 - Protected responses are sent `Cache-Control: private` and `X-Robots-Tag: noindex`, so Cloudflare never caches them for other visitors and search engines don't index them. Link previews won't show protected pages.
 - Codes are stored so admins can look them up again — this is simple access control for sharing, not account security. Repository sites use their own sign-in instead.
+- Protecting a folder whose files were already public? Purge that path in Cloudflare too — copies it cached earlier don't expire on their own.
+- Sites served at `/<slug>/` on the admin's hostname share one browser origin with each other and with `/_admin`, so a script on one of them can read another's unlocked pages (and act as a signed-in administrator). Give sites you don't fully trust their own custom domain. See `SECURITY-AUDIT.md`.
 
 ### Bot Protection
 

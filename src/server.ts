@@ -97,6 +97,22 @@ function addSiteHeaders(res: Response): Response {
   return res;
 }
 
+// Read a request body as text, giving up (null) once it passes `limit` bytes.
+async function readBodyCapped(req: Request, limit: number): Promise<string | null> {
+  if (!req.body) return "";
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) { try { await reader.cancel(); } catch (_) {} return null; }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 // Responses behind an access code must never land in a shared cache
 // (Cloudflare would otherwise hand content-hashed assets to anyone) or a
 // search index.
@@ -491,13 +507,19 @@ export function createServer(port: number) {
         if (!candidateSite || candidateSite.site_type !== "repository") {
           const probe = candidateSite ? "/" + (hostAliasSlug ? parts : parts.slice(1)).join("/") : path;
           if (isTrapPath(probe) && !(candidateSite && resolveSitePath(candidateSlug, reqPath, { spaFallback: false }))) {
-            status = 404;
             flag = "trap";
             if (candidateSite) siteSlug = candidateSlug;
             recordTrapHit(meta.ip, path);
-            const res = addSiteHeaders(new Response("Not found", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } }));
-            logReq(res);
-            return res;
+            // Behind an access code, answer with the gate like any other
+            // path there: a bare 404 here (vs. the gate for files that do
+            // exist) would tell a visitor without the code which files exist.
+            const guarded = candidateSite && candidateSite.active ? findRule(candidateSlug, probe) : null;
+            if (!guarded || checkPass(req, guarded)) {
+              status = 404;
+              const res = addSiteHeaders(new Response("Not found", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } }));
+              logReq(res);
+              return res;
+            }
           }
         }
 
@@ -645,9 +667,14 @@ export function createServer(port: number) {
 
       async function handleUnlock(): Promise<Response> {
         if (req.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { Allow: "POST" } });
-        if (parseInt(req.headers.get("content-length") || "0", 10) > 8192) return new Response("Request too large", { status: 413 });
-        let form: FormData;
-        try { form = await req.formData(); } catch { return new Response("Bad request", { status: 400 }); }
+        // Read at most 8 KB whatever the client declares (or doesn't): the
+        // server-wide body cap is sized for multi-GB uploads.
+        if (parseInt(req.headers.get("content-length") || "0", 10) > 8192) {
+          return new Response("Request too large", { status: 413, headers: { Connection: "close" } });
+        }
+        const raw = await readBodyCapped(req, 8192);
+        if (raw === null) return new Response("Request too large", { status: 413, headers: { Connection: "close" } });
+        const form = new URLSearchParams(raw);
         const returnTo = safeReturnPath(String(form.get("return") || "/"));
         const submitted = String(form.get("code") || "");
         // Which site, and which path inside it, is the visitor trying to reach?
@@ -671,7 +698,12 @@ export function createServer(port: number) {
           const body = gatePage({ siteName: site.name, label: rule.label, slug: site.slug, returnTo, error });
           return markProtected(new Response(body, { status: code, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } }));
         };
-        if (isUnlockThrottled(meta.ip)) return page("Too many incorrect codes. Try again in 15 minutes.", 429);
+        if (isUnlockThrottled(meta.ip)) {
+          // Still guessing after the throttle kicked in: count it toward a
+          // shield block, like a scanner probe.
+          recordTrapHit(meta.ip, path);
+          return page("Too many incorrect codes. Try again in 15 minutes.", 429);
+        }
         const hit = submitted ? matchCode(rule, submitted) : null;
         if (!hit) {
           recordUnlockFailure(meta.ip);
@@ -681,7 +713,7 @@ export function createServer(port: number) {
         accessCode = hit.name;
         return new Response(null, {
           status: 303,
-          headers: { Location: returnTo, "Set-Cookie": passCookie(rule, hit), "Cache-Control": "no-store" },
+          headers: { Location: returnTo, "Set-Cookie": passCookie(rule, hit, hostAliasSlug ? "/" : `/${retParts[0]}/`), "Cache-Control": "no-store" },
         });
       }
 

@@ -65,6 +65,17 @@ describe("health report", () => {
   });
 });
 
+describe("client IP detection", () => {
+  test("warns when most traffic has no client IP", () => {
+    for (let i = 0; i < 30; i++) db.run("INSERT INTO requests (path, status, ip) VALUES ('/ipcheck', 200, 'unknown')");
+    const h = getHealth();
+    if (h.client_ips.unknown / h.client_ips.requests > 0.5) {
+      expect(h.warnings.some(w => /client IP/.test(w.message))).toBe(true);
+    }
+    db.run("DELETE FROM requests WHERE path = '/ipcheck'");
+  });
+});
+
 describe("maintenance", () => {
   test("prune deletes only old request rows", () => {
     db.run("INSERT INTO requests (path, status, ip, created_at) VALUES ('/prune-old', 200, 'x', datetime('now', '-200 days'))");

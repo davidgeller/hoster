@@ -6,8 +6,10 @@ import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import db from "../src/db";
 import { SITES_DIR, createBlankSite, deleteSite, addHostAlias, invalidateHostAliasCache } from "../src/sites";
+import { isIpBlocked } from "../src/analytics";
+import { resetShieldCounters } from "../src/shield";
 import {
-  normalizePrefix, createRule, updateRule, deleteRule, addCode, updateCode, deleteCode,
+  safeReturnPath, normalizePrefix, createRule, updateRule, deleteRule, addCode, updateCode, deleteCode,
   listRules, findRule, clearUnlockFailures, generateCode,
 } from "../src/protect";
 import { createServer } from "../src/server";
@@ -64,7 +66,8 @@ describe("rule and code validation", () => {
 
   test("codes must be alphanumeric, unique per rule (case-insensitive)", () => {
     const rule = createRule(SLUG, { path_prefix: "/tmp-rule/" });
-    expect(() => addCode(SLUG, rule.id, { name: "x", code: "ab" })).toThrow(/4–64/);
+    expect(() => addCode(SLUG, rule.id, { name: "x", code: "ab" })).toThrow(/6–64/);
+    expect(() => addCode(SLUG, rule.id, { name: "x", code: "abc12" })).toThrow(/6–64/);
     expect(() => addCode(SLUG, rule.id, { name: "x", code: "abc-123" })).toThrow();
     expect(() => addCode(SLUG, rule.id, { name: "", code: "abcd1234" })).toThrow(/Name/);
     addCode(SLUG, rule.id, { name: "One", code: "Abcd1234" });
@@ -291,3 +294,80 @@ describe("HTTP gate", () => {
     expect((db.query("SELECT COUNT(*) AS n FROM protect_codes WHERE rule_id = ?").get(r.id) as any).n).toBe(0);
   });
 });
+
+describe("security review regressions", () => {
+  let ruleId = 0;
+  beforeAll(() => {
+    const existing = listRules(SLUG).find(r => r.path_prefix === "/members/");
+    ruleId = existing!.id;
+    writeSiteFile("members/backup.sql", "-- real dump");
+  });
+
+  test("return paths can't smuggle a protocol-relative redirect", () => {
+    for (const evil of ["/\t/evil.example", "/\n/evil.example", "/ /evil.example", "/\\evil.example", "//evil.example", "https://evil.example", "/ok\u00a0x"]) {
+      expect(safeReturnPath(evil)).toBe("/");
+    }
+    expect(safeReturnPath("/site/members/?a=1&b=%20")).toBe("/site/members/?a=1&b=%20");
+  });
+
+  test("percent-encoded, dot-segment, and backslash variants never reach protected content", async () => {
+    for (const p of [`/${SLUG}/%6Dembers/`, `/${SLUG}/./members/`, `/${SLUG}/x/../members/`, `/${SLUG}/%2e/members/`, `/${SLUG}/members%2F`, `/${SLUG}\\members/`, `/${SLUG}/members;x/`]) {
+      const res = await fetch(`${base}${p}`, { redirect: "manual" });
+      expect(await res.text()).not.toContain("members only");
+      expect(res.status === 401 || res.status === 404).toBe(true);
+    }
+  });
+
+  test("unlock bodies are capped whether or not a length is declared", async () => {
+    clearUnlockFailures();
+    const stream = (text: string) => new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(text)); c.close(); } });
+    const ok = await fetch(`${base}/_hoster/unlock`, {
+      method: "POST", redirect: "manual", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: stream(`site=${SLUG}&return=/${SLUG}/members/&code=OPEN4ME`),
+    });
+    expect(ok.status).toBe(303);
+    const big = await fetch(`${base}/_hoster/unlock`, {
+      method: "POST", redirect: "manual", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: stream("code=" + "A".repeat(20_000)),
+    });
+    expect(big.status).toBe(413);
+  });
+
+  test("the pass cookie is scoped to the site's path on the canonical host", async () => {
+    clearUnlockFailures();
+    const res = await unlock("OPEN4ME", `/${SLUG}/members/`);
+    expect(res.headers.get("set-cookie")).toContain(`Path=/${SLUG}/;`);
+  });
+
+  test("scanner paths under a protected folder get the gate, not a revealing 404", async () => {
+    resetShieldCounters();
+    const ip = { "X-Real-IP": "203.0.113.200" };
+    const real = await fetch(`${base}/${SLUG}/members/backup.sql`, { headers: { ...ip, Accept: "text/html" } });
+    const fake = await fetch(`${base}/${SLUG}/members/other.sql`, { headers: { ...ip, Accept: "text/html" } });
+    expect(real.status).toBe(401);
+    expect(fake.status).toBe(401);
+    expect(await real.text()).not.toContain("real dump");
+    // With a pass, a missing trap path is a plain 404 and a real file is served.
+    clearUnlockFailures();
+    const cookie = cookieFrom(await unlock("OPEN4ME", `/${SLUG}/members/`));
+    expect((await fetch(`${base}/${SLUG}/members/other.sql`, { headers: { Cookie: cookie } })).status).toBe(404);
+    expect((await fetch(`${base}/${SLUG}/members/backup.sql`, { headers: { Cookie: cookie } })).status).toBe(200);
+    resetShieldCounters();
+  });
+
+  test("guessing past the throttle gets the IP blocked", async () => {
+    clearUnlockFailures();
+    resetShieldCounters();
+    const ip = "203.0.113.201";
+    const post = (code: string) => fetch(`${base}/_hoster/unlock`, {
+      method: "POST", redirect: "manual",
+      body: new URLSearchParams({ site: SLUG, return: `/${SLUG}/members/`, code }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "X-Real-IP": ip },
+    });
+    for (let i = 0; i < 10; i++) await post(`WRONG${i}XX`);
+    for (let i = 0; i < 3; i++) expect((await post("WRONGAGAIN")).status).toBe(429);
+    expect(isIpBlocked(ip)).toBe(true);
+    clearUnlockFailures();
+  });
+});
+

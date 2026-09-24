@@ -60,7 +60,9 @@ export interface ProtectCode {
   use_count: number;
 }
 
-export const CODE_PATTERN = /^[A-Za-z0-9]{4,64}$/;
+// Six characters minimum: with the per-IP throttle (10 misses / 15 min) a
+// 6-character code (2 billion+ combinations) can't be walked from one address.
+export const CODE_PATTERN = /^[A-Za-z0-9]{6,64}$/;
 const MAX_NAME = 80;
 const MAX_LABEL = 120;
 const COOKIE_PREFIX = "hoster_pa_";
@@ -89,7 +91,7 @@ function normalizeName(raw: unknown): string {
 
 function normalizeCode(raw: unknown): string {
   const code = typeof raw === "string" ? raw.trim() : "";
-  if (!CODE_PATTERN.test(code)) throw new Error("Code must be 4–64 letters or digits");
+  if (!CODE_PATTERN.test(code)) throw new Error("Code must be 6–64 letters or digits");
   return code;
 }
 
@@ -201,11 +203,15 @@ export function checkPass(req: Request, rule: IndexedRule): ProtectCode | null {
   return code;
 }
 
-export function passCookie(rule: ProtectRule, code: ProtectCode): string {
+// `path` scopes the cookie: "/" on a custom domain (the whole host is the
+// site), "/<segment>/" on the canonical host so the pass isn't sent along
+// with requests to every other site hosted there.
+export function passCookie(rule: ProtectRule, code: ProtectCode, path = "/"): string {
   const maxAge = Math.max(1, rule.session_days) * 86400;
   const exp = Math.floor(Date.now() / 1000) + maxAge;
   const value = `${code.id}.${exp}.${sign(rule.id, code.id, exp, code.code)}`;
-  return `${cookieName(rule.id)}=${value}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=${maxAge}`;
+  const cookiePath = /^\/[a-z0-9-]+\/$/.test(path) ? path : "/";
+  return `${cookieName(rule.id)}=${value}; Path=${cookiePath}; HttpOnly; SameSite=Lax; Secure; Max-Age=${maxAge}`;
 }
 
 // Constant-time-ish match of a submitted code against the rule's codes
@@ -251,9 +257,11 @@ export function recordUnlockFailure(ip: string): void {
   list.push(Date.now());
   failures.set(ip, list);
   if (failures.size > 10_000) {
-    // Bound memory under a spray of distinct IPs.
+    // Bound memory under a spray of distinct IPs: drop stale entries, then
+    // the oldest ones if the map is still over the cap.
     const cutoff = Date.now() - FAIL_WINDOW_MS;
     for (const [k, v] of failures) if (!v.some(t => t > cutoff)) failures.delete(k);
+    for (const k of failures.keys()) { if (failures.size <= 10_000) break; failures.delete(k); }
   }
 }
 
@@ -299,9 +307,12 @@ ${opts.error ? `<div class="err" role="alert">${esc(opts.error)}</div>` : ""}
 }
 
 // Only same-origin absolute paths may be redirected to after unlocking.
+// Browsers strip tabs/newlines from URLs and treat "\" like "/", so
+// "/\t/evil.example" or "/\\evil.example" would become protocol-relative
+// ("//evil.example"). Allow printable ASCII only, and no leading "//".
 export function safeReturnPath(raw: string | null | undefined): string {
-  if (!raw || typeof raw !== "string") return "/";
-  if (!raw.startsWith("/") || raw.startsWith("//") || raw.includes("\\") || /[\r\n]/.test(raw)) return "/";
+  if (!raw || typeof raw !== "string" || raw.length > 2048) return "/";
+  if (!/^\/[\x21-\x7e]*$/.test(raw) || raw.startsWith("//") || raw.includes("\\")) return "/";
   return raw;
 }
 

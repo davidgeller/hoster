@@ -628,3 +628,58 @@ Moving from one administrator to many introduces two risks that did not exist be
 - A public repository can host `.js`/`.css` that other sites can include cross-origin — the same property any public static host has. Keep repositories that accept untrusted uploads private, or restrict writers.
 - Trash keeps blobs (and counts them against the quota) for 30 days by design; purge early to reclaim space.
 - Pre-existing and out of scope: ZIP site deploys and platform-backup restores still extract whole archives and strip symlinks afterwards. Both are administrator-only, but explicit member filtering (as done for repository restore) would be a worthwhile follow-up.
+
+---
+
+## Review — Protected paths, bot shield, system health, page analytics (2026-09-24, v2.6.0)
+
+**Scope:** `src/protect.ts`, `src/shield.ts`, `src/health.ts`, `src/insights.ts`, their hooks in `src/server.ts`, `src/analytics.ts`, `src/admin-api.ts`, `src/backup.ts`, `src/sites.ts`, and the matching admin UI in `admin/app.js` / `admin/index.html`. Also: how the new features change the platform's overall exposure.
+
+### Model
+
+- **Protected paths** are lightweight access control for sharing, not account security. Codes (6–64 alphanumeric, case-insensitive) are stored readable so admins can re-share them. A correct code earns an HttpOnly, Secure, SameSite=Lax cookie `hoster_pa_<ruleId>` = `codeId.expiry.HMAC-SHA256(secret, rule|code|expiry|codeValue)`. The per-install secret is `config.protect_secret` (32 random bytes). Because the code's value is inside the MAC, editing or deleting a code revokes every pass issued for it on the next request. Rule matching runs on the normalized, lowercased site-relative path, so the longest prefix wins.
+- **The shield** keeps per-IP counters in memory (bounded at 20k IPs each). Only an actual block writes to the database. The admin panel, MCP, OAuth, and discovery paths are never blocked, limited, or counted.
+- **System health and maintenance** endpoints live under `/_admin/api/system/*`, which is on the administrator-only platform-path list.
+- **Insights** queries bind every value and apply the same site scoping as the other analytics endpoints. A site user asking for another site gets a 403.
+
+### Findings fixed during the review
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| P1 | **High** | The admin panel's `esc()` escaped `& < >` but not quotes, yet it feeds quoted attributes throughout `app.js`. New code put attacker-influenced values in attributes. Access-code names are editable by *site users* and were rendered into `data-name="…"` and `title="…"` in an administrator's panel, so a site user could break out of the attribute and run script as the administrator (privilege escalation). Client IPs taken from `X-Real-IP` went into `data-block-ip="…"` on the Logs page, which is exploitable on deployments that don't strip that header. | `esc()` now escapes `"` and `'` as well. That fixes every attribute interpolation in the panel, old and new. |
+| P2 | Medium | Unlock's return-path check blocked `//host` and `\`, but browsers strip tabs and newlines from URLs, so `/<TAB>/evil.example` would redirect off-site (open redirect). | `safeReturnPath` accepts printable ASCII only, rejects a leading `//` and any `\`, and caps the length at 2 KB. |
+| P3 | Medium | `/_hoster/unlock` only checked a *declared* `Content-Length`. A chunked body with no length could be buffered up to the server-wide cap of about 2 GB by an anonymous caller. | The body is read through a streaming reader that gives up after 8 KB (413) whatever the client declares. |
+| P4 | Low | Trap-path checks ran before the access-code gate. Behind a protected folder, a scanner could tell which trap-looking files exist (existing → 401 gate, missing → 404). | Under an active rule without a valid pass, trap paths still count as a strike but are answered with the same gate as everything else. |
+| P5 | Low | Wrong-code guessing was throttled per IP (10 per 15 min) but never fed the shield, so a guesser simply waited out the window. | Every attempt made while throttled counts as a trap strike, so three of them block the IP for the trap-block duration. |
+| P6 | Low | 4-character codes were allowed. | The minimum is now 6 for new and edited codes; generated codes are 8. Existing shorter codes keep working until edited. |
+| P7 | Low | Pass cookies used `Path=/`, so on the canonical host they went along with requests to every hosted site. | On the canonical host the cookie is scoped to `/<site segment>/`. On a custom domain it stays `/`. |
+| P8 | Low | The shield's per-IP maps pruned only stale entries, so a wide distributed flood could grow them without limit. | A hard cap is applied, and the oldest entries are dropped past 20k. The unlock-failure map is capped the same way. |
+| P9 | Info | Every per-IP defense (shield, login lockouts, auto-block) fails open when the client IP is `unknown`, i.e. no Cloudflare headers and no `X-Real-IP`. | The System page now warns when most of the last day's traffic had no client IP. |
+
+Regression tests for P2–P5 and P7 are in `test/protect.test.ts`. Also covered there: percent-encoded (`%6Dembers`), dot-segment, `%2e`, backslash, `;param`, and case variants of a protected path all yield 401/404 without content. Shield, health, and insights have their own suites.
+
+### Verified safe (no change)
+
+- **No path-normalization bypass.** Hoster never percent-decodes the path, and WHATWG URL parsing already resolves `.`/`..`/`%2e` segments. `parts.filter(Boolean)` collapses `//`. Rule matching is case-insensitive, so a case-insensitive filesystem can't be used to dodge a rule.
+- **Existence is hidden.** Every path under a protected prefix gets the gate before any file lookup, and the gate is `Cache-Control: no-store`. Protected responses are `private` (public/immutable is rewritten), so Cloudflare won't store them. They also carry `X-Robots-Tag: noindex`.
+- **Cookie forgery and tampering.** The MAC is compared with `timingSafeEqual`, and the expiry is inside the MAC. A cookie is only honored for the rule id in its name. Code matching checks every code without short-circuiting.
+- **Gate page.** Every interpolated value (site name, heading, return path) is HTML-escaped server-side, including quotes.
+- **Shield blocks can't lock admins out.** Infrastructure paths are exempt. An IP with a live administrator session is never auto-blocked, and admins can't manually block their own address.
+- **Health output** contains no config values, secrets, tokens, sessions, or environment. VACUUM refuses to run without about 2.2× the database size free.
+- **SQL.** Every new query binds its parameters. Insights builds `IN (?,…)` lists from server-side scope only.
+
+### Impact on overall attack surface
+
+- **Better.** Scanners like the one in the 2026-09-24 logs (dozens of `/.env`/`.git`/`wp-*` probes from one IP) are now blocked after three probes, and an SPA no longer answers probes with its `index.html`. Bursts of 404s are cut off. Sites can refuse AI-training crawlers. Before this release, auto-block only ever reacted to geo-denied 403s.
+- **New anonymous surface.** Only `/_hoster/unlock` and the gate page. Both are small, capped, throttled, and covered by tests.
+- **Availability trade-offs.** The 404 limit (30 page 404s in 5 minutes → 1 hour) could briefly block a NAT'd office or carrier-grade-NAT mobile users on a site with many broken links. Tune it or allow-list known addresses. The rate limit is off by default for the same reason.
+
+### Known limitations / accepted risks
+
+- **Pre-existing, highest priority: hosted sites share the admin panel's origin.** Every path-routed site (`https://<canonical host>/<slug>/`) runs in the same origin as `/_admin`. Any script on any such site can `fetch('/_admin/api/auth-check')` with a signed-in administrator's cookie, read the CSRF token from the response, and then call any admin API as that administrator. It can also `window.open('/_admin')` and script the page directly. Cookie flags, CSRF tokens, and Referer checks cannot stop same-origin script. **Anyone who can put a file on a path-routed site (site users, MCP delegates, AI tools with write access) can take over an administrator who visits that site while signed in.** For the same reason, a script on one path-routed site can read another site's access-code-protected pages once the visitor has unlocked them. Mitigations today: serve untrusted sites only on their own custom domains (host aliases are separate origins), and don't browse path-routed sites in a browser signed in to `/_admin`. The real fix is origin isolation: serve the admin panel on a dedicated hostname and refuse `/_admin` everywhere else, or stop serving path-routed sites on the admin's hostname. It is tracked as a follow-up.
+- **Header trust depends on the firewall.** Client IPs come from `cf-connecting-ip` when `cf-ipcountry` is present, otherwise from `X-Real-IP`. Both are trusted at face value. If the origin is reachable directly rather than only from Cloudflare or your proxy, an attacker can dodge IP blocks by rotating fake addresses, or get a victim's IP blocked from hosted sites (not from the admin panel). Keep the origin firewalled to Cloudflare's ranges (as production is).
+- **Codes are shared secrets, stored readable, and included in platform backups**, as is the cookie-signing secret. Encrypt backups that leave the host. Anyone holding a code can pass it on; give each audience its own code so it can be revoked alone.
+- **Enabling protection on a folder whose assets were previously public** doesn't evict copies Cloudflare already cached under the old `public, immutable` headers. Purge the Cloudflare cache for that path after protecting it.
+- **User-agent checks are advisory.** The AI-crawler refusal and the link-preview exemption trust the `User-Agent` header, which is trivially spoofed. They manage well-behaved bots; the trap and 404 limits are what stop hostile ones.
+
+*Verified by `bun test` (250 tests across 18 files) and by the compile-and-boot preflight in `build-pi.sh`.*
