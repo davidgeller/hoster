@@ -17,6 +17,7 @@ export interface RequestLog {
   accept_language: string | null;
   request_bytes: number;
   response_bytes: number;
+  access_code?: string | null;
 }
 
 // --- Extensions to track parsed browser info ---
@@ -24,10 +25,12 @@ try { db.exec("ALTER TABLE requests ADD COLUMN browser TEXT"); } catch (_) {}
 // --- Extensions to track per-request bandwidth ---
 try { db.exec("ALTER TABLE requests ADD COLUMN request_bytes INTEGER DEFAULT 0"); } catch (_) {}
 try { db.exec("ALTER TABLE requests ADD COLUMN response_bytes INTEGER DEFAULT 0"); } catch (_) {}
+// --- Name of the access code a protected-path request was made under ---
+try { db.exec("ALTER TABLE requests ADD COLUMN access_code TEXT"); } catch (_) {}
 
 const insertStmt = db.prepare(`
-  INSERT INTO requests (site_slug, path, method, status, response_time_ms, ip, country, city, user_agent, referrer, content_type, accept_language, browser, request_bytes, response_bytes)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO requests (site_slug, path, method, status, response_time_ms, ip, country, city, user_agent, referrer, content_type, accept_language, browser, request_bytes, response_bytes, access_code)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 // --- File extensions we DON'T want to track ---
@@ -97,7 +100,7 @@ export function logRequest(log: RequestLog): void {
       log.site_slug, log.path, log.method, log.status, log.response_time_ms,
       log.ip, log.country, log.city, log.user_agent, log.referrer,
       log.content_type, log.accept_language, browser,
-      log.request_bytes, log.response_bytes
+      log.request_bytes, log.response_bytes, log.access_code ?? null
     );
 
     // Periodically prune old logs to prevent unbounded growth
@@ -342,7 +345,7 @@ export function getRecentRequests(limit: number = 50, filters: {
   }
 
   return db.query(`
-    SELECT site_slug, path, method, status, response_time_ms, ip, country, city, browser, referrer, created_at
+    SELECT site_slug, path, method, status, response_time_ms, ip, country, city, browser, referrer, access_code, created_at
     FROM requests WHERE ${where} ORDER BY id DESC LIMIT ?
   `).all(...params, limit);
 }

@@ -1364,3 +1364,31 @@ tr:hover td { background: var(--bg-hover); }
 .pw-wrap > input { width: 100%; }
 .pw-reveal { display: inline-flex !important; align-items: center; gap: 5px; margin: 3px 0 0 !important; font-size: 0.75rem !important; font-weight: normal !important; color: var(--text-muted); cursor: pointer; user-select: none; }
 .pw-reveal input[type="checkbox"] { width: auto !important; margin: 0 !important; display: inline-block; }
+
+/* --- Protected paths (Site Settings → Protection) --- */
+.chip-access {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  background: var(--accent-bg);
+  color: var(--accent);
+  vertical-align: middle;
+  margin-left: 4px;
+}
+.protect-rule { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 10px; color: var(--text); }
+.protect-rule.disabled { opacity: 0.65; }
+.protect-rule-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.protect-path { font-size: 0.95rem; font-weight: 600; margin-right: 6px; }
+.protect-codes { width: 100%; font-size: 0.85rem; margin-top: 10px; border-collapse: collapse; }
+.protect-codes th { text-align: left; font-weight: 600; color: var(--text-muted); font-size: 0.75rem; padding: 4px 6px 4px 0; }
+.protect-codes td { padding: 4px 6px 4px 0; border-top: 1px solid var(--border); }
+.protect-code { letter-spacing: 0.05em; }
+.protect-add-code { display: grid; grid-template-columns: 1fr 140px auto; gap: 6px; margin-top: 10px; align-items: center; }
+.btn-link { background: none; border: 0; padding: 0 2px; color: var(--accent); cursor: pointer; font: inherit; font-size: 0.8rem; }
+.btn-link.danger { color: var(--danger); }
+@media (max-width: 600px) {
+  .protect-add-code { grid-template-columns: 1fr; }
+  .protect-rule-head { flex-direction: column; }
+}

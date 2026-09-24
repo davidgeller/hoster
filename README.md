@@ -44,6 +44,7 @@ In every case the Hoster binary itself is identical — only the front-end TLS l
 - **SPA support** — auto-detects Angular, React, and Vue builds (with deep root directory detection); rewrites `<base href>` for subpath hosting
 - **Default landing page** — send the hostname root to any hosted site or external URL instead of the admin sign-in, with an optional footer bar over the default site that links back to the admin panel
 - **Repository sites** — a second site type: a document library with a built-in interface, no HTML to upload. Drag and drop files or whole folders, browse in grid or list view, move and copy between folders, preview images / video / audio / PDFs / text / Markdown, create and edit text and Markdown files in place, package any selection as a ZIP, share files or folders with expiring links, and keep per-file version history with one-click restore. Deleted items sit in a trash for 30 days. Each repository has its own storage limit, versions-per-file cap, public or private visibility, optional banner image, per-site user grants, and a self-contained backup archive
+- **Protected paths** — put a simple access code in front of a whole site (`/`) or any folder (`/members/`). Each path can have several named codes; visitors enter one once and stay unlocked, and the request log shows which code they used
 - **Per-site country restrictions** — every site (web or repository) can inherit the global allow-list, open itself to every country, or use its own list
 - **Custom domains (host aliases)** — point any domain at a specific site so `spryly.com/about` serves the same content as `/spryly/about` on the canonical hostname, with no slug in the URL
 - **Configuration backup** — save and restore your entire hoster setup (settings, sites, versions) to a `.hoster` file with optional AES-256-GCM encryption for device migration; restore auto-rebuilds active-version symlinks and reports broken sites
@@ -423,6 +424,18 @@ Click **Files** on a site card (or in the Site Explorer) to open the file manage
 - **Delete** one item from its row, or tick several (or **select all** of a filtered view) and delete them together — folders are removed recursively
 
 Every change is made to the working version only, is audit-logged with your username, and honors the site's **Auto-snapshot before edits** setting: the first change to an untouched version freezes it first, so there is always a rollback point. With auto-snapshot off, a delete is permanent unless you have a snapshot or a backup — the confirmation dialog tells you which case you're in.
+
+### Protected Paths (Access Codes)
+
+Site Settings → **Protection** puts a code in front of the whole site (`/`) or a folder (`/members/`, `/docs/drafts/`). Each protected path takes any number of codes, each with a friendly name (for example "Board members" or "Contractor – Acme"). Codes are 4–64 letters or digits, aren't case-sensitive, and can be generated for you.
+
+- A visitor without a pass sees a small "enter your access code" page (non-page files such as images get a plain 401). A correct code sets a signed, HttpOnly cookie on that browser for the length you picked (1 day to 1 year).
+- Every request made under a code is logged with its name — look for the 🔑 chip on the Logs page. Each code also shows how many times it was used and when it was last seen.
+- Editing a code's value, deleting it, or removing the rule signs out everyone who used it, immediately. Turning a rule off opens the path without losing its codes.
+- When paths nest, the most specific one wins: a `/members/board/` rule needs its own code even when `/members/` is also protected.
+- Ten wrong codes from one IP in 15 minutes pauses attempts from it.
+- Protected responses are sent `Cache-Control: private` and `X-Robots-Tag: noindex`, so Cloudflare never caches them for other visitors and search engines don't index them. Link previews won't show protected pages.
+- Codes are stored so admins can look them up again — this is simple access control for sharing, not account security. Repository sites use their own sign-in instead.
 
 ### Site Aliases
 

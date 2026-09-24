@@ -1,6 +1,7 @@
 import db from "./db";
 import { SITES_DIR, rebuildCurrentSymlinks, type RebuildResult } from "./sites";
 import { migrateLegacyAdmin } from "./auth";
+import { invalidateProtectCache, resetProtectSecretCache } from "./protect";
 import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync, statSync, unlinkSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { randomBytes, createCipheriv, createDecipheriv, pbkdf2Sync } from "crypto";
@@ -122,6 +123,9 @@ function exportDatabase(): Record<string, any[]> {
   tables.repo_versions = db.prepare("SELECT * FROM repo_versions").all();
   tables.repo_blobs = db.prepare("SELECT * FROM repo_blobs").all();
   tables.repo_shares = db.prepare("SELECT * FROM repo_shares").all();
+  // Protected paths and their access codes.
+  tables.protect_rules = db.prepare("SELECT * FROM protect_rules").all();
+  tables.protect_codes = db.prepare("SELECT * FROM protect_codes").all();
 
   return tables;
 }
@@ -135,6 +139,8 @@ function importDatabase(tables: Record<string, any[]>) {
     db.exec("DELETE FROM repo_files");
     db.exec("DELETE FROM repo_blobs");
     db.exec("DELETE FROM repo_shares");
+    db.exec("DELETE FROM protect_codes");
+    db.exec("DELETE FROM protect_rules");
     db.exec("DELETE FROM admin_users");
     db.exec("DELETE FROM site_aliases");
     db.exec("DELETE FROM site_versions");
@@ -265,6 +271,25 @@ function importDatabase(tables: Record<string, any[]>) {
       }
     }
 
+    // Protected paths. Backups from before v2.3 have neither table.
+    if (tables.protect_rules) {
+      const cols = ["id", "site_slug", "path_prefix", "label", "session_days", "enabled", "created_at"];
+      const stmt = db.prepare(`INSERT INTO protect_rules (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`);
+      const kept = new Set<number>();
+      for (const row of tables.protect_rules) {
+        if (!db.query("SELECT 1 FROM sites WHERE slug = ?").get(row.site_slug)) continue;
+        stmt.run(...cols.map(c => c === "session_days" ? (row[c] ?? 30) : c === "enabled" ? (row[c] ?? 1) : (row[c] ?? null)));
+        kept.add(row.id);
+      }
+      if (tables.protect_codes) {
+        const ccols = ["id", "rule_id", "name", "code", "created_at", "last_used_at", "use_count"];
+        const cstmt = db.prepare(`INSERT INTO protect_codes (${ccols.join(", ")}) VALUES (${ccols.map(() => "?").join(", ")})`);
+        for (const row of tables.protect_codes) {
+          if (kept.has(row.rule_id)) cstmt.run(...ccols.map(c => c === "use_count" ? (row[c] ?? 0) : (row[c] ?? null)));
+        }
+      }
+    }
+
     // Import passkeys. Backups predating passkey support simply have no such
     // table and leave the (already cleared) credential list empty.
     if (tables.webauthn_credentials) {
@@ -278,6 +303,10 @@ function importDatabase(tables: Record<string, any[]>) {
   });
 
   tx();
+  // The config table (and with it the cookie-signing secret) and the rules
+  // were just replaced.
+  resetProtectSecretCache();
+  invalidateProtectCache();
 }
 
 export async function createBackup(password?: string, allVersions = false): Promise<Buffer> {

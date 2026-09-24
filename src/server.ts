@@ -10,6 +10,10 @@ import { logRequest, extractRequestMeta, shouldTrack, isCountryAllowed, isIpBloc
 import { resolveSitePath, resolveAlias, resolveHostAlias, normalizeHost, getDefaultSite, getDefaultSiteFooterSlug, getSite } from "./sites";
 import { serveCmsLibFile } from "./cms-lib";
 import { handleRepoSite } from "./repo-site";
+import {
+  findRule, checkPass, passCookie, matchCode, gatePage, safeReturnPath,
+  isUnlockThrottled, recordUnlockFailure, noteUse,
+} from "./protect";
 
 // Full header set for first-party surfaces we control: the admin UI (document
 // + static assets), the admin/OAuth/MCP APIs, and OAuth/MCP discovery. Safe to
@@ -89,6 +93,17 @@ function addSiteHeaders(res: Response): Response {
   for (const [k, v] of Object.entries(SITE_SECURITY_HEADERS)) {
     res.headers.set(k, v);
   }
+  return res;
+}
+
+// Responses behind an access code must never land in a shared cache
+// (Cloudflare would otherwise hand content-hashed assets to anyone) or a
+// search index.
+function markProtected(res: Response): Response {
+  const cc = res.headers.get("cache-control");
+  if (cc) res.headers.set("Cache-Control", cc.includes("public") ? cc.replace("public", "private") : `private, ${cc}`);
+  else res.headers.set("Cache-Control", "private, no-cache");
+  res.headers.set("X-Robots-Tag", "noindex, nofollow");
   return res;
 }
 
@@ -231,6 +246,8 @@ export function createServer(port: number) {
       const meta = extractRequestMeta(req);
       let status = 200;
       let siteSlug: string | null = null;
+      // Name of the access code this request was admitted under (protected paths).
+      let accessCode: string | null = null;
 
       // Resolve host alias once. If the incoming Host header maps to a site,
       // every non-reserved request on this host is served from that site,
@@ -306,6 +323,16 @@ export function createServer(port: number) {
             checkAndAutoBlock(meta.ip);
             return res;
           }
+        }
+
+        // --- Access-code unlock for protected paths ---
+        // Reachable on every host (a custom domain posts its gate form here
+        // too), so it sits outside the infra-path list above.
+        if (path === "/_hoster/unlock") {
+          const res = await handleUnlock();
+          status = res.status;
+          logReq(res);
+          return addSiteHeaders(res);
         }
 
         // --- OAuth Authorization Server discovery ---
@@ -465,6 +492,35 @@ export function createServer(port: number) {
           return res;
         }
 
+        // --- Protected paths: an access code stands in front of this part of the site ---
+        if (candidateSite && candidateSite.active) {
+          const siteParts = hostAliasSlug ? parts : parts.slice(1);
+          const sitePath = "/" + siteParts.join("/") + (siteParts.length && path.endsWith("/") ? "/" : "");
+          const rule = findRule(candidateSlug, sitePath);
+          if (rule) {
+            siteSlug = candidateSlug;
+            const pass = checkPass(req, rule);
+            if (!pass) {
+              status = 401;
+              const wantsHtml = (req.headers.get("accept") || "text/html").includes("text/html");
+              const body = wantsHtml
+                ? gatePage({ siteName: candidateSite.name, label: rule.label, slug: candidateSlug, returnTo: path + url.search })
+                : "Access code required";
+              const res = markProtected(addSiteHeaders(new Response(body, {
+                status: 401,
+                headers: {
+                  "Content-Type": wantsHtml ? "text/html; charset=utf-8" : "text/plain; charset=utf-8",
+                  "Cache-Control": "no-store",
+                  "Content-Length": String(Buffer.byteLength(body)),
+                },
+              })));
+              logReq(res);
+              return res;
+            }
+            accessCode = pass.name;
+          }
+        }
+
         // If a .html URL has a trailing slash (e.g. /slug/page.html/), strip it.
         // The browser would otherwise resolve relative asset paths against the
         // file as if it were a directory, breaking CSS/JS references.
@@ -544,7 +600,50 @@ export function createServer(port: number) {
         return res;
       }
 
+      async function handleUnlock(): Promise<Response> {
+        if (req.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { Allow: "POST" } });
+        if (parseInt(req.headers.get("content-length") || "0", 10) > 8192) return new Response("Request too large", { status: 413 });
+        let form: FormData;
+        try { form = await req.formData(); } catch { return new Response("Bad request", { status: 400 }); }
+        const returnTo = safeReturnPath(String(form.get("return") || "/"));
+        const submitted = String(form.get("code") || "");
+        // Which site, and which path inside it, is the visitor trying to reach?
+        const retParts = returnTo.split("?")[0].split("/").filter(Boolean);
+        let slug: string | null;
+        let siteParts: string[];
+        if (hostAliasSlug) {
+          slug = resolveAlias(hostAliasSlug);
+          siteParts = retParts;
+        } else {
+          slug = retParts[0] ? resolveAlias(retParts[0]) : null;
+          siteParts = retParts.slice(1);
+          if (slug !== String(form.get("site") || "")) slug = null;
+        }
+        const site = slug ? getSite(slug) : null;
+        const sitePath = "/" + siteParts.join("/") + (siteParts.length && returnTo.split("?")[0].endsWith("/") ? "/" : "");
+        const rule = site && site.active ? findRule(site.slug, sitePath) : null;
+        if (!site || !rule) return new Response(null, { status: 303, headers: { Location: returnTo } });
+        siteSlug = site.slug;
+        const page = (error: string, code: number) => {
+          const body = gatePage({ siteName: site.name, label: rule.label, slug: site.slug, returnTo, error });
+          return markProtected(new Response(body, { status: code, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } }));
+        };
+        if (isUnlockThrottled(meta.ip)) return page("Too many incorrect codes. Try again in 15 minutes.", 429);
+        const hit = submitted ? matchCode(rule, submitted) : null;
+        if (!hit) {
+          recordUnlockFailure(meta.ip);
+          return page("That code isn't right. Check it and try again.", 401);
+        }
+        noteUse(hit.id, true);
+        accessCode = hit.name;
+        return new Response(null, {
+          status: 303,
+          headers: { Location: returnTo, "Set-Cookie": passCookie(rule, hit), "Cache-Control": "no-store" },
+        });
+      }
+
       function logReq(res?: Response | null) {
+        if (res && accessCode && siteSlug && res.status < 400 && path !== "/_hoster/unlock") markProtected(res);
         if (!shouldTrack(path)) return;
         const elapsed = performance.now() - start;
         // Best-effort byte counts. Only counted when Content-Length is present;
@@ -567,6 +666,7 @@ export function createServer(port: number) {
           accept_language: meta.accept_language,
           request_bytes: requestBytes,
           response_bytes: responseBytes,
+          access_code: accessCode,
         });
       }
     },

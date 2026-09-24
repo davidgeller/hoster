@@ -3218,6 +3218,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
         <button type="button" class="settings-tab active" role="tab" data-tab="general">General</button>
         ${isRepo ? "" : '<button type="button" class="settings-tab" role="tab" data-tab="mcp">MCP</button>'}
         <button type="button" class="settings-tab" role="tab" data-tab="access">Access</button>
+        ${isRepo ? "" : '<button type="button" class="settings-tab" role="tab" data-tab="protection">Protection</button>'}
         ${isSuperAdmin ? '<button type="button" class="settings-tab" role="tab" data-tab="users">Users</button>' : ""}
         <button type="button" class="settings-tab" role="tab" data-tab="aliases">Aliases</button>
         ${isRepo ? '<button type="button" class="settings-tab" role="tab" data-tab="backup">Backup</button>' : '<button type="button" class="settings-tab" role="tab" data-tab="cms">CMS</button>'}
@@ -3233,6 +3234,30 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
           <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">` : ""}
           <div id="settings-access-countries"></div>
         </div>
+        ${isRepo ? "" : `
+        <div class="settings-tab-panel" data-panel="protection">
+          <label>
+            Access codes
+            <small>Put a simple code in front of the whole site (<code>/</code>) or a folder such as <code>/members/</code>. Each protected path can have several codes — give each audience its own, and the Logs page shows which code a visitor used. Visitors enter the code once and stay unlocked on that browser for the session length you choose. Changes apply immediately; editing or deleting a code signs out everyone who used it.</small>
+          </label>
+          <div id="settings-protection-list" class="text-sm text-muted">Loading…</div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
+          <label>Protect a path</label>
+          <div style="display:grid;grid-template-columns:1fr 1fr 110px auto;gap:6px;align-items:center">
+            <input type="text" id="settings-protect-path" placeholder="/ or /members/" autocomplete="off">
+            <input type="text" id="settings-protect-label" placeholder="Heading (optional)" maxlength="120">
+            <select id="settings-protect-days" title="How long a visitor stays unlocked">
+              <option value="1">1 day</option>
+              <option value="7">7 days</option>
+              <option value="30" selected>30 days</option>
+              <option value="90">90 days</option>
+              <option value="365">1 year</option>
+            </select>
+            <button type="button" class="btn btn-sm btn-primary" id="settings-protect-add">Protect</button>
+          </div>
+          <div class="form-error" id="settings-protect-error" style="margin-top:4px"></div>
+          <p class="text-sm text-muted" style="margin-top:10px">Good to know: protected pages don't get link previews when shared, and search engines are told not to index them. On a single-page app, protecting a route folder only guards URLs under it — the app's own scripts stay public.</p>
+        </div>`}
         ${isSuperAdmin ? `
         <div class="settings-tab-panel" data-panel="users">
           <label>
@@ -3512,6 +3537,130 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
   });
 
   // --- Site delegates ---
+  // --- Protection tab: path rules and their named access codes ---
+  async function loadProtection() {
+    const listEl = modal.querySelector("#settings-protection-list");
+    if (!listEl) return;
+    let data;
+    try { data = await api(`/sites/${slug}/protection`); }
+    catch (err) { listEl.textContent = err.message; return; }
+    const { rules, suggested_code } = data;
+    if (!rules.length) {
+      listEl.innerHTML = '<div class="text-sm text-muted">Nothing is protected — every page on this site is public.</div>';
+      return;
+    }
+    const daysLabel = d => d === 1 ? "1 day" : d === 365 ? "1 year" : `${d} days`;
+    listEl.innerHTML = rules.map(r => `
+      <div class="protect-rule${r.enabled ? "" : " disabled"}" data-rule="${r.id}">
+        <div class="protect-rule-head">
+          <div>
+            <code class="protect-path">${esc(r.path_prefix)}</code>
+            ${r.path_prefix === "/" ? '<span class="text-sm text-muted">whole site</span>' : ""}
+            ${r.enabled ? "" : '<span class="chip-blocked" style="background:var(--bg-hover);color:var(--text-muted)">Off</span>'}
+            ${r.enabled && !r.codes.length ? '<span class="chip-blocked" title="No code can open this path yet">No codes — locked</span>' : ""}
+            <div class="text-sm text-muted">${r.label ? esc(r.label) + " · " : ""}stays unlocked ${daysLabel(r.session_days)}</div>
+          </div>
+          <div style="display:flex;gap:6px;flex-shrink:0">
+            <button type="button" class="btn btn-sm" data-toggle-rule="${r.id}" data-enabled="${r.enabled ? 1 : 0}">${r.enabled ? "Turn off" : "Turn on"}</button>
+            <button type="button" class="btn btn-sm btn-danger" data-delete-rule="${r.id}">Remove</button>
+          </div>
+        </div>
+        ${r.codes.length ? `<table class="protect-codes">
+          <thead><tr><th>Name</th><th>Code</th><th>Uses</th><th>Last used</th><th></th></tr></thead>
+          <tbody>${r.codes.map(c => `
+            <tr>
+              <td>${esc(c.name)}</td>
+              <td><code class="protect-code">${esc(c.code)}</code> <button type="button" class="btn-link" data-copy-code="${esc(c.code)}" title="Copy code">Copy</button></td>
+              <td>${c.use_count}</td>
+              <td>${c.last_used_at ? timeAgo(c.last_used_at) : '<span class="text-muted">never</span>'}</td>
+              <td style="text-align:right;white-space:nowrap">
+                <button type="button" class="btn-link" data-edit-code="${c.id}" data-rule-id="${r.id}" data-name="${esc(c.name)}" data-code="${esc(c.code)}">Edit</button>
+                <button type="button" class="btn-link danger" data-delete-code="${c.id}" data-rule-id="${r.id}" data-name="${esc(c.name)}">Delete</button>
+              </td>
+            </tr>`).join("")}</tbody></table>` : ""}
+        <div class="protect-add-code">
+          <input type="text" placeholder="Name, e.g. Board members" maxlength="80" data-new-name="${r.id}">
+          <input type="text" placeholder="Code" value="${esc(suggested_code)}" maxlength="64" pattern="[A-Za-z0-9]{4,64}" data-new-code="${r.id}" class="text-mono">
+          <button type="button" class="btn btn-sm" data-add-code="${r.id}">Add code</button>
+        </div>
+        <div class="form-error" data-rule-error="${r.id}"></div>
+      </div>`).join("");
+
+    const ruleError = (id, msg) => { const el = listEl.querySelector(`[data-rule-error="${id}"]`); if (el) el.textContent = msg || ""; };
+    listEl.querySelectorAll("[data-toggle-rule]").forEach(btn => btn.addEventListener("click", async () => {
+      try {
+        await api(`/sites/${slug}/protection/rules/${btn.dataset.toggleRule}`, { method: "POST", body: JSON.stringify({ enabled: btn.dataset.enabled !== "1" }) });
+        loadProtection();
+      } catch (err) { ruleError(btn.dataset.toggleRule, err.message); }
+    }));
+    listEl.querySelectorAll("[data-delete-rule]").forEach(btn => btn.addEventListener("click", async () => {
+      if (!confirm("Remove this protection? The path becomes public and its codes are deleted.")) return;
+      try { await api(`/sites/${slug}/protection/rules/${btn.dataset.deleteRule}`, { method: "DELETE" }); loadProtection(); }
+      catch (err) { ruleError(btn.dataset.deleteRule, err.message); }
+    }));
+    listEl.querySelectorAll("[data-add-code]").forEach(btn => btn.addEventListener("click", async () => {
+      const id = btn.dataset.addCode;
+      const name = listEl.querySelector(`[data-new-name="${id}"]`).value.trim();
+      const code = listEl.querySelector(`[data-new-code="${id}"]`).value.trim();
+      ruleError(id, "");
+      if (!name) { ruleError(id, "Give the code a name so you can recognize it in the logs"); return; }
+      try {
+        await api(`/sites/${slug}/protection/rules/${id}/codes`, { method: "POST", body: JSON.stringify({ name, code }) });
+        loadProtection();
+      } catch (err) { ruleError(id, err.message); }
+    }));
+    listEl.querySelectorAll("[data-copy-code]").forEach(btn => btn.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(btn.dataset.copyCode); btn.textContent = "Copied"; setTimeout(() => { btn.textContent = "Copy"; }, 1200); } catch (_) {}
+    }));
+    listEl.querySelectorAll("[data-edit-code]").forEach(btn => btn.addEventListener("click", async () => {
+      const name = prompt("Name for this code:", btn.dataset.name);
+      if (name === null) return;
+      const code = prompt("Code (changing it signs out everyone who used the old one):", btn.dataset.code);
+      if (code === null) return;
+      try {
+        await api(`/sites/${slug}/protection/rules/${btn.dataset.ruleId}/codes/${btn.dataset.editCode}`, { method: "POST", body: JSON.stringify({ name, code }) });
+        loadProtection();
+      } catch (err) { ruleError(btn.dataset.ruleId, err.message); }
+    }));
+    listEl.querySelectorAll("[data-delete-code]").forEach(btn => btn.addEventListener("click", async () => {
+      if (!confirm(`Delete the code "${btn.dataset.name}"? Anyone who unlocked with it is signed out.`)) return;
+      try { await api(`/sites/${slug}/protection/rules/${btn.dataset.ruleId}/codes/${btn.dataset.deleteCode}`, { method: "DELETE" }); loadProtection(); }
+      catch (err) { ruleError(btn.dataset.ruleId, err.message); }
+    }));
+  }
+
+  modal.querySelector("#settings-protect-add")?.addEventListener("click", async () => {
+    const errEl = modal.querySelector("#settings-protect-error");
+    errEl.textContent = "";
+    const pathVal = modal.querySelector("#settings-protect-path").value.trim();
+    if (!pathVal) { errEl.textContent = "Enter a path — / protects the whole site"; return; }
+    try {
+      await api(`/sites/${slug}/protection/rules`, {
+        method: "POST",
+        body: JSON.stringify({
+          path_prefix: pathVal,
+          label: modal.querySelector("#settings-protect-label").value.trim(),
+          session_days: parseInt(modal.querySelector("#settings-protect-days").value, 10),
+        }),
+      });
+      modal.querySelector("#settings-protect-path").value = "";
+      modal.querySelector("#settings-protect-label").value = "";
+      loadProtection();
+    } catch (err) { errEl.textContent = err.message; }
+  });
+  // Enter in a Protection field acts on that field's button instead of
+  // submitting (and closing) the whole settings form.
+  modal.querySelector('[data-panel="protection"]')?.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.target.tagName !== "INPUT") return;
+    e.preventDefault();
+    const addCode = e.target.dataset.newName || e.target.dataset.newCode;
+    const btn = addCode
+      ? modal.querySelector(`[data-add-code="${addCode}"]`)
+      : modal.querySelector("#settings-protect-add");
+    btn?.click();
+  });
+  if (!isRepo) loadProtection();
+
   async function loadDelegates() {
     const listEl = modal.querySelector("#settings-delegates-list");
     if (!listEl) return;
@@ -4568,7 +4717,7 @@ async function loadLogs() {
       <tr${isBlocked ? ' class="row-blocked"' : ""}>
         <td>${timeAgo(r.created_at)}</td>
         <td>${r.method}</td>
-        <td class="truncate" title="${esc(pathTitle)}">${pathDisplay}</td>
+        <td class="truncate" title="${esc(pathTitle)}${r.access_code ? ` — access code: ${esc(r.access_code)}` : ""}">${pathDisplay}${r.access_code ? ` <span class="chip-access" title="Access code used">🔑 ${esc(r.access_code)}</span>` : ""}</td>
         <td><span class="status-badge ${statusClass}">${r.status}</span>${isBlocked ? ' <span class="chip-blocked">Blocked</span>' : ""}</td>
         <td class="text-sm">${esc(r.browser || "—")}</td>
         <td class="text-mono text-sm">${esc(r.ip)}</td>

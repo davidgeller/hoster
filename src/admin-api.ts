@@ -43,6 +43,7 @@ import {
   getAutoBlockConfig, setAutoBlockConfig, getBlockedIps, unblockIp
 } from "./analytics";
 import { listCountries } from "./countries";
+import { listRules, createRule, updateRule, deleteRule, addCode, updateCode, deleteCode, generateCode } from "./protect";
 import { getDefaultSite, setDefaultSite } from "./sites";
 import { createMcpToken, listMcpTokens, deleteMcpToken, getMcpAuditLog } from "./mcp";
 import {
@@ -1173,6 +1174,64 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   }
 
   // --- Per-site delegate credentials (used at the OAuth consent screen) ---
+  // --- Protected paths (access codes) — web sites only ---
+  const protectMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/protection(?:\/rules(?:\/(\d+)(?:\/codes(?:\/(\d+))?)?)?)?$/);
+  if (protectMatch) {
+    const [, slug, ruleIdStr, codeIdStr] = protectMatch;
+    const site = getSite(slug);
+    if (!site) return json({ error: "Not found" }, 404);
+    if (site.site_type === "repository") return json({ error: "Repositories use their own sign-in; access codes apply to web sites" }, 400);
+    const ruleId = ruleIdStr ? parseInt(ruleIdStr, 10) : null;
+    const codeId = codeIdStr ? parseInt(codeIdStr, 10) : null;
+    const isCodes = path.includes("/codes");
+    try {
+      if (!ruleIdStr && !path.endsWith("/rules") && req.method === "GET") {
+        return json({ rules: listRules(slug), suggested_code: generateCode() });
+      }
+      if (path.endsWith("/rules") && req.method === "POST") {
+        const body = await readJsonBody<any>(req);
+        if (!body) return json({ error: "Invalid request body" }, 400);
+        const rule = createRule(slug, body);
+        audit("protection_rule_added", `${slug}${rule.path_prefix === "/" ? " (whole site)" : ": " + rule.path_prefix}`);
+        return json({ ok: true, rule });
+      }
+      if (ruleId && !isCodes && req.method === "POST") {
+        const body = await readJsonBody<any>(req);
+        if (!body) return json({ error: "Invalid request body" }, 400);
+        const rule = updateRule(slug, ruleId, body);
+        audit("protection_rule_updated", `${slug}: ${rule.path_prefix}${rule.enabled ? "" : " (disabled)"}`);
+        return json({ ok: true, rule });
+      }
+      if (ruleId && !isCodes && req.method === "DELETE") {
+        const ok = deleteRule(slug, ruleId);
+        if (ok) audit("protection_rule_removed", `${slug} rule ${ruleId}`);
+        return ok ? json({ ok: true }) : json({ error: "Not found" }, 404);
+      }
+      if (ruleId && isCodes && !codeId && req.method === "POST") {
+        const body = await readJsonBody<any>(req);
+        if (!body) return json({ error: "Invalid request body" }, 400);
+        const code = addCode(slug, ruleId, body);
+        audit("protection_code_added", `${slug} rule ${ruleId}: ${code.name}`);
+        return json({ ok: true, code });
+      }
+      if (ruleId && codeId && req.method === "POST") {
+        const body = await readJsonBody<any>(req);
+        if (!body) return json({ error: "Invalid request body" }, 400);
+        const code = updateCode(slug, ruleId, codeId, body);
+        audit("protection_code_updated", `${slug} rule ${ruleId}: ${code.name}`);
+        return json({ ok: true, code });
+      }
+      if (ruleId && codeId && req.method === "DELETE") {
+        const ok = deleteCode(slug, ruleId, codeId);
+        if (ok) audit("protection_code_removed", `${slug} rule ${ruleId} code ${codeId}`);
+        return ok ? json({ ok: true }) : json({ error: "Not found" }, 404);
+      }
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
+    return json({ error: "Method not allowed" }, 405);
+  }
+
   const siteDelegateMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9][a-z0-9-]*)\/delegates$/);
   if (siteDelegateMatch && req.method === "GET") {
     return json({ delegates: listSiteDelegates(siteDelegateMatch[1]) });

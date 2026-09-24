@@ -1,4 +1,5 @@
 import db from "./db";
+import { deleteRulesForSite } from "./protect";
 import { mkdirSync, rmSync, rmdirSync, existsSync, readdirSync, statSync, symlinkSync, readlinkSync, unlinkSync, realpathSync, lstatSync, writeFileSync, readFileSync, renameSync, copyFileSync } from "fs";
 import { join, resolve, sep } from "path";
 import { tmpdir } from "os";
@@ -616,6 +617,9 @@ export function deleteSite(slug: string): boolean {
   try { db.run("DELETE FROM repo_versions WHERE site_slug = ?", slug); } catch (_) {}
   try { db.run("DELETE FROM repo_files WHERE site_slug = ?", slug); } catch (_) {}
   try { db.run("DELETE FROM repo_blobs WHERE site_slug = ?", slug); } catch (_) {}
+  // Protected-path rules (codes cascade) — a future site reusing this slug
+  // must not inherit them.
+  deleteRulesForSite(slug);
   invalidateSiteCache(slug);
   invalidateHostAliasCache();
   // A default landing page pointing at this site would now 404 on every
