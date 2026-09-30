@@ -19,6 +19,8 @@ import {
   rebuildCurrentSymlinks,
 } from "../src/sites";
 import { createBackup, restoreBackup } from "../src/backup";
+import { createCollectionSite, planCollectionItems, setCollectionItems, setCollectionImage, setCardImage, listCollectionItems } from "../src/collection";
+import { getSite } from "../src/sites";
 
 const TEST_HOME = process.env.HOSTER_HOME!;
 
@@ -174,6 +176,30 @@ describe("backup + restore round-trip", () => {
     // Site content survived — the marker file is reachable via _current.
     const markerViaCurrent = join(SITES_DIR, "alpha", "_current", "marker.txt");
     expect(await Bun.file(markerViaCurrent).text()).toBe("hello-from-alpha");
+  });
+
+  test("round-trip preserves a collection's cards, settings, and images", async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    createBlankSite("alpha", "Alpha");
+    createBlankSite("beta", "Beta");
+    createCollectionSite("group", "Group", { layout: "carousel", bg_color: "#102030", description: "desc" });
+    setCollectionItems("group", planCollectionItems("group", [{ slug: "beta", title: "B!" }, { slug: "alpha", url: "https://alpha.example.com/" }]).items);
+    setCardImage("group", "beta", png);
+    setCollectionImage("group", "banner", png);
+
+    const backup = await createBackup(undefined, false);
+    resetState();
+    const result = await restoreBackup(backup);
+
+    expect(result.warnings).toEqual([]);
+    const site = getSite("group")!;
+    expect(site.site_type).toBe("collection");
+    expect(site.coll_layout).toBe("carousel");
+    expect(site.coll_bg_color).toBe("#102030");
+    expect(site.coll_banner).toBe("banner.png");
+    expect(listCollectionItems("group").map(i => [i.item_slug, i.title, i.url, i.image])).toEqual([["beta", "B!", null, "card-beta.png"], ["alpha", null, "https://alpha.example.com/", null]]);
+    expect(existsSync(join(SITES_DIR, "group", "_collection", "banner.png"))).toBe(true);
+    expect(existsSync(join(SITES_DIR, "group", "_collection", "card-beta.png"))).toBe(true);
   });
 
   test("restore reports a warning when a site's version dir is missing from the archive", async () => {

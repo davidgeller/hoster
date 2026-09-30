@@ -5,6 +5,7 @@ import { invalidateProtectCache, resetProtectSecretCache } from "./protect";
 import { invalidateBlockedCache } from "./analytics";
 import { invalidateShieldConfig } from "./shield";
 import { invalidateOriginConfig } from "./origin";
+import "./collection"; // creates the collection_items table backups read
 import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync, statSync, unlinkSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { randomBytes, createCipheriv, createDecipheriv, pbkdf2Sync } from "crypto";
@@ -129,6 +130,8 @@ function exportDatabase(): Record<string, any[]> {
   // Protected paths and their access codes.
   tables.protect_rules = db.prepare("SELECT * FROM protect_rules").all();
   tables.protect_codes = db.prepare("SELECT * FROM protect_codes").all();
+  // Collection cards (the images ride along under sites/<slug>/_collection).
+  tables.collection_items = db.prepare("SELECT * FROM collection_items").all();
 
   return tables;
 }
@@ -144,6 +147,7 @@ function importDatabase(tables: Record<string, any[]>) {
     db.exec("DELETE FROM repo_shares");
     db.exec("DELETE FROM protect_codes");
     db.exec("DELETE FROM protect_rules");
+    db.exec("DELETE FROM collection_items");
     db.exec("DELETE FROM admin_users");
     db.exec("DELETE FROM site_aliases");
     db.exec("DELETE FROM site_versions");
@@ -167,12 +171,13 @@ function importDatabase(tables: Record<string, any[]>) {
     // Import sites
     if (tables.sites) {
       const cols = ["slug", "name", "created_at", "updated_at", "size_bytes", "file_count", "active", "current_version", "root_dir", "spa", "mcp_enabled", "mcp_read_only", "mcp_auto_commit", "cms_enabled", "cms_lib_version", "pinned_at",
-        "site_type", "allowed_countries", "repo_quota_bytes", "repo_max_versions", "repo_visibility", "repo_description", "repo_banner", "block_ai_bots"];
+        "site_type", "allowed_countries", "repo_quota_bytes", "repo_max_versions", "repo_visibility", "repo_description", "repo_banner", "block_ai_bots",
+        "coll_layout", "coll_description", "coll_bg_color", "coll_bg_image", "coll_banner"];
       const placeholders = cols.map(() => "?").join(", ");
       const stmt = db.prepare(`INSERT INTO sites (${cols.join(", ")}) VALUES (${placeholders})`);
       // Pre-2.0.1 backups lack the site-type/repository columns; fill in the
       // defaults the schema would have applied.
-      const defaults: Record<string, any> = { site_type: "web", repo_quota_bytes: 1073741824, repo_max_versions: 20, repo_visibility: "private", block_ai_bots: 0 };
+      const defaults: Record<string, any> = { site_type: "web", repo_quota_bytes: 1073741824, repo_max_versions: 20, repo_visibility: "private", block_ai_bots: 0, coll_layout: "grid" };
       for (const row of tables.sites) {
         stmt.run(...cols.map(c => row[c] ?? defaults[c] ?? null));
       }
@@ -293,6 +298,17 @@ function importDatabase(tables: Record<string, any[]>) {
       }
     }
 
+    // Collection cards. Backups from before v2.7.1 have no such table.
+    if (tables.collection_items) {
+      const cols = ["collection_slug", "item_slug", "position", "title", "blurb", "url", "image"];
+      const stmt = db.prepare(`INSERT INTO collection_items (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`);
+      const siteExists = db.prepare("SELECT 1 FROM sites WHERE slug = ?");
+      for (const row of tables.collection_items) {
+        if (!siteExists.get(row.collection_slug) || !siteExists.get(row.item_slug)) continue;
+        stmt.run(...cols.map(c => c === "position" ? (row[c] ?? 0) : (row[c] ?? null)));
+      }
+    }
+
     // Import passkeys. Backups predating passkey support simply have no such
     // table and leave the (already cleared) credential list empty.
     if (tables.webauthn_credentials) {
@@ -397,6 +413,18 @@ export async function createBackup(password?: string, allVersions = false): Prom
               stderr: "pipe",
             });
             await zipRepo.exited;
+            continue;
+          }
+
+          // Collections keep only their images, under _collection/.
+          if (siteRecord?.site_type === "collection") {
+            if (!existsSync(join(siteDir, "_collection"))) continue;
+            const zipColl = Bun.spawn(["zip", "-r", "-q", zipPath, join("sites", slug, "_collection")], {
+              cwd: dirname(SITES_DIR),
+              stdout: "ignore",
+              stderr: "pipe",
+            });
+            await zipColl.exited;
             continue;
           }
 

@@ -37,15 +37,24 @@ export interface Site {
   repo_description: string | null;  // repository sites: blurb shown under the title
   repo_banner: string | null;       // repository sites: banner filename inside _repo/ (NULL = none)
   block_ai_bots: number;            // 1 = refuse known AI-training crawlers (403)
+  coll_layout: CollectionLayout;    // collection sites: "grid" or "carousel"
+  coll_description: string | null;  // collection sites: blurb shown under the title
+  coll_bg_color: string | null;     // collection sites: page background "#rrggbb" (NULL = default)
+  coll_bg_image: string | null;     // collection sites: background filename inside _collection/ (NULL = none)
+  coll_banner: string | null;       // collection sites: banner filename inside _collection/ (NULL = none)
 }
 
 // Site kinds. A "web" site is the classic versioned static tree served from
 // _current. A "repository" is a document library with built-in UI, per-file
 // versioning, and content-addressed storage (see repo.ts); it has no
-// current_version and no _current symlink.
-export type SiteType = "web" | "repository";
+// current_version and no _current symlink. A "collection" is a page of cards
+// linking to other sites and repositories (see collection.ts); it stores only
+// its images under _collection/.
+export type SiteType = "web" | "repository" | "collection";
+export type CollectionLayout = "grid" | "carousel";
+export const COLLECTION_LAYOUTS: CollectionLayout[] = ["grid", "carousel"];
 export type RepoVisibility = "public" | "private";
-export const SITE_TYPES: SiteType[] = ["web", "repository"];
+export const SITE_TYPES: SiteType[] = ["web", "repository", "collection"];
 export const REPO_VISIBILITIES: RepoVisibility[] = ["public", "private"];
 export const DEFAULT_REPO_QUOTA_BYTES = 1024 * 1024 * 1024; // 1 GB
 export const DEFAULT_REPO_MAX_VERSIONS = 20;
@@ -115,6 +124,11 @@ try { db.exec("ALTER TABLE sites ADD COLUMN repo_max_versions INTEGER NOT NULL D
 try { db.exec("ALTER TABLE sites ADD COLUMN repo_visibility TEXT NOT NULL DEFAULT 'private'"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN repo_description TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE sites ADD COLUMN repo_banner TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN coll_layout TEXT NOT NULL DEFAULT 'grid'"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN coll_description TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN coll_bg_color TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN coll_bg_image TEXT"); } catch (_) {}
+try { db.exec("ALTER TABLE sites ADD COLUMN coll_banner TEXT"); } catch (_) {}
 try { db.exec("ALTER TABLE site_versions ADD COLUMN mcp_modified INTEGER DEFAULT 0"); } catch (_) {}
 try { db.exec("ALTER TABLE site_versions ADD COLUMN notes TEXT"); } catch (_) {}
 
@@ -603,6 +617,17 @@ export function deleteVersion(slug: string, version: string): boolean {
 export function deleteSite(slug: string): boolean {
   const site = getSite(slug);
   if (!site) return false;
+
+  // Collections (before the sites row goes, which would cascade the rows
+  // away): this site's own card list, and its card in every collection that
+  // shows it (plus the custom card image stored in that collection).
+  try {
+    const cards = db.query("SELECT collection_slug, image FROM collection_items WHERE item_slug = ? AND image IS NOT NULL").all(slug) as { collection_slug: string; image: string }[];
+    for (const c of cards) {
+      if (/^card-[a-z0-9-]+\.[a-z]+$/.test(c.image)) { try { unlinkSync(join(SITES_DIR, c.collection_slug, "_collection", c.image)); } catch (_) {} }
+    }
+    db.run("DELETE FROM collection_items WHERE collection_slug = ? OR item_slug = ?", slug, slug);
+  } catch (_) {}
 
   const siteDir = join(SITES_DIR, slug);
   if (existsSync(siteDir)) {
@@ -1671,6 +1696,11 @@ export function checkSiteHealth(slug: string): SiteHealth {
   if (!site) {
     return { slug, status: "missing_version_dir", current_version: null, detail: "site not in database" };
   }
+  if (site.site_type === "collection") {
+    // A collection is rendered from the database; its _collection/ folder
+    // only holds optional images, so there is nothing on disk to verify.
+    return { slug, status: "ok", current_version: null, detail: "" };
+  }
   if (site.site_type === "repository") {
     // Repositories keep everything under _repo/ (content-addressed objects);
     // there is no version directory or _current link to verify.
@@ -1728,7 +1758,8 @@ export function rebuildCurrentSymlinks(): RebuildResult {
   for (const row of sites) {
     const { slug, current_version } = row;
 
-    // Repository sites have no _current symlink by design.
+    // Repository and collection sites have no _current symlink by design.
+    if (row.site_type === "collection") { result.ok.push(slug); continue; }
     if (row.site_type === "repository") {
       if (existsSync(join(SITES_DIR, slug, "_repo"))) result.ok.push(slug);
       else result.warnings.push(`Site '${slug}': repository directory _repo is missing on disk`);

@@ -12,6 +12,7 @@ import { isTrapPath, recordTrapHit, recordNotFound, checkRateLimit, isAiCrawler 
 import { resolveSitePath, resolveAlias, resolveHostAlias, normalizeHost, getDefaultSite, getDefaultSiteFooterSlug, getSite } from "./sites";
 import { serveCmsLibFile } from "./cms-lib";
 import { handleRepoSite } from "./repo-site";
+import { handleCollectionSite } from "./collection";
 import {
   findRule, checkPass, passCookie, matchCode, gatePage, safeReturnPath,
   isUnlockThrottled, recordUnlockFailure, noteUse,
@@ -634,6 +635,30 @@ export function createServer(port: number) {
             }
             accessCode = pass.name;
           }
+        }
+
+        // --- Collection sites: a rendered page of cards ---
+        // After the access-code gate, so a collection can sit behind a code.
+        if (candidateSite && candidateSite.site_type === "collection") {
+          siteSlug = candidateSlug;
+          if (!candidateSite.active) {
+            status = 404;
+            const res = addSiteHeaders(new Response("Not found", { status: 404 }));
+            logReq(res);
+            return res;
+          }
+          // /slug -> /slug/ so the page's relative image paths resolve.
+          if (!hostAliasSlug && parts.length === 1 && !path.endsWith("/")) {
+            status = 301;
+            const res = addSiteHeaders(new Response(null, { status: 301, headers: { Location: path + "/" + url.search } }));
+            logReq(res);
+            return res;
+          }
+          const collPath = reqPath === "index.html" && !path.endsWith("index.html") ? "" : reqPath;
+          const res = addSiteHeaders(handleCollectionSite(req, candidateSite, collPath, { basePath, hostAliased: !!hostAliasSlug }));
+          status = res.status;
+          logReq(res);
+          return res;
         }
 
         // If a .html URL has a trailing slash (e.g. /slug/page.html/), strip it.

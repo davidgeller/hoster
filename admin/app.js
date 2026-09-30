@@ -458,6 +458,45 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
+  // --- New Collection Modal ---
+  const collModal = document.getElementById("coll-site-modal");
+  const closeCollModal = () => {
+    collModal.hidden = true;
+    document.getElementById("coll-site-form").reset();
+    document.getElementById("coll-error").textContent = "";
+  };
+  document.getElementById("new-coll-btn").addEventListener("click", () => { collModal.hidden = false; });
+  document.getElementById("coll-cancel").addEventListener("click", closeCollModal);
+  collModal.querySelector(".modal-backdrop").addEventListener("click", closeCollModal);
+  document.getElementById("coll-site-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const slug = document.getElementById("coll-slug").value.toLowerCase().trim();
+    const errEl = document.getElementById("coll-error");
+    const submitBtn = document.getElementById("coll-submit");
+    errEl.textContent = "";
+    if (!slug) { errEl.textContent = "Slug is required"; return; }
+    submitBtn.disabled = true;
+    try {
+      await api("/sites/collection", {
+        method: "POST",
+        body: JSON.stringify({
+          slug,
+          name: document.getElementById("coll-name").value.trim() || slug,
+          description: document.getElementById("coll-description").value.trim(),
+          layout: document.getElementById("coll-layout").value,
+        }),
+      });
+      closeCollModal();
+      await navigateTo("sites");
+      // Straight to the card picker: an empty collection isn't much use.
+      showSiteSettings(slug, null, null, null, null, null, null, "cards");
+    } catch (err) {
+      errEl.textContent = err.message;
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+
   // File drop: show the chosen ZIP so it's obvious something was picked.
   attachFileDrop(document.getElementById("file-drop"), document.getElementById("upload-file"), { ext: ".zip" });
 
@@ -2869,7 +2908,7 @@ async function loadSites() {
     return;
   }
 
-  el.innerHTML = sites.map((s) => s.site_type === "repository" ? renderRepositoryCard(s) : `
+  el.innerHTML = sites.map((s) => s.site_type === "repository" ? renderRepositoryCard(s) : s.site_type === "collection" ? renderCollectionCard(s) : `
     <div class="site-card" data-slug="${esc(s.slug)}">
       <div class="site-card-header">
         <div>
@@ -2925,6 +2964,9 @@ async function loadSites() {
   el.querySelectorAll("[data-repo-backup]").forEach((btn) => {
     btn.addEventListener("click", () => downloadRepositoryBackup(btn.dataset.repoBackup));
   });
+  el.querySelectorAll("[data-coll-cards]").forEach((btn) => {
+    btn.addEventListener("click", () => showSiteSettings(btn.dataset.collCards, null, null, null, null, null, null, "cards"));
+  });
 }
 
 // Card for a repository site (document library). No versions/deploy/file
@@ -2959,6 +3001,44 @@ function renderRepositoryCard(s) {
         <a href="${esc(sitesBase)}/${esc(s.slug)}/" target="_blank" rel="noopener" class="btn btn-sm btn-primary">Open</a>
         <button class="btn btn-sm" data-settings="${esc(s.slug)}">Settings</button>
         <button class="btn btn-sm" data-repo-backup="${esc(s.slug)}">Backup</button>
+        <button class="btn btn-sm" onclick="toggleSitePinned(${jsArg(s.slug)}, ${s.pinned_at ? "false" : "true"}).then(()=>loadSites())">${s.pinned_at ? "Unpin" : "Pin"}</button>
+        <button class="btn btn-sm ${s.active ? "btn-danger" : "btn-primary"}" onclick="toggleSiteActive(${jsArg(s.slug)}, ${!s.active})">
+          ${s.active ? "Disable" : "Enable"}
+        </button>
+        ${isSuperAdmin ? `<button class="btn btn-sm btn-danger" onclick="confirmDeleteSite(${jsArg(s.slug)})">Delete</button>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+// Card for a collection: a page of cards linking to other sites. Its content
+// is chosen in Settings → Cards, so there are no files or versions here.
+function renderCollectionCard(s) {
+  const n = s.collection_count || 0;
+  return `
+    <div class="site-card site-card-coll" data-slug="${esc(s.slug)}">
+      <div class="site-card-header">
+        <div>
+          <h2>${s.pinned_at ? '📌 ' : ''}${esc(s.name)}</h2>
+          <div class="site-slug">/${esc(s.slug)}${s.aliases && s.aliases.length ? ` <span class="text-muted text-sm">(also: ${s.aliases.map(a => "/" + esc(a)).join(", ")})</span>` : ""}${s.host_aliases && s.host_aliases.length ? ` <span class="text-muted text-sm">· host: ${s.host_aliases.map(h => esc(h)).join(", ")}</span>` : ""}</div>
+          <div class="site-version-info">
+            Collection · ${s.coll_layout === "carousel" ? "carousel" : "grid"}
+            ${s.allowed_countries !== null && s.allowed_countries !== undefined ? ` · countries: ${s.allowed_countries === "" ? "all" : esc(s.allowed_countries)}` : ""}
+          </div>
+        </div>
+        <div class="site-card-badges">
+          <span class="site-badge badge-coll">Collection</span>
+          <span class="site-badge ${s.active ? "badge-active" : "badge-inactive"}">${s.active ? "Active" : "Inactive"}</span>
+        </div>
+      </div>
+      <div class="site-meta">
+        <span>${n} card${n === 1 ? "" : "s"}</span>
+        <span>${timeAgo(s.updated_at)}</span>
+      </div>
+      <div class="site-actions">
+        <a href="${esc(sitesBase)}/${esc(s.slug)}/" target="_blank" rel="noopener" class="btn btn-sm btn-primary">Open</a>
+        <button class="btn btn-sm" data-coll-cards="${esc(s.slug)}">Cards</button>
+        <button class="btn btn-sm" data-settings="${esc(s.slug)}">Settings</button>
         <button class="btn btn-sm" onclick="toggleSitePinned(${jsArg(s.slug)}, ${s.pinned_at ? "false" : "true"}).then(()=>loadSites())">${s.pinned_at ? "Unpin" : "Pin"}</button>
         <button class="btn btn-sm ${s.active ? "btn-danger" : "btn-primary"}" onclick="toggleSiteActive(${jsArg(s.slug)}, ${!s.active})">
           ${s.active ? "Disable" : "Enable"}
@@ -3033,6 +3113,7 @@ function renderExplorerList() {
     const dotClass = !s.active ? "" : (s.health && s.health !== "ok" ? "broken" : "active");
     const tags = [];
     if (s.site_type === "repository") tags.push("Repository");
+    if (s.site_type === "collection") tags.push("Collection");
     if (s.spa) tags.push("SPA");
     if (s.mcp_enabled) tags.push(s.mcp_read_only ? "MCP·RO" : "MCP");
     return `
@@ -3068,6 +3149,7 @@ function selectExplorerSite(slug) {
 function renderExplorerActions(site) {
   const el = document.getElementById("explorer-actions");
   if (site.site_type === "repository") { renderExplorerRepositoryActions(site, el); return; }
+  if (site.site_type === "collection") { renderExplorerCollectionActions(site, el); return; }
   const aliasLine = (site.aliases && site.aliases.length)
     ? site.aliases.map(a => `/${esc(a)}`).join(", ")
     : '<span class="text-muted">none</span>';
@@ -3161,6 +3243,41 @@ function renderExplorerRepositoryActions(site, el) {
   `;
   el.querySelector('[data-act="settings"]').addEventListener("click", () => showSiteSettings(slug));
   el.querySelector('[data-act="backup"]').addEventListener("click", () => downloadRepositoryBackup(slug));
+  el.querySelector('[data-act="pin"]').addEventListener("click", async () => { await toggleSitePinned(slug, !site.pinned_at); loadExplorer(); });
+  el.querySelector('[data-act="toggle"]').addEventListener("click", async () => { await toggleSiteActive(slug, !site.active); loadExplorer(); });
+  const delBtn = el.querySelector('[data-act="delete"]');
+  if (delBtn) delBtn.addEventListener("click", async () => { await confirmDeleteSite(slug); loadExplorer(); });
+}
+
+function renderExplorerCollectionActions(site, el) {
+  const slug = site.slug;
+  const aliasLine = (site.aliases && site.aliases.length) ? site.aliases.map(a => `/${esc(a)}`).join(", ") : '<span class="text-muted">none</span>';
+  const hostLine = (site.host_aliases && site.host_aliases.length) ? site.host_aliases.map(h => esc(h)).join(", ") : '<span class="text-muted">none</span>';
+  const n = site.collection_count || 0;
+  el.innerHTML = `
+    <h2>${esc(site.name)}
+      <span class="site-badge badge-coll" style="margin-left:6px;vertical-align:middle">Collection</span>
+      <span class="site-badge ${site.active ? "badge-active" : "badge-inactive"}" style="margin-left:4px;vertical-align:middle">${site.active ? "Active" : "Inactive"}</span>
+    </h2>
+    <div class="slug-line">/${esc(site.slug)}</div>
+    <dl class="meta-grid">
+      <dt>Cards</dt><dd>${n}</dd>
+      <dt>Layout</dt><dd>${site.coll_layout === "carousel" ? "carousel" : "grid"}</dd>
+      <dt>Updated</dt><dd>${timeAgo(site.updated_at)}</dd>
+      <dt>Aliases</dt><dd>${aliasLine}</dd>
+      <dt>Hosts</dt><dd>${hostLine}</dd>
+    </dl>
+    <div class="action-group">
+      <a href="${esc(sitesBase)}/${esc(site.slug)}/" target="_blank" rel="noopener" class="btn btn-sm btn-primary">Open</a>
+      <button class="btn btn-sm" data-act="cards">Cards</button>
+      <button class="btn btn-sm" data-act="settings">Settings</button>
+      <button class="btn btn-sm" data-act="pin">${site.pinned_at ? "Unpin" : "Pin"}</button>
+      <button class="btn btn-sm ${site.active ? "btn-danger" : "btn-primary"}" data-act="toggle" style="grid-column:1 / -1">${site.active ? "Disable" : "Enable"}</button>
+      ${isSuperAdmin ? '<button class="btn btn-sm btn-danger" data-act="delete" style="grid-column:1 / -1">Delete</button>' : ""}
+    </div>
+  `;
+  el.querySelector('[data-act="cards"]').addEventListener("click", () => showSiteSettings(slug, null, null, null, null, null, null, "cards"));
+  el.querySelector('[data-act="settings"]').addEventListener("click", () => showSiteSettings(slug));
   el.querySelector('[data-act="pin"]').addEventListener("click", async () => { await toggleSitePinned(slug, !site.pinned_at); loadExplorer(); });
   el.querySelector('[data-act="toggle"]').addEventListener("click", async () => { await toggleSiteActive(slug, !site.active); loadExplorer(); });
   const delBtn = el.querySelector('[data-act="delete"]');
@@ -3404,7 +3521,339 @@ window.deleteVersionBtn = async function (slug, version) {
   } catch (err) { alert(err.message); }
 };
 
-window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpReadOnly, mcpAutoCommit, cmsEnabled) {
+// --- Collection settings (General look + Cards editor) ---
+//
+// Look settings (name, description, layout, colour) save with the modal's
+// Save button like every other site. Images and cards save as you go: each
+// upload, add, remove, or reorder is persisted immediately, and a card's
+// title/description when its field loses focus.
+function collectionSettingsPanels(slug, site, siteName) {
+  const imgPreview = (kind, has) => has
+    ? `<img src="${esc(sitesBase)}/${esc(slug)}/_collection/${kind}?t=${Date.now()}" alt="">`
+    : `<span class="text-sm text-muted">No ${kind === "banner" ? "banner" : "background image"} set.</span>`;
+  const imageRow = (kind, has, label) => `
+          <div class="coll-img-preview" data-coll-preview="${kind}" style="margin-bottom:8px">${imgPreview(kind, has)}</div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input type="file" data-coll-file="${kind}" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+            <button type="button" class="btn btn-sm" data-coll-upload="${kind}">${has ? `Replace ${label}` : `Upload ${label}`}</button>
+            <button type="button" class="btn btn-sm btn-danger" data-coll-remove="${kind}" ${has ? "" : "hidden"}>Remove</button>
+            <span class="text-sm" data-coll-status="${kind}"></span>
+          </div>`;
+  return `
+        <div class="settings-tab-panel active" data-panel="general">
+          <label>
+            Display Name
+            <input type="text" id="settings-name" value="${esc(siteName || "")}" maxlength="200" placeholder="Shown as the collection's title">
+            <small>The page heading and browser title. The slug (<code>/${esc(slug)}/</code>) is unchanged.</small>
+          </label>
+          <label>
+            Description <small>(optional, shown under the title)</small>
+            <textarea id="settings-coll-description" rows="2" maxlength="1000">${esc(site.coll_description || "")}</textarea>
+          </label>
+          <label style="margin-bottom:4px">Layout</label>
+          <div class="coll-layout-choice">
+            <label><input type="radio" name="settings-coll-layout" value="grid" ${site.coll_layout !== "carousel" ? "checked" : ""}> <span><strong>Grid</strong><br><small style="margin:0">Cards in tidy rows</small></span></label>
+            <label><input type="radio" name="settings-coll-layout" value="carousel" ${site.coll_layout === "carousel" ? "checked" : ""}> <span><strong>Carousel</strong><br><small style="margin:0">A 3D card flow you swipe through</small></span></label>
+          </div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+          <label style="margin-bottom:4px">Background color</label>
+          <div class="coll-color-row">
+            <input type="checkbox" id="settings-coll-bg-custom" ${site.coll_bg_color ? "checked" : ""} style="width:auto;margin:0">
+            <input type="color" id="settings-coll-bg-color" value="${esc(site.coll_bg_color || "#f4f5f8")}" ${site.coll_bg_color ? "" : "disabled"}>
+            <span class="text-sm text-muted">Custom color (otherwise a soft light grey). Heading text switches to white on dark colors.</span>
+          </div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+          <label>
+            Background image
+            <small>Covers the whole page behind the cards and stays put while visitors scroll; the heading gets a dark glass panel so it stays readable. A large landscape image (2400 × 1600 px) works best. PNG, JPEG, WebP, or GIF up to 8 MB. Saved as soon as you upload.</small>
+          </label>
+          ${imageRow("background", !!site.coll_bg_image, "background")}
+          <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+          <label>
+            Banner image
+            <small>A full-width strip across the top of the page. <strong>Best at 5:1 — 1600 × 320 px, or 2400 × 480 px for high-DPI screens.</strong> The top and bottom may be cropped slightly on very wide or narrow screens, so keep the subject centred. Saved as soon as you upload.</small>
+          </label>
+          ${imageRow("banner", !!site.coll_banner, "banner")}
+        </div>
+        <div class="settings-tab-panel" data-panel="cards">
+          <label>
+            Cards
+            <small>Each card links to one of your sites or repositories. Drag the handle (or use the arrows) to set the order. Titles, links, and descriptions are optional — leave them blank to use the site's own name, its address (its custom domain when it has one), and a public repository's description. Set a link to send visitors somewhere else, such as the domain your app runs on. A card without a picture gets a colored tile with its initials; a public repository's banner is used automatically. <strong>Changes here save automatically.</strong></small>
+          </label>
+          <div class="coll-items" id="coll-items"><div class="text-sm text-muted">Loading…</div></div>
+          <div class="coll-add">
+            <select id="coll-add-select"><option value="">Loading sites…</option></select>
+            <button type="button" class="btn btn-sm btn-primary" id="coll-add-btn">Add card</button>
+          </div>
+          <div class="form-error" id="coll-items-error" style="margin-top:6px"></div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+            <span class="text-sm text-muted" id="coll-items-status"></span>
+            <a href="${esc(sitesBase)}/${esc(slug)}/" target="_blank" rel="noopener" class="btn btn-sm">Open collection ↗</a>
+          </div>
+        </div>`;
+}
+
+// Where a card leads when no link is set: the site's first custom domain,
+// else its path on the sites hostname.
+function collDefaultLink(i) {
+  const site = collSitesBySlug.get(i.item_slug);
+  if (site && site.host_aliases && site.host_aliases.length) return `https://${site.host_aliases[0]}/`;
+  return `/${i.item_slug}/`;
+}
+const collSitesBySlug = new Map();
+
+function collInitials(name) {
+  const words = String(name || "").trim().split(/\s+/).filter(Boolean);
+  return (words.length > 1 ? words[0][0] + words[1][0] : (words[0] || "?").slice(0, 2)).toUpperCase();
+}
+function collHue(slug) {
+  let h = 0;
+  for (const ch of slug) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return h;
+}
+
+function mountCollectionSettings(modal, slug, site) {
+  // --- Background color toggle ---
+  const bgCustom = modal.querySelector("#settings-coll-bg-custom");
+  const bgColor = modal.querySelector("#settings-coll-bg-color");
+  bgCustom.addEventListener("change", () => { bgColor.disabled = !bgCustom.checked; });
+
+  // --- Banner / background images (saved immediately) ---
+  for (const kind of ["banner", "background"]) {
+    const fileEl = modal.querySelector(`[data-coll-file="${kind}"]`);
+    const uploadBtn = modal.querySelector(`[data-coll-upload="${kind}"]`);
+    const removeBtn = modal.querySelector(`[data-coll-remove="${kind}"]`);
+    const statusEl = modal.querySelector(`[data-coll-status="${kind}"]`);
+    const previewEl = modal.querySelector(`[data-coll-preview="${kind}"]`);
+    const label = kind === "banner" ? "banner" : "background";
+    uploadBtn.addEventListener("click", () => fileEl.click());
+    fileEl.addEventListener("change", async () => {
+      const file = fileEl.files && fileEl.files[0];
+      if (!file) return;
+      statusEl.style.color = "";
+      statusEl.textContent = "Uploading…";
+      try {
+        await uploadBinary(`/sites/${slug}/collection/${kind}`, file);
+        statusEl.textContent = "Saved.";
+        previewEl.innerHTML = `<img src="${esc(sitesBase)}/${esc(slug)}/_collection/${kind}?t=${Date.now()}" alt="">`;
+        uploadBtn.textContent = `Replace ${label}`;
+        removeBtn.hidden = false;
+      } catch (e) { statusEl.textContent = e.message; statusEl.style.color = "var(--danger)"; }
+      fileEl.value = "";
+    });
+    removeBtn.addEventListener("click", async () => {
+      try {
+        await api(`/sites/${slug}/collection/${kind}`, { method: "DELETE" });
+        previewEl.innerHTML = `<span class="text-sm text-muted">No ${kind === "banner" ? "banner" : "background image"} set.</span>`;
+        uploadBtn.textContent = `Upload ${label}`;
+        removeBtn.hidden = true;
+        statusEl.textContent = "";
+      } catch (e) { statusEl.textContent = e.message; statusEl.style.color = "var(--danger)"; }
+    });
+  }
+
+  // --- Cards editor ---
+  const listEl = modal.querySelector("#coll-items");
+  const addSelect = modal.querySelector("#coll-add-select");
+  const addBtn = modal.querySelector("#coll-add-btn");
+  const errEl = modal.querySelector("#coll-items-error");
+  const statusEl = modal.querySelector("#coll-items-status");
+  let items = [];
+  let candidates = [];   // sites this account can add
+  let saving = Promise.resolve();
+
+  const setStatus = (msg) => { statusEl.textContent = msg; };
+
+  // Serialize saves so a fast sequence of moves lands in order.
+  function persist() {
+    const payload = items.map(i => ({ slug: i.item_slug, title: i.title || null, blurb: i.blurb || null, url: i.url || null }));
+    errEl.textContent = "";
+    setStatus("Saving…");
+    saving = saving.then(async () => {
+      try {
+        const res = await api(`/sites/${slug}/collection/items`, { method: "PUT", body: JSON.stringify({ items: payload }) });
+        items = res.items;
+        setStatus("All changes saved.");
+      } catch (e) {
+        errEl.textContent = e.message;
+        setStatus("");
+        await reload();
+      }
+      render();
+    });
+    return saving;
+  }
+
+  async function reload() {
+    try { items = (await api(`/sites/${slug}/collection/items`)).items; } catch (e) { errEl.textContent = e.message; }
+  }
+
+  function thumb(i) {
+    if (i.has_image) return `<img src="${esc(sitesBase)}/${esc(slug)}/_collection/card/${esc(i.item_slug)}?t=${Date.now()}" alt="">`;
+    const h = collHue(i.item_slug);
+    return `<span style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,hsl(${h} 70% 55%),hsl(${h + 40} 65% 42%))">${esc(collInitials(i.title || i.name))}</span>`;
+  }
+
+  function renderAddOptions() {
+    const inList = new Set(items.map(i => i.item_slug));
+    const avail = candidates.filter(c => !inList.has(c.slug));
+    addSelect.innerHTML = avail.length
+      ? `<option value="">Choose a site or repository…</option>` + avail.map(c =>
+          `<option value="${esc(c.slug)}">${esc(c.name)} — /${esc(c.slug)}${c.site_type === "repository" ? " (repository)" : ""}${c.active ? "" : " (disabled)"}</option>`).join("")
+      : `<option value="">${candidates.length ? "Every site is already in this collection" : "No sites or repositories to add yet"}</option>`;
+    addSelect.disabled = addBtn.disabled = !avail.length;
+  }
+
+  function render() {
+    renderAddOptions();
+    if (!items.length) {
+      listEl.innerHTML = '<div class="text-sm text-muted">No cards yet. Pick a site or repository below to add the first one.</div>';
+      return;
+    }
+    listEl.innerHTML = items.map((i, idx) => `
+      <div class="coll-item${i.active ? "" : " inactive"}" data-idx="${idx}">
+        <span class="coll-grip" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
+        <div class="coll-thumb">${thumb(i)}</div>
+        <div class="coll-fields">
+          <div><span class="coll-name">${esc(i.name)}</span> <span class="coll-sub">/${esc(i.item_slug)} · ${i.site_type === "repository" ? "Repository" : "Site"}${i.active ? "" : " · disabled, hidden on the page"}</span></div>
+          <input type="text" data-field="title" maxlength="120" placeholder="Card title (default: ${esc(i.name)})" value="${esc(i.title || "")}">
+          <input type="url" data-field="url" maxlength="2000" placeholder="Link (default: ${esc(collDefaultLink(i))})" value="${esc(i.url || "")}">
+          <textarea data-field="blurb" rows="1" maxlength="500" placeholder="${esc(i.description ? "Default: " + i.description.slice(0, 80) + (i.description.length > 80 ? "…" : "") : "Short description (optional)")}">${esc(i.blurb || "")}</textarea>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <input type="file" data-card-file accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+            <button type="button" class="btn btn-sm" data-card-upload>${i.image ? "Replace picture" : "Add picture"}</button>
+            ${i.image ? '<button type="button" class="btn btn-sm" data-card-clear>Remove picture</button>' : ""}
+            <span class="text-sm text-muted" data-card-status></span>
+          </div>
+        </div>
+        <div class="coll-buttons">
+          <button type="button" class="btn btn-sm" data-move="-1" title="Move up" aria-label="Move up" ${idx === 0 ? "disabled" : ""}>↑</button>
+          <button type="button" class="btn btn-sm" data-move="1" title="Move down" aria-label="Move down" ${idx === items.length - 1 ? "disabled" : ""}>↓</button>
+          <button type="button" class="btn btn-sm btn-danger" data-remove title="Remove from collection" aria-label="Remove">✕</button>
+        </div>
+      </div>`).join("");
+
+    listEl.querySelectorAll(".coll-item").forEach(row => {
+      const idx = Number(row.dataset.idx);
+      const item = items[idx];
+      row.querySelectorAll("[data-field]").forEach(input => {
+        input.addEventListener("change", () => {
+          item[input.dataset.field] = input.value.trim();
+          persist();
+        });
+      });
+      row.querySelectorAll("[data-move]").forEach(btn => btn.addEventListener("click", () => {
+        const to = idx + Number(btn.dataset.move);
+        if (to < 0 || to >= items.length) return;
+        items.splice(to, 0, items.splice(idx, 1)[0]);
+        render();
+        persist();
+      }));
+      row.querySelector("[data-remove]").addEventListener("click", () => {
+        if (item.image && !confirm(`Remove "${item.title || item.name}"? Its custom picture will be deleted.`)) return;
+        items.splice(idx, 1);
+        render();
+        persist();
+      });
+      const fileEl = row.querySelector("[data-card-file]");
+      const cardStatus = row.querySelector("[data-card-status]");
+      row.querySelector("[data-card-upload]").addEventListener("click", () => fileEl.click());
+      fileEl.addEventListener("change", async () => {
+        const file = fileEl.files && fileEl.files[0];
+        if (!file) return;
+        cardStatus.textContent = "Uploading…";
+        try {
+          await saving;
+          await uploadBinary(`/sites/${slug}/collection/items/${item.item_slug}/image`, file);
+          await reload();
+          render();
+          setStatus("Picture saved.");
+        } catch (e) { cardStatus.textContent = e.message; cardStatus.style.color = "var(--danger)"; }
+      });
+      row.querySelector("[data-card-clear]")?.addEventListener("click", async () => {
+        try {
+          await api(`/sites/${slug}/collection/items/${item.item_slug}/image`, { method: "DELETE" });
+          await reload();
+          render();
+          setStatus("Picture removed.");
+        } catch (e) { cardStatus.textContent = e.message; }
+      });
+
+      // Drag to reorder, started only from the handle so text fields stay
+      // selectable.
+      const grip = row.querySelector(".coll-grip");
+      grip.addEventListener("mousedown", () => { row.draggable = true; });
+      grip.addEventListener("touchstart", () => { row.draggable = true; }, { passive: true });
+      row.addEventListener("dragstart", (e) => {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", String(idx));
+        row.classList.add("dragging");
+      });
+      row.addEventListener("dragend", () => {
+        row.draggable = false;
+        row.classList.remove("dragging");
+        listEl.querySelectorAll(".drop-before,.drop-after").forEach(r => r.classList.remove("drop-before", "drop-after"));
+      });
+      row.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        const after = e.offsetY > row.offsetHeight / 2 || e.clientY > row.getBoundingClientRect().top + row.offsetHeight / 2;
+        row.classList.toggle("drop-after", after);
+        row.classList.toggle("drop-before", !after);
+      });
+      row.addEventListener("dragleave", () => row.classList.remove("drop-before", "drop-after"));
+      row.addEventListener("drop", (e) => {
+        e.preventDefault();
+        const from = Number(e.dataTransfer.getData("text/plain"));
+        const after = row.classList.contains("drop-after");
+        row.classList.remove("drop-before", "drop-after");
+        if (!Number.isInteger(from) || from === idx) return;
+        const moved = items.splice(from, 1)[0];
+        let to = idx + (after ? 1 : 0);
+        if (from < to) to--;
+        items.splice(to, 0, moved);
+        render();
+        persist();
+      });
+    });
+  }
+
+  addBtn.addEventListener("click", () => {
+    const pick = candidates.find(c => c.slug === addSelect.value);
+    if (!pick) return;
+    items.push({ item_slug: pick.slug, name: pick.name, site_type: pick.site_type, active: pick.active, title: null, blurb: null, url: null, image: null, has_image: false, description: pick.repo_description || null });
+    render();
+    persist();
+  });
+
+  // Enter in a card field saves that field instead of submitting the modal.
+  modal.querySelector('[data-panel="cards"]').addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target.tagName === "INPUT") { e.preventDefault(); e.target.blur(); }
+  });
+
+  (async () => {
+    await reload();
+    try {
+      const { sites } = await api("/sites");
+      candidates = sites.filter(s => (s.site_type === "web" || s.site_type === "repository") && s.slug !== slug);
+      for (const s of sites) collSitesBySlug.set(s.slug, s);
+    } catch (_) {}
+    render();
+  })();
+}
+
+// POST raw bytes (an image) to an admin endpoint.
+async function uploadBinary(path, file) {
+  const res = await fetch(`${API}${path}`, { method: "POST", headers: { "X-CSRF-Token": csrfToken, "Content-Type": file.type || "application/octet-stream" }, body: file });
+  let data = {};
+  try { data = await res.json(); } catch (_) {}
+  if (!res.ok) {
+    if (handleSessionLost(res, path)) throw new Error("Session ended — please sign in again");
+    throw new Error(data.error || "Upload failed");
+  }
+  return data;
+}
+
+window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpReadOnly, mcpAutoCommit, cmsEnabled, initialTab) {
   // Always re-fetch the site so the modal reflects the current DB state. The
   // caller's data may be stale: after a prior save, only the originating view
   // (sites or explorer) gets refreshed, so opening Settings from the other
@@ -3432,6 +3881,9 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
   } catch (_) {}
 
   const isRepo = !!siteRecord && siteRecord.site_type === "repository";
+  const isColl = !!siteRecord && siteRecord.site_type === "collection";
+  const kindWord = isRepo ? "repository" : isColl ? "collection" : "site";
+  const collPanels = isColl ? collectionSettingsPanels(slug, siteRecord, siteName) : "";
   const repoGeneralPanel = isRepo ? `
         <div class="settings-tab-panel active" data-panel="general">
           <label>
@@ -3503,18 +3955,19 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
   modal.innerHTML = `
     <div class="modal-backdrop"></div>
     <div class="modal-content">
-      <h2>${isRepo ? "Repository Settings" : "Site Settings"} — ${esc(slug)}</h2>
+      <h2>${isRepo ? "Repository Settings" : isColl ? "Collection Settings" : "Site Settings"} — ${esc(slug)}</h2>
       <div class="settings-tabs" role="tablist">
         <button type="button" class="settings-tab active" role="tab" data-tab="general">General</button>
-        ${isRepo ? "" : '<button type="button" class="settings-tab" role="tab" data-tab="mcp">MCP</button>'}
+        ${isColl ? '<button type="button" class="settings-tab" role="tab" data-tab="cards">Cards</button>' : ""}
+        ${isRepo || isColl ? "" : '<button type="button" class="settings-tab" role="tab" data-tab="mcp">MCP</button>'}
         <button type="button" class="settings-tab" role="tab" data-tab="access">Access</button>
         ${isRepo ? "" : '<button type="button" class="settings-tab" role="tab" data-tab="protection">Protection</button>'}
         ${isSuperAdmin ? '<button type="button" class="settings-tab" role="tab" data-tab="users">Users</button>' : ""}
         <button type="button" class="settings-tab" role="tab" data-tab="aliases">Aliases</button>
-        ${isRepo ? '<button type="button" class="settings-tab" role="tab" data-tab="backup">Backup</button>' : '<button type="button" class="settings-tab" role="tab" data-tab="cms">CMS</button>'}
+        ${isRepo ? '<button type="button" class="settings-tab" role="tab" data-tab="backup">Backup</button>' : isColl ? "" : '<button type="button" class="settings-tab" role="tab" data-tab="cms">CMS</button>'}
       </div>
       <form id="site-settings-form">
-        ${repoGeneralPanel}
+        ${repoGeneralPanel}${collPanels}
         <div class="settings-tab-panel" data-panel="access">
           ${isRepo ? `
           <label>
@@ -3556,9 +4009,11 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
         ${isSuperAdmin ? `
         <div class="settings-tab-panel" data-panel="users">
           <label>
-            Who can manage this ${isRepo ? "repository" : "site"}
+            Who can manage this ${kindWord}
             <small>${isRepo
               ? "Administrators can always upload, edit, and delete here. Site users you grant below can too (and can view it even when it's private). Everyone else gets the public view, or nothing if the repository is private."
+              : isColl
+              ? "Administrators can always manage every collection. Site users you grant below can edit this collection's look and cards — reorder or remove any card, and add sites they manage themselves."
               : "Administrators can always manage every site. Site users you grant below see this site in their admin panel and can update its files, versions, and settings — but can't create or delete sites."}
           </small>
           </label>
@@ -3566,7 +4021,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
           <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
           <label>
             Add a new site user with access
-            <small>Creates the account and grants it this ${isRepo ? "repository" : "site"} right away. They sign in with these credentials${isRepo ? " — on the repository page or at /_admin" : " at /_admin"}.</small>
+            <small>Creates the account and grants it this ${kindWord} right away. They sign in with these credentials${isRepo ? " — on the repository page or at /_admin" : " at /_admin"}.</small>
           </label>
           <div style="display:grid;grid-template-columns:1fr 1fr auto auto;gap:6px;align-items:start">
             <input type="text" id="settings-user-new-name" placeholder="username or email" pattern="[A-Za-z0-9._+\\-]{1,64}(@[A-Za-z0-9\\-]+(\\.[A-Za-z0-9\\-]+)+)?" title="A handle or an email address" autocomplete="off">
@@ -3580,7 +4035,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
           <div class="form-error" id="settings-users-error" style="margin-top:4px"></div>
           <p class="text-sm text-muted" style="margin-top:10px">Passwords, 2FA, and administrator rights for every account are managed under <a href="#" id="settings-users-go">Settings → Users</a>.</p>
         </div>` : ""}
-        ${isRepo ? "" : `
+        ${isRepo || isColl ? "" : `
         <div class="settings-tab-panel active" data-panel="general">
           <label>
             Display Name
@@ -3606,7 +4061,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
         </div>
         `}
 
-        ${isRepo ? "" : `
+        ${isRepo || isColl ? "" : `
         <div class="settings-tab-panel" data-panel="mcp">
           <label style="display:flex;align-items:center;gap:10px;flex-direction:row">
             <input type="checkbox" id="settings-mcp" ${mcpEnabled ? "checked" : ""} style="width:auto;margin:0">
@@ -3681,7 +4136,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
           <div class="form-error" id="host-alias-error" style="margin-top:4px"></div>
         </div>
 
-        ${isRepo ? "" : `
+        ${isRepo || isColl ? "" : `
         <div class="settings-tab-panel" data-panel="cms">
           <label style="display:flex;align-items:center;gap:10px;flex-direction:row">
             <input type="checkbox" id="settings-cms" ${cmsEnabled ? "checked" : ""} style="width:auto;margin:0">
@@ -3733,6 +4188,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
       });
     });
   });
+  if (initialTab) modal.querySelector(`.settings-tab[data-tab="${initialTab}"]`)?.click();
 
   // Add alias
   modal.querySelector("#add-alias-btn").addEventListener("click", async () => {
@@ -4112,7 +4568,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
 
   // Initial load: only fetch when the CMS tab gains focus, but prime once so
   // it's ready immediately when the tab opens.
-  if (!isRepo) loadCmsStatus();
+  if (!isRepo && !isColl) loadCmsStatus();
 
   // --- Access tab: per-site country override (both site types) ---
   const accessPicker = createSiteCountryPicker(modal.querySelector("#settings-access-countries"), siteRecord ? siteRecord.allowed_countries : null);
@@ -4191,7 +4647,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
       const signInUrl = isRepo
         ? (hostAliases.length ? `https://${hostAliases[0]}/` : `${sitesBase || location.origin}/${slug}/`)
         : adminSignInUrl();
-      showCredentialsModal({ title: "Account created", username, password, signInUrl, mustChange, note: `${username} can now manage this ${isRepo ? "repository" : "site"}.` });
+      showCredentialsModal({ title: "Account created", username, password, signInUrl, mustChange, note: `${username} can now manage this ${kindWord}.` });
       loadSiteUsers();
     } catch (err) { errEl.textContent = err.message; }
   });
@@ -4202,6 +4658,9 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
     setTimeout(() => selectSettingsTab("users"), 50);
   });
   if (isSuperAdmin) loadSiteUsers();
+
+  // --- Collection-only panels: look and cards ---
+  if (isColl) mountCollectionSettings(modal, slug, siteRecord);
 
   // --- Repository-only panels: banner, backup, restore ---
   if (isRepo) {
@@ -4268,6 +4727,28 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
   modal.querySelector("#site-settings-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const newName = document.getElementById("settings-name").value.trim();
+    if (isColl) {
+      try {
+        await api(`/sites/${slug}/settings`, {
+          method: "POST",
+          body: JSON.stringify({
+            name: newName,
+            allowed_countries: accessPicker.value(),
+            block_ai_bots: modal.querySelector("#settings-block-ai").checked,
+            collection: {
+              description: modal.querySelector("#settings-coll-description").value,
+              layout: modal.querySelector('input[name="settings-coll-layout"]:checked').value,
+              bg_color: modal.querySelector("#settings-coll-bg-custom").checked ? modal.querySelector("#settings-coll-bg-color").value : null,
+            },
+          }),
+        });
+        modal.remove();
+        if (currentView === "explorer") loadExplorer(); else loadSites();
+      } catch (err) {
+        document.getElementById("settings-error").textContent = err.message;
+      }
+      return;
+    }
     if (isRepo) {
       try {
         await api(`/sites/${slug}/settings`, {

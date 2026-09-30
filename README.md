@@ -44,6 +44,7 @@ In every case the Hoster binary itself is identical — only the front-end TLS l
 - **SPA support** — auto-detects Angular, React, and Vue builds (with deep root directory detection); rewrites `<base href>` for subpath hosting
 - **Default landing page** — send the hostname root to any hosted site or external URL instead of the admin sign-in, with an optional footer bar over the default site that links back to the admin panel
 - **Repository sites** — a second site type: a document library with a built-in interface, no HTML to upload. Drag and drop files or whole folders, browse in grid or list view, move and copy between folders, preview images / video / audio / PDFs / text / Markdown, create and edit text and Markdown files in place, package any selection as a ZIP, share files or folders with expiring links, and keep per-file version history with one-click restore. Deleted items sit in a trash for 30 days. Each repository has its own storage limit, versions-per-file cap, public or private visibility, optional banner image, per-site user grants, and a self-contained backup archive
+- **Collections** — a third site type: one page that gathers any of your sites and repositories as cards. Choose a grid or a 3D card carousel, set a background color or image and a banner, give each card an optional title, description, and picture, and drag the cards into order
 - **Protected paths** — put a simple access code in front of a whole site (`/`) or any folder (`/members/`). Each path can have several named codes; visitors enter one once and stay unlocked, and the request log shows which code they used
 - **Per-site country restrictions** — every site (web or repository) can inherit the global allow-list, open itself to every country, or use its own list
 - **Custom domains (host aliases)** — point any domain at a specific site so `spryly.com/about` serves the same content as `/spryly/about` on the canonical hostname, with no slug in the URL
@@ -123,6 +124,18 @@ What a repository gives you:
 - Per-site country restrictions apply to repositories too, including share links.
 
 Repositories store data under `sites/<slug>/_repo/objects/` (content-addressed blobs) with the tree and history in SQLite (`repo_files`, `repo_versions`, `repo_blobs`).
+
+## Collections
+
+A **collection** is a single page of cards, each linking to one of your sites or repositories — a simple way to group related content on one Hoster. Create one from *Sites → New Collection*; it opens at `/<slug>/` (or at the root of a custom domain).
+
+- **Cards** — *Settings → Cards* (or the *Cards* button on the collection) lists the cards. Add any web site or repository, drag the handle or use the arrows to reorder, and remove cards you no longer want. Each card can override the title (defaults to the site's name), the link (defaults to the site's custom domain, else `/<slug>/` — set any `https://` address, such as the domain your app runs on), and description (defaults to a public repository's description) and take its own picture; without one, a public repository's banner is used, and anything else gets a colored tile with its initials. Card changes save as you make them.
+- **Layout** — *Grid* lays the cards out in rows; *Carousel* shows them as a 3D card flow visitors move through with the arrows, the dots, the keyboard, a swipe, or by clicking a side card. Without JavaScript the carousel falls back to a plain wrapped list.
+- **Look** — an optional background color (heading text turns white on dark colors), background image (the heading sits on a dark glass panel over it), and a full-width banner (best at 5:1, e.g. 1600 × 320 px).
+- **What shows** — disabled or deleted sites drop off the page automatically. A card for a site with a custom domain links to that domain. On a collection served from a custom domain, cards for path-routed sites need either their own link or the sites hostname from *Settings → Security → Admin Hostname*; without one they appear but aren't clickable.
+- **Access** — collections are public pages, but they support access codes (*Settings → Protection*), per-site countries, AI-crawler refusal, aliases, and custom domains like any site. Site users granted a collection can change its look and cards: they can reorder or remove any card, and add sites they manage themselves.
+
+Collections store their images under `sites/<slug>/_collection/` and their cards in SQLite (`collection_items`); both are included in the platform backup.
 
 ## Updating from a GitHub release
 

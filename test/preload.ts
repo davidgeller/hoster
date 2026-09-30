@@ -43,3 +43,4 @@ await import("../src/oauth");
 await import("../src/analytics");
 await import("../src/auth");
 await import("../src/webauthn");
+await import("../src/collection");

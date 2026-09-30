@@ -56,6 +56,10 @@ import {
 } from "./oauth";
 import { createBackup, previewBackup, restoreBackup } from "./backup";
 import {
+  createCollectionSite, updateCollectionSettings, countCollectionItems, listCollectionItemViews, planCollectionItems, setCollectionItems,
+  setCollectionImage, clearCollectionImage, setCardImage, clearCardImage,
+} from "./collection";
+import {
   getRpContext, beginRegistration, finishRegistration,
   beginLogin as beginPasskeyLogin, finishLogin as finishPasskeyLogin,
   listCredentials, deleteCredential, hasCredentialsForRp,
@@ -304,6 +308,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
       path === "/_admin/api/sites/repair" ||
       path === "/_admin/api/sites/blank" ||
       path === "/_admin/api/sites/repository" ||
+      path === "/_admin/api/sites/collection" ||
       /^\/_admin\/api\/sites\/[a-z0-9-]+\/repo\/restore$/.test(path) ||
       (path === "/_admin/api/sites" && req.method === "POST");
     if (isPlatformPath) return forbidden();
@@ -317,7 +322,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     const siteScoped = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)(?:\/|$)/);
     if (siteScoped) {
       const slug = siteScoped[1];
-      if (slug !== "blank" && slug !== "repair" && slug !== "repository" && !canSite(slug)) return forbidden();
+      if (slug !== "blank" && slug !== "repair" && slug !== "repository" && slug !== "collection" && !canSite(slug)) return forbidden();
     }
     const analyticsSite = path.match(/^\/_admin\/api\/analytics\/site\/([a-z0-9-]+)$/);
     if (analyticsSite && !canSite(analyticsSite[1])) return forbidden();
@@ -484,6 +489,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
           host_aliases: getHostAliases(s.slug),
           health: health.status,
           health_detail: health.status === "ok" ? null : health.detail,
+          ...(s.site_type === "collection" ? { collection_count: countCollectionItems(s.slug) } : {}),
         };
       });
     return json({ sites });
@@ -543,6 +549,20 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     }
   }
 
+  // --- Create a collection (a page of cards linking to sites and repositories) ---
+  if (path === "/_admin/api/sites/collection" && req.method === "POST") {
+    const body = await readJsonBodyOrEmpty<{ slug?: string; name?: string; description?: string; layout?: "grid" | "carousel"; bg_color?: string | null }>(req);
+    const slug = body.slug?.toLowerCase().trim();
+    if (!slug) return json({ error: "Slug is required" }, 400);
+    try {
+      const site = createCollectionSite(slug, body.name || slug, { description: body.description, layout: body.layout, bg_color: body.bg_color });
+      audit("site_created_collection", `${slug} (${site.coll_layout})`);
+      return json({ site });
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
+  }
+
   // --- Country list for the per-site picker (any signed-in account) ---
   if (path === "/_admin/api/countries" && req.method === "GET") {
     return json({ countries: listCountries() });
@@ -593,6 +613,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
       allowed_countries?: string[] | null;
       block_ai_bots?: boolean;
       repo?: { quota_bytes?: number; max_versions?: number; visibility?: "public" | "private"; description?: string | null };
+      collection?: { description?: string | null; layout?: "grid" | "carousel"; bg_color?: string | null };
     }>(req);
     if (!body) return json({ error: "Invalid request body" }, 400);
     const site = getSite(slug);
@@ -618,6 +639,13 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
       if ("block_ai_bots" in body && !!body.block_ai_bots !== !!site.block_ai_bots) {
         setSiteBlockAiBots(slug, !!body.block_ai_bots);
         audit("site_ai_bots_updated", `${slug}: ${body.block_ai_bots ? "blocked" : "allowed"}`);
+      }
+      if (site.site_type === "collection") {
+        if (body.collection && typeof body.collection === "object") {
+          updateCollectionSettings(slug, body.collection);
+          audit("collection_settings_updated", slug);
+        }
+        return json({ ok: true });
       }
       if (site.site_type === "repository") {
         if (body.repo && typeof body.repo === "object") {
@@ -895,6 +923,63 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
         clearRepoBanner(slug);
         audit("repo_banner_cleared", slug);
         return json({ ok: true });
+      }
+    } catch (e: any) {
+      return json({ error: e.message }, 400);
+    }
+  }
+
+  // --- Collections: cards, banner, background, card images ---
+  const collMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/collection\/(items|banner|background|items\/([a-z0-9-]+)\/image)$/);
+  if (collMatch) {
+    const [, slug, op, itemSlug] = collMatch;
+    const site = getSite(slug);
+    if (!site) return json({ error: "Not found" }, 404);
+    if (site.site_type !== "collection") return json({ error: "Not a collection" }, 400);
+    try {
+      if (op === "items" && req.method === "GET") {
+        return json({ items: listCollectionItemViews(slug) });
+      }
+      if (op === "items" && req.method === "PUT") {
+        const body = await readJsonBody<{ items?: unknown }>(req);
+        if (!body) return json({ error: "Invalid request body" }, 400);
+        const plan = planCollectionItems(slug, body.items);
+        // A site user may keep whatever an administrator put here, but may
+        // only add sites they manage themselves.
+        const denied = plan.added.filter(s => !canSite(s));
+        if (denied.length) return json({ error: `You don't have access to: ${denied.join(", ")}` }, 403);
+        setCollectionItems(slug, plan.items);
+        audit("collection_items_updated", `${slug} (${plan.items.length} card${plan.items.length === 1 ? "" : "s"})`);
+        return json({ ok: true, items: listCollectionItemViews(slug) });
+      }
+      const isImageUpload = req.method === "POST" && op !== "items";
+      if (isImageUpload) {
+        const declared = parseInt(req.headers.get("content-length") || "0", 10) || 0;
+        if (declared > 8 * 1024 * 1024) return json({ error: "Images must be 8 MB or smaller" }, 413);
+      }
+      if (op === "banner" || op === "background") {
+        if (req.method === "POST") {
+          const result = setCollectionImage(slug, op, new Uint8Array(await req.arrayBuffer()));
+          audit(`collection_${op}_set`, `${slug} (${result.mime})`);
+          return json({ ok: true, ...result });
+        }
+        if (req.method === "DELETE") {
+          clearCollectionImage(slug, op);
+          audit(`collection_${op}_cleared`, slug);
+          return json({ ok: true });
+        }
+      }
+      if (itemSlug) {
+        if (req.method === "POST") {
+          const result = setCardImage(slug, itemSlug, new Uint8Array(await req.arrayBuffer()));
+          audit("collection_card_image_set", `${slug}:${itemSlug}`);
+          return json({ ok: true, ...result });
+        }
+        if (req.method === "DELETE") {
+          clearCardImage(slug, itemSlug);
+          audit("collection_card_image_cleared", `${slug}:${itemSlug}`);
+          return json({ ok: true });
+        }
       }
     } catch (e: any) {
       return json({ error: e.message }, 400);

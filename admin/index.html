@@ -193,6 +193,10 @@
           <div class="view-header">
             <h1>Sites</h1>
             <div style="display:flex;gap:8px">
+              <button class="btn" id="new-coll-btn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                New Collection
+              </button>
               <button class="btn" id="new-repo-btn">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                 New Repository
@@ -318,6 +322,42 @@
                 <button type="submit" class="btn btn-primary" id="repo-submit">Create</button>
               </div>
               <div class="form-error" id="repo-error"></div>
+            </form>
+          </div>
+        </div>
+
+        <!-- New Collection Modal -->
+        <div id="coll-site-modal" class="modal" hidden>
+          <div class="modal-backdrop"></div>
+          <div class="modal-content">
+            <h2>Create Collection</h2>
+            <p class="text-sm text-muted mb-2">A single page that gathers some of your sites and repositories as cards. After creating it, open <em>Settings</em> to pick the cards, put them in order, and add a banner or background.</p>
+            <form id="coll-site-form">
+              <label>
+                Slug (URL path)
+                <input type="text" id="coll-slug" placeholder="showcase" pattern="[a-z0-9][a-z0-9\-]*[a-z0-9]?" required>
+                <small>Lowercase letters, numbers, hyphens. Opens at <code>/<strong>slug</strong>/</code></small>
+              </label>
+              <label>
+                Display Name
+                <input type="text" id="coll-name" placeholder="Our Projects">
+              </label>
+              <label>
+                Description <small>(optional, shown under the title)</small>
+                <textarea id="coll-description" rows="2" maxlength="1000" placeholder="What ties these together?"></textarea>
+              </label>
+              <label>
+                Layout
+                <select id="coll-layout">
+                  <option value="grid" selected>Grid — cards in rows</option>
+                  <option value="carousel">Carousel — a 3D card flow</option>
+                </select>
+              </label>
+              <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" id="coll-cancel">Cancel</button>
+                <button type="submit" class="btn btn-primary" id="coll-submit">Create</button>
+              </div>
+              <div class="form-error" id="coll-error"></div>
             </form>
           </div>
         </div>
