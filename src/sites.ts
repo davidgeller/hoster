@@ -202,7 +202,7 @@ export function getSite(slug: string): Site | null {
 
 export function listVersions(slug: string): SiteVersion[] {
   return db.query(
-    "SELECT * FROM site_versions WHERE site_slug = ? ORDER BY created_at DESC"
+    "SELECT * FROM site_versions WHERE site_slug = ? ORDER BY created_at DESC, rowid DESC"
   ).all(slug) as SiteVersion[];
 }
 
@@ -291,9 +291,20 @@ function findIndexHtmlRoot(baseDir: string, dir: string, maxDepth = 4): string |
   return null;
 }
 
-function generateVersion(): string {
-  const now = new Date();
-  return now.toISOString().replace(/[-:T]/g, "").replace(/\..+/, ""); // 20260311143022
+// Version ids are second-resolution timestamps (20260311143022). Two versions
+// of one site created within the same second (a scripted redeploy, a
+// double-clicked Deploy) would collide, so later ones get a -2, -3, ... suffix.
+// The id is also a directory name, so both the DB and the disk are checked.
+function generateVersion(slug: string): string {
+  const base = new Date().toISOString().replace(/[-:T]/g, "").replace(/\..+/, "");
+  const taken = (v: string) =>
+    !!db.query("SELECT 1 FROM site_versions WHERE site_slug = ? AND version = ?").get(slug, v) ||
+    existsSync(join(SITES_DIR, slug, v));
+  if (!taken(base)) return base;
+  for (let n = 2; ; n++) {
+    const candidate = `${base}-${n}`;
+    if (!taken(candidate)) return candidate;
+  }
 }
 
 function updateCurrentSymlink(slug: string, version: string) {
@@ -362,7 +373,7 @@ export function createBlankSite(slug: string, name: string): { site: Site; versi
     throw new Error(`Site '${slug}' already exists`);
   }
 
-  const version = generateVersion();
+  const version = generateVersion(slug);
   const siteDir = join(SITES_DIR, slug);
   const versionDir = join(siteDir, version);
 
@@ -398,7 +409,7 @@ export async function deploySite(
     throw new Error("Upload exceeds maximum size of 500 MB");
   }
 
-  const version = generateVersion();
+  const version = generateVersion(slug);
   const siteDir = join(SITES_DIR, slug);
   const versionDir = join(siteDir, version);
   const stagingDir = join(siteDir, `_staging_${version}`);
@@ -544,7 +555,7 @@ export function commitVersion(slug: string, label?: string | null, notes?: strin
 
   // Fork a new version as a copy of the frozen one. Portable across macOS/Linux;
   // sites are small so full copy is acceptable. Optimize to CoW/hardlinks later.
-  const newVersion = generateVersion();
+  const newVersion = generateVersion(slug);
   const newDir = join(SITES_DIR, slug, newVersion);
   const cp = Bun.spawnSync(["cp", "-R", currentDir, newDir], {
     stdout: "ignore",

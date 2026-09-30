@@ -309,8 +309,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
       path === "/_admin/api/sites/blank" ||
       path === "/_admin/api/sites/repository" ||
       path === "/_admin/api/sites/collection" ||
-      /^\/_admin\/api\/sites\/[a-z0-9-]+\/repo\/restore$/.test(path) ||
-      (path === "/_admin/api/sites" && req.method === "POST");
+      /^\/_admin\/api\/sites\/[a-z0-9-]+\/repo\/restore$/.test(path);
     if (isPlatformPath) return forbidden();
 
     // Creating/deleting whole sites is a provisioning action — administrators only.
@@ -508,8 +507,15 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     if (!slug) return json({ error: "Slug is required" }, 400);
     if (!file || !file.name.endsWith(".zip")) return json({ error: "ZIP file is required" }, 400);
 
+    // The same endpoint creates a new site or redeploys an existing one. Site
+    // users may redeploy sites assigned to them; creating a site is a
+    // provisioning action reserved for administrators. The slug comes from an
+    // editable form field, so the existence check is what keeps a site user
+    // from provisioning a new site by typing an unused slug.
+    const existed = !!getSite(slug);
+    if (!isSuper && (!existed || !canSite(slug))) return forbidden();
+
     try {
-      const existed = !!getSite(slug);
       const result = await deploySite(slug, name, await file.arrayBuffer(), label, notes);
       audit(existed ? "site_updated" : "site_created", `${slug} -> ${result.version.version}${notes ? " (with notes)" : ""}`);
       return json(result);
@@ -1056,7 +1062,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
   }
 
   // --- Version management ---
-  const versionSwitchMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/versions\/(\d+)\/activate$/);
+  const versionSwitchMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/versions\/(\d+(?:-\d+)?)\/activate$/);
   if (versionSwitchMatch && req.method === "POST") {
     const [, slug, version] = versionSwitchMatch;
     const ok = switchVersion(slug, version);
@@ -1066,7 +1072,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
 
   // Edit a version's label and/or release notes. Fields left out are untouched;
   // an empty string clears the field.
-  const versionMetaMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/versions\/(\d+)\/meta$/);
+  const versionMetaMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/versions\/(\d+(?:-\d+)?)\/meta$/);
   if (versionMetaMatch && req.method === "POST") {
     const [, slug, version] = versionMetaMatch;
     const body = await readJsonBody<{ label?: string | null; notes?: string | null }>(req);
@@ -1085,7 +1091,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     }
   }
 
-  const versionDeleteMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/versions\/(\d+)$/);
+  const versionDeleteMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/versions\/(\d+(?:-\d+)?)$/);
   if (versionDeleteMatch && req.method === "DELETE") {
     const [, slug, version] = versionDeleteMatch;
     try {

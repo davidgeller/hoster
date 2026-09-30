@@ -5,6 +5,9 @@
 // which routes, and where a step-up password is demanded).
 
 import { beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 import db from "../src/db";
 import {
   createAdminUser, updateAdminUser, deleteAdminUser, listAdminUsers,
@@ -14,7 +17,7 @@ import {
   createPending2faToken, peekPending2faUser, consumePending2faToken,
   enableTotp, isTotpEnabled, useRecoveryCode, getRemainingRecoveryCodes,
 } from "../src/auth";
-import { createBlankSite, deleteSite, listSites } from "../src/sites";
+import { createBlankSite, deleteSite, getSite, listSites } from "../src/sites";
 import { handleAdminApi } from "../src/admin-api";
 
 const IP = "203.0.113.9";
@@ -257,6 +260,55 @@ describe("admin API authorization", () => {
 
     const sites = await asUser(editor, "GET", "/_admin/api/sites");
     expect(sites.data.sites.map((s: any) => s.slug)).toEqual(["alpha"]);
+  });
+
+  test("site users can redeploy a ZIP to their own site but cannot create or touch others", async () => {
+    const root = await createAdminUser("root", PW, { isAdmin: true });
+    createBlankSite("alpha", "Alpha");
+    createBlankSite("beta", "Beta");
+    const editor = await createAdminUser("editor", PW, { sites: ["alpha"] });
+
+    // Build a one-page site ZIP once; each deploy posts a fresh copy of it.
+    const work = mkdtempSync(join(tmpdir(), "hoster-redeploy-"));
+    writeFileSync(join(work, "index.html"), "<h1>v2</h1>");
+    const zipPath = join(work, "site.zip");
+    if (Bun.spawnSync(["zip", "-q", zipPath, "index.html"], { cwd: work }).exitCode !== 0) throw new Error("zip failed");
+    const zipBytes = readFileSync(zipPath);
+
+    const deploy = async (userId: number, slug: string) => {
+      const { sessionToken, csrfToken } = createSession(IP, userId);
+      const form = new FormData();
+      form.set("slug", slug);
+      form.set("name", slug);
+      form.set("file", new File([zipBytes], "site.zip", { type: "application/zip" }));
+      const req = new Request("http://localhost/_admin/api/sites", {
+        method: "POST",
+        headers: { cookie: `hoster_session=${sessionToken}`, "x-csrf-token": csrfToken, "x-real-ip": IP },
+        body: form,
+      });
+      return (await handleAdminApi(req, "/_admin/api/sites"))!.status;
+    };
+
+    try {
+      // Their own existing site: allowed, and a new version goes live.
+      const before = getSite("alpha")!.current_version;
+      expect(await deploy(editor, "alpha")).toBe(200);
+      expect(getSite("alpha")!.current_version).not.toBe(before);
+
+      // A site they aren't assigned to: no.
+      expect(await deploy(editor, "beta")).toBe(403);
+
+      // An unused slug would create a site — administrators only.
+      expect(await deploy(editor, "gamma")).toBe(403);
+      expect(getSite("gamma")).toBeFalsy();
+
+      // Administrators can still both redeploy and create.
+      expect(await deploy(root, "beta")).toBe(200);
+      expect(await deploy(root, "gamma")).toBe(200);
+      expect(getSite("gamma")).toBeTruthy();
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
   });
 
   test("administrator actions on admin accounts need a step-up password", async () => {
