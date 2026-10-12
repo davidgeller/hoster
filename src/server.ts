@@ -720,7 +720,28 @@ export function createServer(port: number) {
           return res;
         }
 
-        // 404
+        // 404. A site may ship its own 404.html at its content root: it is
+        // served with a real 404 status (so search engines don't index a
+        // soft error) and the same <base href> rewrite as any page, so its
+        // links and assets resolve. Conditional headers are dropped so a
+        // cached ETag can never turn a missing page into a 304.
+        if (candidateSite && candidateSite.active && candidateSite.site_type !== "repository" && candidateSite.site_type !== "collection") {
+          const custom = resolveSitePath(candidateSlug, "404.html", { spaFallback: false });
+          if (custom && custom.filePath.endsWith("404.html")) {
+            siteSlug = candidateSlug;
+            status = 404;
+            const plain = new Request(req.url, { method: "GET" });
+            const page = await serveHtml(custom.filePath, basePath, plain, custom.version, false);
+            const headers = new Headers(page.headers);
+            headers.set("Cache-Control", "no-store");
+            headers.delete("ETag");
+            const res = addSiteHeaders(new Response(page.body, { status: 404, headers }));
+            logReq(res);
+            return res;
+          }
+        }
+
+        // 404: the built-in page.
         status = 404;
         const notFoundBody = "<!DOCTYPE html><html><head><title>404</title><style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f5f5f5;color:#333}h1{font-weight:300;font-size:2em}</style></head><body><h1>404 &mdash; Not Found</h1></body></html>";
         const res404 = addSiteHeaders(new Response(notFoundBody, {
