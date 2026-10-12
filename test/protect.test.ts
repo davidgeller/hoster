@@ -336,7 +336,26 @@ describe("security review regressions", () => {
   test("the pass cookie is scoped to the site's path on the canonical host", async () => {
     clearUnlockFailures();
     const res = await unlock("OPEN4ME", `/${SLUG}/members/`);
-    expect(res.headers.get("set-cookie")).toContain(`Path=/${SLUG}/;`);
+    expect(res.headers.get("set-cookie")).toContain(`Path=/${SLUG};`);
+  });
+
+  test("unlocking at the bare site URL (no trailing slash) sticks", async () => {
+    clearUnlockFailures();
+    const whole = createRule(SLUG, { path_prefix: "/" });
+    addCode(SLUG, whole.id, { name: "Everyone", code: "WHOLE123" });
+    try {
+      const res = await unlock("WHOLE123", `/${SLUG}`);
+      expect(res.status).toBe(303);
+      expect(res.headers.get("location")).toBe(`/${SLUG}`);
+      // A Path=/slug/ cookie is never sent back to /slug, so the visitor
+      // would land on the gate again.
+      const setCookie = res.headers.get("set-cookie") || "";
+      expect(setCookie).toContain(`Path=/${SLUG};`);
+      const page = await fetch(`${base}/${SLUG}`, { headers: { Cookie: cookieFrom(res), Accept: "text/html" }, redirect: "manual" });
+      expect(page.status).not.toBe(401);
+    } finally {
+      deleteRule(SLUG, whole.id);
+    }
   });
 
   test("scanner paths under a protected folder get the gate, not a revealing 404", async () => {

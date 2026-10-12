@@ -204,13 +204,16 @@ export function checkPass(req: Request, rule: IndexedRule): ProtectCode | null {
 }
 
 // `path` scopes the cookie: "/" on a custom domain (the whole host is the
-// site), "/<segment>/" on the canonical host so the pass isn't sent along
-// with requests to every other site hosted there.
+// site), "/<segment>" on the canonical host so the pass isn't sent along
+// with requests to every other site hosted there. No trailing slash: a
+// cookie with Path=/site/ is never sent to "/site" itself, so a visitor who
+// unlocked at /site would be bounced straight back to the gate. Path=/site
+// still matches only "/site" and "/site/…", never "/siteother".
 export function passCookie(rule: ProtectRule, code: ProtectCode, path = "/"): string {
   const maxAge = Math.max(1, rule.session_days) * 86400;
   const exp = Math.floor(Date.now() / 1000) + maxAge;
   const value = `${code.id}.${exp}.${sign(rule.id, code.id, exp, code.code)}`;
-  const cookiePath = /^\/[a-z0-9-]+\/$/.test(path) ? path : "/";
+  const cookiePath = /^\/[a-z0-9-]+$/.test(path) ? path : "/";
   return `${cookieName(rule.id)}=${value}; Path=${cookiePath}; HttpOnly; SameSite=Lax; Secure; Max-Age=${maxAge}`;
 }
 

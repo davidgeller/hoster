@@ -789,7 +789,7 @@ export function createServer(port: number) {
         accessCode = hit.name;
         return new Response(null, {
           status: 303,
-          headers: { Location: returnTo, "Set-Cookie": passCookie(rule, hit, hostAliasSlug ? "/" : `/${retParts[0]}/`), "Cache-Control": "no-store" },
+          headers: { Location: returnTo, "Set-Cookie": passCookie(rule, hit, hostAliasSlug ? "/" : `/${retParts[0]}`), "Cache-Control": "no-store" },
         });
       }
 
