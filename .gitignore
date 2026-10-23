@@ -22,3 +22,7 @@ hoster
 
 # Local deploy config (contains server host/user — keep private)
 deploy.sh
+deploy_firetrex.sh
+
+# Private notes (security reviews, runbooks with account details)
+docs/
