@@ -73,7 +73,9 @@ if [ "${HOSTER_NO_RESTART:-0}" = "1" ]; then
   exit 0
 fi
 
-if command -v systemctl >/dev/null && systemctl list-unit-files 2>/dev/null | grep -q '^hoster\.service'; then
+# Read the whole listing before testing it: piping into `grep -q` lets grep exit
+# early, systemctl dies of SIGPIPE, and under pipefail that reads as "no unit".
+if command -v systemctl >/dev/null && [ -n "$(systemctl list-unit-files --no-legend hoster.service 2>/dev/null)" ]; then
   echo "Restarting the hoster service…"
   if [ "$(id -u)" = "0" ]; then systemctl restart hoster; else sudo systemctl restart hoster; fi
   for _ in $(seq 1 20); do
