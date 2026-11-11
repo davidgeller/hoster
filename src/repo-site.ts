@@ -311,8 +311,21 @@ export async function handleRepoSite(req: Request, site: Site, reqPath: string, 
 
   // --- Reads ---
   if (api === "tree" && req.method === "GET") {
+    // The body carries a content hash (`rev`, also the ETag) so an open page
+    // can poll cheaply with If-None-Match and only re-render when someone
+    // else has changed the repository.
     const tree = listRepoTree(site.slug);
-    return json({ ...tree, tags: listRepoTags(site.slug), stats: repoStats(site.slug) });
+    const payload = JSON.stringify({ ...tree, tags: listRepoTags(site.slug), stats: repoStats(site.slug) });
+    const rev = new Bun.CryptoHasher("sha1").update(payload).digest("hex").slice(0, 20);
+    const etag = `"${rev}"`;
+    const cacheHeaders = { "Cache-Control": "no-cache, private", "ETag": etag };
+    const inm = req.headers.get("if-none-match");
+    if (inm && inm.split(",").some(t => t.trim().replace(/^W\//, "") === etag)) {
+      return new Response(null, { status: 304, headers: cacheHeaders });
+    }
+    return new Response(payload.slice(0, -1) + `,"rev":"${rev}"}`, {
+      headers: { "Content-Type": "application/json", ...cacheHeaders },
+    });
   }
 
   if (api === "tags" && req.method === "GET") {

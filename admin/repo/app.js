@@ -29,6 +29,7 @@
     previewPath: null,
     trashMode: false,
     uploads: [],         // { name, size, status, pct }
+    treeRev: null,       // content hash of the last tree applied (GET tree `rev`)
   };
 
   // ---------- Helpers ----------
@@ -333,7 +334,11 @@
 
   async function loadTree() {
     if (!state.canRead) return;
-    const data = await api("tree");
+    applyTree(await api("tree"));
+  }
+
+  function applyTree(data) {
+    state.treeRev = data.rev || null;
     state.files = data.files;
     state.dirs = data.dirs;
     state.tags = data.tags || [];
@@ -347,6 +352,63 @@
     render();
     if (state.previewPath) showPreview(state.previewPath, { keep: true });
   }
+
+  // ---------- Picking up other people's changes ----------
+  // The tree response carries a content hash (also its ETag). While the page
+  // is visible we re-ask with If-None-Match: an unchanged repository costs a
+  // bodiless 304, a changed one hands back the new tree to apply.
+  const POLL_MS = 30000;
+  let checking = false, lastCheck = 0;
+
+  function busy() {
+    return !!dragPaths
+      || document.querySelector(".modal:not([hidden])")
+      || state.uploads.some(u => u.status === "queued" || u.status === "uploading");
+  }
+
+  async function checkForUpdates({ manual = false } = {}) {
+    if (!state.canRead || checking) return;
+    if (!manual && (document.hidden || !state.treeRev || busy())) return;
+    checking = true;
+    lastCheck = Date.now();
+    try {
+      const headers = state.treeRev ? { "If-None-Match": `"${state.treeRev}"` } : {};
+      const res = await fetch(API + "tree", { headers, credentials: "same-origin", cache: "no-store" });
+      if (res.status === 304) { if (manual) toast("Already up to date"); return; }
+      if (!res.ok) {
+        if (manual) {
+          const data = await res.json().catch(() => ({}));
+          if (data.sign_in) sessionLost(); else toast(data.error || `Refresh failed (${res.status})`, true);
+        }
+        return;
+      }
+      const data = await res.json();
+      if (data.rev && data.rev === state.treeRev) { if (manual) toast("Already up to date"); return; }
+      const before = state.files.length;
+      applyTree(data);
+      const added = state.files.length - before;
+      toast(added > 0 ? `${added} new file${added === 1 ? "" : "s"} — repository updated` : "Repository updated");
+    } catch (e) {
+      if (manual) toast(e.message || "Refresh failed", true);
+    } finally {
+      checking = false;
+    }
+  }
+
+  // Tick often but only ask every POLL_MS, so a manual refresh or a
+  // tab-return check pushes the next poll back instead of doubling up.
+  setInterval(() => { if (Date.now() - lastCheck >= POLL_MS) checkForUpdates(); }, 5000);
+  const checkSoon = () => { if (!document.hidden && Date.now() - lastCheck > 5000) checkForUpdates(); };
+  document.addEventListener("visibilitychange", checkSoon);
+  window.addEventListener("focus", checkSoon);
+
+  $("refresh-btn").addEventListener("click", async () => {
+    const btn = $("refresh-btn");
+    if (btn.classList.contains("spinning")) return;
+    btn.classList.add("spinning");
+    try { await checkForUpdates({ manual: true }); }
+    finally { setTimeout(() => btn.classList.remove("spinning"), 400); }
+  });
 
   // ---------- Rendering ----------
   function currentEntries() {

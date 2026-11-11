@@ -440,6 +440,25 @@ describe("repository HTTP surface", () => {
     expect(mk.status).toBe(401);
   });
 
+  test("tree carries a content rev/ETag and answers 304 until the repository changes", async () => {
+    const first = await fetch(`${base()}/${SITE}/_repo/api/tree`);
+    const etag = first.headers.get("etag");
+    const body = await first.json();
+    expect(body.rev).toMatch(/^[0-9a-f]{20}$/);
+    expect(etag).toBe(`"${body.rev}"`);
+    const same = await fetch(`${base()}/${SITE}/_repo/api/tree`, { headers: { "If-None-Match": etag! } });
+    expect(same.status).toBe(304);
+    const weak = await fetch(`${base()}/${SITE}/_repo/api/tree`, { headers: { "If-None-Match": `W/${etag}` } });
+    expect(weak.status).toBe(304);
+    await putRepoFile(SITE, "someone-else.txt", "new content");
+    const changed = await fetch(`${base()}/${SITE}/_repo/api/tree`, { headers: { "If-None-Match": etag! } });
+    expect(changed.status).toBe(200);
+    const next = await changed.json();
+    expect(next.rev).not.toBe(body.rev);
+    expect(next.files.map((f: any) => f.path)).toContain("someone-else.txt");
+    deleteRepoPaths(SITE, ["someone-else.txt"]);
+  });
+
   test("active content is never served executable on the site origin", async () => {
     const html = await fetch(`${base()}/${SITE}/_repo/api/file?path=evil.html`);
     expect(html.headers.get("content-security-policy")).toContain("sandbox");

@@ -75,6 +75,11 @@ a:hover { text-decoration: underline; }
 .btn-danger:hover { background: var(--danger-bg); }
 .btn-ghost { border-color: transparent; background: transparent; }
 .btn-ghost:hover { background: var(--bg-hover); }
+.refresh-btn { padding: 7px 9px; color: var(--text-secondary); }
+.refresh-btn:hover { color: var(--text); }
+.refresh-btn.spinning svg { animation: refresh-spin 0.7s linear infinite; }
+@keyframes refresh-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .refresh-btn.spinning svg { animation: none; opacity: 0.5; } }
 .btn-sm { padding: 4px 10px; font-size: 0.8rem; }
 .icon-btn { border: 0; background: transparent; color: var(--text-secondary); cursor: pointer; font: inherit; font-size: 1rem; padding: 4px 8px; border-radius: var(--radius-sm); }
 .icon-btn:hover { background: var(--bg-hover); color: var(--text); }
