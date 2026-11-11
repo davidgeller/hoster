@@ -5463,12 +5463,15 @@ const languageNames = (() => { try { return new Intl.DisplayNames([navigator.lan
 async function loadAnalyticsSites() {
   if (analyticsSitesLoaded) return;
   try {
-    const sites = await api("/sites");
+    const { sites } = await api("/sites");
     const sel = document.getElementById("analytics-site");
+    const current = sel.value;
     sel.innerHTML = '<option value="">All sites</option>' +
-      sites.map(site => `<option value="${esc(site.slug)}">${esc(site.name || site.slug)}</option>`).join("");
+      [...sites].sort((a, b) => (a.name || a.slug).localeCompare(b.name || b.slug))
+        .map(site => `<option value="${esc(site.slug)}">${esc(site.name || site.slug)}</option>`).join("");
+    sel.value = current;
     analyticsSitesLoaded = true;
-  } catch (_) {}
+  } catch (e) { console.error("Couldn't load the analytics site list", e); }
 }
 
 function bindAnalyticsView() {
