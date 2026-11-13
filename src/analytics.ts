@@ -184,6 +184,13 @@ function slugScope(slugs?: string[] | null): { clause: string; params: string[] 
   return { clause: ` AND site_slug IN (${slugs.map(() => "?").join(",")})`, params: slugs };
 }
 
+// Every time-windowed query below writes `+ip`, not `ip`, in COUNT(DISTINCT …)
+// and GROUP BY. Without the unary plus, SQLite prefers walking idx_requests_ip
+// in order (it saves a sort) over seeking idx_requests_created — which means
+// reading the ENTIRE request log, not just the window. On a busy install that
+// turned a 40 ms query into 7+ seconds and stalled the dashboard. The `+`
+// makes the expression unindexable, so the time index wins. getTopSites does
+// the same with `+site_slug` to keep it off idx_requests_site.
 export function getOverviewStats(hours: number = 24, slugs?: string[] | null) {
   // SQL-side cutoff so created_at (in datetime('now') format) compares correctly.
   const cutoff = `-${hours} hours`;
@@ -192,7 +199,7 @@ export function getOverviewStats(hours: number = 24, slugs?: string[] | null) {
   const requestStats = db.query(`
     SELECT
       COUNT(*) as total_requests,
-      COUNT(DISTINCT ip) as unique_visitors,
+      COUNT(DISTINCT +ip) as unique_visitors,
       ROUND(AVG(response_time_ms), 1) as avg_response_ms,
       ROUND(MIN(response_time_ms), 1) as min_response_ms,
       ROUND(MAX(response_time_ms), 1) as max_response_ms,
@@ -219,9 +226,9 @@ export function getTopSites(hours: number = 24, limit: number = 10, slugs?: stri
   const cutoff = `-${hours} hours`;
   const scope = slugScope(slugs);
   return db.query(`
-    SELECT site_slug, COUNT(*) as hits, COUNT(DISTINCT ip) as visitors
-    FROM requests WHERE created_at > datetime('now', ?) AND site_slug IS NOT NULL${scope.clause}
-    GROUP BY site_slug ORDER BY hits DESC LIMIT ?
+    SELECT site_slug, COUNT(*) as hits, COUNT(DISTINCT +ip) as visitors
+    FROM requests WHERE created_at > datetime('now', ?) AND +site_slug IS NOT NULL${scope.clause}
+    GROUP BY +site_slug ORDER BY hits DESC LIMIT ?
   `).all(cutoff, ...scope.params, limit);
 }
 
@@ -267,7 +274,7 @@ export function getTrafficOverTime(hours: number = 24, slugs?: string[] | null) 
     SELECT
       ${bucketExpr} as bucket,
       COUNT(*) as hits,
-      COUNT(DISTINCT ip) as visitors
+      COUNT(DISTINCT +ip) as visitors
     FROM requests WHERE created_at > datetime('now', ?)${scope.clause}
     GROUP BY bucket ORDER BY bucket
   `).all(cutoff, ...scope.params);
@@ -304,7 +311,7 @@ export function getTopCountries(hours: number = 24, limit: number = 15, slugs?: 
   const cutoff = `-${hours} hours`;
   const scope = slugScope(slugs);
   return db.query(`
-    SELECT country, COUNT(*) as hits, COUNT(DISTINCT ip) as visitors
+    SELECT country, COUNT(*) as hits, COUNT(DISTINCT +ip) as visitors
     FROM requests WHERE created_at > datetime('now', ?) AND country IS NOT NULL${scope.clause}
     GROUP BY country ORDER BY hits DESC LIMIT ?
   `).all(cutoff, ...scope.params, limit);
@@ -384,13 +391,13 @@ export function getBlockedRequests(hours: number = 24, limit: number = 10, slugs
   `).get(cutoff, ...scope.params) as any;
 
   const blockedCountries = db.query(`
-    SELECT country, COUNT(*) as hits, COUNT(DISTINCT ip) as ips
+    SELECT country, COUNT(*) as hits, COUNT(DISTINCT +ip) as ips
     FROM requests WHERE created_at > datetime('now', ?) AND status = 403 AND country IS NOT NULL${scope.clause}
     GROUP BY country ORDER BY hits DESC LIMIT ?
   `).all(cutoff, ...scope.params, limit);
 
   const blockedPaths = db.query(`
-    SELECT path, COUNT(*) as hits, COUNT(DISTINCT ip) as ips
+    SELECT path, COUNT(*) as hits, COUNT(DISTINCT +ip) as ips
     FROM requests WHERE created_at > datetime('now', ?) AND status = 403${scope.clause}
     GROUP BY path ORDER BY hits DESC LIMIT ?
   `).all(cutoff, ...scope.params, limit);
@@ -398,7 +405,7 @@ export function getBlockedRequests(hours: number = 24, limit: number = 10, slugs
   const blockedIps = db.query(`
     SELECT ip, country, COUNT(*) as hits
     FROM requests WHERE created_at > datetime('now', ?) AND status = 403${scope.clause}
-    GROUP BY ip ORDER BY hits DESC LIMIT ?
+    GROUP BY +ip ORDER BY hits DESC LIMIT ?
   `).all(cutoff, ...scope.params, limit);
 
   return { total: totalBlocked.count, countries: blockedCountries, paths: blockedPaths, ips: blockedIps };
@@ -410,7 +417,7 @@ export function getSiteStats(slug: string, hours: number = 24) {
   const overview = db.query(`
     SELECT
       COUNT(*) as total_requests,
-      COUNT(DISTINCT ip) as unique_visitors,
+      COUNT(DISTINCT +ip) as unique_visitors,
       ROUND(AVG(response_time_ms), 1) as avg_response_ms,
       COALESCE(SUM(request_bytes), 0) as total_request_bytes,
       COALESCE(SUM(response_bytes), 0) as total_response_bytes

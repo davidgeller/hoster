@@ -2797,19 +2797,70 @@ function closeBlankModal() {
 }
 
 // --- Dashboard ---
+// Loading state. The first load (nothing on screen yet) fills every panel
+// with animated skeletons; a reload — range change, coming back to the view —
+// keeps the old numbers visible, dimmed, under a sweeping progress bar.
+let dashLoadSeq = 0;
+
+function dashSkeletonChart() {
+  const bars = Array.from({ length: 24 }, (_, i) =>
+    `<span class="skel-bar" style="animation-delay:${(i * 0.06).toFixed(2)}s"></span>`).join("");
+  return `<div class="skel-chart" aria-hidden="true">${bars}</div>`;
+}
+
+function dashSkeletonList(rows) {
+  return `<ul class="ranked-list skel-list" aria-hidden="true">${Array.from({ length: rows }, (_, i) =>
+    `<li class="ranked-item"><span class="skel skel-line" style="width:${70 - (i * 9) % 40}%"></span><span class="skel skel-num"></span></li>`).join("")}</ul>`;
+}
+
+function showDashboardLoading() {
+  const view = document.getElementById("view-dashboard");
+  const stats = document.getElementById("dash-stats");
+  view.setAttribute("aria-busy", "true");
+  if (stats.children.length) { view.classList.add("dash-refreshing"); return; }
+  stats.innerHTML = ["Requests", "Unique Visitors", "Active Sites", "Avg Response", "Bandwidth Out"].map((l) =>
+    `<div class="stat-card"><div class="stat-label">${l}</div><div class="skel skel-value"></div></div>`).join("");
+  document.getElementById("dash-traffic-chart").innerHTML = dashSkeletonChart();
+  document.getElementById("dash-bandwidth-chart").innerHTML = dashSkeletonChart();
+  document.getElementById("dash-bandwidth-legend").innerHTML = "";
+  document.getElementById("dash-top-sites").innerHTML = dashSkeletonList(8);
+  document.getElementById("dash-countries").innerHTML = dashSkeletonList(6);
+  document.getElementById("dash-status-codes").innerHTML = dashSkeletonList(4);
+  const blockedEl = document.getElementById("dash-blocked");
+  if (blockedEl) blockedEl.innerHTML = dashSkeletonList(4);
+}
+
+function hideDashboardLoading() {
+  const view = document.getElementById("view-dashboard");
+  view.classList.remove("dash-refreshing");
+  view.removeAttribute("aria-busy");
+}
+
 async function loadDashboard() {
   const hours = document.getElementById("dash-range").value;
+  const seq = ++dashLoadSeq;
   loadHealthBanner();
+  showDashboardLoading();
 
-  const [overview, topSites, traffic, bandwidth, countries, statusCodes, blocked] = await Promise.all([
-    api(`/analytics/overview?hours=${hours}`),
-    api(`/analytics/top-sites?hours=${hours}`),
-    api(`/analytics/traffic?hours=${hours}`),
-    api(`/analytics/bandwidth?hours=${hours}`),
-    api(`/analytics/countries?hours=${hours}`),
-    api(`/analytics/status-codes?hours=${hours}`),
-    api(`/analytics/blocked?hours=${hours}`),
-  ]);
+  let results;
+  try {
+    results = await Promise.all([
+      api(`/analytics/overview?hours=${hours}`),
+      api(`/analytics/top-sites?hours=${hours}`),
+      api(`/analytics/traffic?hours=${hours}`),
+      api(`/analytics/bandwidth?hours=${hours}`),
+      api(`/analytics/countries?hours=${hours}`),
+      api(`/analytics/status-codes?hours=${hours}`),
+      api(`/analytics/blocked?hours=${hours}`),
+    ]);
+  } catch (err) {
+    if (seq === dashLoadSeq) hideDashboardLoading();
+    throw err;
+  }
+  // A newer load (the range was changed mid-flight) owns the screen now.
+  if (seq !== dashLoadSeq) return;
+  hideDashboardLoading();
+  const [overview, topSites, traffic, bandwidth, countries, statusCodes, blocked] = results;
 
   // Stats cards
   document.getElementById("dash-stats").innerHTML = `

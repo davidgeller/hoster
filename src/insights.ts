@@ -118,7 +118,7 @@ export function getInsights(f: InsightFilter) {
   const { where, params } = buildWhere(f);
   const all = (sql: string, ...extra: any[]) => db.query(sql).all(...params, ...extra) as any[];
 
-  const totals = db.query(`SELECT COUNT(*) AS hits, COUNT(DISTINCT ip) AS visitors FROM requests WHERE ${where}`).get(...params) as { hits: number; visitors: number };
+  const totals = db.query(`SELECT COUNT(*) AS hits, COUNT(DISTINCT +ip) AS visitors FROM requests WHERE ${where}`).get(...params) as { hits: number; visitors: number };
 
   // Bot share of the same slice, ignoring the humans toggle.
   const everyone = buildWhere(f, { humans: false });
@@ -132,17 +132,17 @@ export function getInsights(f: InsightFilter) {
              WHEN 'ai-bot' THEN 'AI crawlers (refused)'
              WHEN 'geo' THEN 'Geo-blocked visitors'
              ELSE COALESCE(NULLIF(browser, 'Unknown'), 'No user agent') END AS name,
-           COUNT(*) AS hits, COUNT(DISTINCT ip) AS ips
+           COUNT(*) AS hits, COUNT(DISTINCT +ip) AS ips
     FROM requests WHERE ${botSlice.where} GROUP BY name ORDER BY hits DESC LIMIT 12
   `).all(...botSlice.params) as { name: string; hits: number; ips: number }[];
   const botTotal = (db.query(`SELECT COUNT(*) AS n FROM requests WHERE ${botSlice.where}`).get(...botSlice.params) as { n: number }).n;
 
   const pages = f.path ? [] : all(`
-    SELECT site_slug, path, COUNT(*) AS hits, COUNT(DISTINCT ip) AS visitors
+    SELECT site_slug, path, COUNT(*) AS hits, COUNT(DISTINCT +ip) AS visitors
     FROM requests WHERE ${where} GROUP BY site_slug, path ORDER BY hits DESC LIMIT 50
   `);
 
-  const countries = all(`SELECT country AS key, COUNT(*) AS hits, COUNT(DISTINCT ip) AS visitors FROM requests WHERE ${where} AND country IS NOT NULL GROUP BY country ORDER BY hits DESC LIMIT 15`);
+  const countries = all(`SELECT country AS key, COUNT(*) AS hits, COUNT(DISTINCT +ip) AS visitors FROM requests WHERE ${where} AND country IS NOT NULL GROUP BY country ORDER BY hits DESC LIMIT 15`);
   const browsers = all(`SELECT ${BROWSER_NAME_SQL} AS key, COUNT(*) AS hits FROM requests WHERE ${where} AND browser IS NOT NULL GROUP BY key ORDER BY hits DESC LIMIT 12`);
   const os = all(`SELECT ${OS_SQL} AS key, COUNT(*) AS hits FROM requests WHERE ${where} GROUP BY key ORDER BY hits DESC LIMIT 10`);
   const devices = all(`SELECT ${DEVICE_SQL} AS key, COUNT(*) AS hits FROM requests WHERE ${where} GROUP BY key ORDER BY hits DESC`);
@@ -161,12 +161,12 @@ export function getInsights(f: InsightFilter) {
   `);
 
   const traffic = fillBuckets(f.hours, all(`
-    SELECT ${bucketExpression(f.hours)} AS bucket, COUNT(*) AS hits, COUNT(DISTINCT ip) AS visitors
+    SELECT ${bucketExpression(f.hours)} AS bucket, COUNT(*) AS hits, COUNT(DISTINCT +ip) AS visitors
     FROM requests WHERE ${where} GROUP BY bucket ORDER BY bucket
   `));
 
   const statuses = all(`SELECT status AS key, COUNT(*) AS hits FROM requests WHERE ${where} GROUP BY status ORDER BY hits DESC LIMIT 10`);
-  const accessCodes = all(`SELECT access_code AS key, COUNT(*) AS hits, COUNT(DISTINCT ip) AS visitors, MAX(created_at) AS last_seen FROM requests WHERE ${where} AND access_code IS NOT NULL GROUP BY access_code ORDER BY hits DESC LIMIT 20`);
+  const accessCodes = all(`SELECT access_code AS key, COUNT(*) AS hits, COUNT(DISTINCT +ip) AS visitors, MAX(created_at) AS last_seen FROM requests WHERE ${where} AND access_code IS NOT NULL GROUP BY access_code ORDER BY hits DESC LIMIT 20`);
 
   return {
     filter: { hours: f.hours, site: f.site ?? null, path: f.path ?? null, humans: !!f.humans, pages: !!f.pages },
