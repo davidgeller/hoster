@@ -488,6 +488,20 @@ You can create aliases so a site is reachable at multiple URL paths. For example
 
 Aliases share the same content, versions, and settings as the original site. They appear on the site card alongside the primary slug.
 
+### Changing a Site's Slug
+
+An administrator can rename a site's slug — its URL path, folder, and MCP identity — under **Settings → Aliases → Slug**. Every reference moves with it: versions, path and host aliases, site-user grants, MCP and OAuth tokens, delegates, protected paths, analytics history, collection cards, groups, and the default landing page.
+
+- **Keep the old URL working** (on by default) leaves the old slug behind as a path alias, so existing links and bookmarks don't break. Remove that alias later if you want the old slug free again.
+- **Collisions are refused**: the new slug can't be another site's slug, another site's alias, a reserved word (`blank`, `repair`, `repository`, `collection`), or the name of any folder already in the sites directory. Renaming onto one of the site's *own* aliases is allowed — the alias is consumed.
+- Visitors unlocked by an access code get a cookie scoped to the old path, so on the new URL they enter their code once more.
+
+### Site Groups
+
+With many sites, groups give the **Sites** page one-click filter buttons. Click **Manage groups** (or **+ Create a group**) above the site cards to add groups and tick their sites; or tick groups for one site under its **Settings → General**. A site can be in any number of groups, and pinned sites still sort to the top within each group.
+
+The selected group is remembered per account on the server, so it survives sign-out and follows you to another browser. Groups are shared by every administrator and only administrators can edit them; a site user sees each group narrowed to the sites assigned to them (groups with none of their sites are hidden).
+
 ### Default Landing Page
 
 By default, visiting the root of your Hoster hostname (`https://yourdomain.com/`) redirects to the admin sign-in. If you'd rather greet visitors with one of your sites — or send them somewhere else entirely — set a default landing page:
@@ -861,6 +875,7 @@ Sites whose on-disk state doesn't match the database appear in the admin UI with
 | Version labels and release notes | Yes |
 | Country restrictions, auto-block config | Yes |
 | All sites (files, versions, aliases) | Yes (current version only by default) |
+| Site groups and each account's selected group | Yes |
 | MCP tokens (hashed), blocked IPs | Yes |
 | Sessions, login attempts, analytics logs | No |
 

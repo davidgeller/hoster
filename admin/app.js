@@ -2950,12 +2950,69 @@ async function loadDashboard() {
 }
 
 // --- Sites ---
-async function loadSites() {
-  const { sites } = await api("/sites");
-  const el = document.getElementById("sites-list");
+// Site groups: filter buttons above the site cards. The selection is stored
+// on the account server-side so it survives sign-out and follows the user
+// between browsers; groups themselves are shared and edited by administrators.
+let siteGroups = [];
+let selectedSiteGroup = null;   // group id, or null for "All sites"
+let lastSitesList = [];
 
-  if (!sites.length) {
+async function loadSites() {
+  const [{ sites }, groupData] = await Promise.all([
+    api("/sites"),
+    api("/site-groups").catch(() => ({ groups: [], selected: null })),
+  ]);
+  siteGroups = groupData.groups || [];
+  selectedSiteGroup = groupData.selected ?? null;
+  lastSitesList = sites;
+  renderSites();
+}
+
+function renderSiteGroupsBar(sites) {
+  const bar = document.getElementById("site-groups-bar");
+  if (!bar) return;
+  if (!siteGroups.length && !isSuperAdmin) { bar.hidden = true; bar.innerHTML = ""; return; }
+  bar.hidden = false;
+  const visible = new Set(sites.map(s => s.slug));
+  const btn = (id, label, count) => `
+    <button type="button" class="group-chip${selectedSiteGroup === id ? " active" : ""}" data-group="${id === null ? "" : id}" aria-pressed="${selectedSiteGroup === id}">
+      ${esc(label)}<span class="group-chip-count">${count}</span>
+    </button>`;
+  bar.innerHTML = `
+    <div class="group-chips" role="toolbar" aria-label="Filter sites by group">
+      ${btn(null, "All sites", sites.length)}
+      ${siteGroups.map(g => btn(g.id, g.name, g.slugs.filter(s => visible.has(s)).length)).join("")}
+    </div>
+    ${isSuperAdmin ? `<button type="button" class="btn btn-sm btn-ghost" id="manage-groups-btn">${siteGroups.length ? "Manage groups" : "+ Create a group"}</button>` : ""}`;
+  bar.querySelectorAll("[data-group]").forEach(b => b.addEventListener("click", () => {
+    const id = b.dataset.group === "" ? null : Number(b.dataset.group);
+    if (id === selectedSiteGroup) return;
+    selectedSiteGroup = id;
+    renderSites();
+    api("/site-groups/selected", { method: "POST", body: JSON.stringify({ group_id: id }) }).catch(() => {});
+  }));
+  const manage = bar.querySelector("#manage-groups-btn");
+  if (manage) manage.addEventListener("click", () => showManageGroups());
+}
+
+function renderSites() {
+  const all = lastSitesList;
+  const el = document.getElementById("sites-list");
+  // A remembered group that no longer exists (or has nothing this account can
+  // see) falls back to All sites.
+  if (selectedSiteGroup !== null && !siteGroups.some(g => g.id === selectedSiteGroup)) selectedSiteGroup = null;
+  renderSiteGroupsBar(all);
+
+  if (!all.length) {
     el.innerHTML = `<div class="empty-state"><p>No sites deployed yet. Click <strong>Deploy Site</strong> to get started.</p></div>`;
+    return;
+  }
+  // Filtering keeps the server's order, so pinned sites stay on top within a group.
+  const group = siteGroups.find(g => g.id === selectedSiteGroup);
+  const members = group ? new Set(group.slugs) : null;
+  const sites = members ? all.filter(s => members.has(s.slug)) : all;
+  if (!sites.length) {
+    el.innerHTML = `<div class="empty-state"><p>No sites in <strong>${esc(group.name)}</strong> yet.${isSuperAdmin ? " Use <strong>Manage groups</strong> or a site's Settings to add some." : ""}</p></div>`;
     return;
   }
 
@@ -3099,6 +3156,137 @@ function renderCollectionCard(s) {
     </div>
   `;
 }
+
+// --- Manage site groups (administrators) ---
+// One dialog: the group list on the left (select, reorder, add), and the
+// selected group's name and a searchable site checklist on the right.
+window.showManageGroups = async function (focusId) {
+  let groups = [];
+  let sites = lastSitesList.length ? lastSitesList : (await api("/sites")).sites;
+  let current = null;   // group id being edited
+  const modal = document.createElement("div");
+  modal.className = "modal groups-modal";
+  modal.innerHTML = `
+    <div class="modal-backdrop"></div>
+    <div class="modal-content">
+      <h2>Site Groups</h2>
+      <p class="text-sm text-muted" style="margin-top:-4px">Groups become one-click filters at the top of the Sites page. A site can be in any number of groups. Groups are shared by every administrator; site users see only the groups that contain their sites.</p>
+      <div class="groups-layout">
+        <div class="groups-list-col">
+          <div id="groups-list"></div>
+          <form id="group-new-form" class="group-new">
+            <input type="text" id="group-new-name" placeholder="New group name" maxlength="60" autocomplete="off">
+            <button type="submit" class="btn btn-sm btn-primary">Add</button>
+          </form>
+        </div>
+        <div class="groups-edit-col" id="group-edit"></div>
+      </div>
+      <div class="form-error" id="groups-error"></div>
+      <div class="modal-actions" style="margin-top:12px">
+        <button type="button" class="btn close-modal">Done</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  const errEl = modal.querySelector("#groups-error");
+  const close = () => { modal.remove(); if (currentView === "sites") loadSites(); };
+  modal.querySelector(".modal-backdrop").addEventListener("click", close);
+  modal.querySelector(".close-modal").addEventListener("click", close);
+
+  async function refresh() {
+    groups = (await api("/site-groups")).groups || [];
+    if (current !== null && !groups.some(g => g.id === current)) current = null;
+    if (current === null && groups.length) current = groups[0].id;
+    renderList();
+    renderEdit();
+  }
+
+  function renderList() {
+    const listEl = modal.querySelector("#groups-list");
+    if (!groups.length) { listEl.innerHTML = '<p class="text-sm text-muted">No groups yet. Add one below.</p>'; return; }
+    listEl.innerHTML = groups.map((g, i) => `
+      <div class="group-row${g.id === current ? " active" : ""}" data-id="${g.id}">
+        <button type="button" class="group-row-name" data-pick="${g.id}">${esc(g.name)} <span class="text-muted">(${g.slugs.length})</span></button>
+        <button type="button" class="btn btn-sm btn-ghost" data-move="${i}" data-dir="-1" title="Move up" ${i === 0 ? "disabled" : ""}>↑</button>
+        <button type="button" class="btn btn-sm btn-ghost" data-move="${i}" data-dir="1" title="Move down" ${i === groups.length - 1 ? "disabled" : ""}>↓</button>
+      </div>`).join("");
+    listEl.querySelectorAll("[data-pick]").forEach(b => b.addEventListener("click", () => { current = Number(b.dataset.pick); renderList(); renderEdit(); }));
+    listEl.querySelectorAll("[data-move]").forEach(b => b.addEventListener("click", async () => {
+      const i = Number(b.dataset.move), j = i + Number(b.dataset.dir);
+      const ids = groups.map(g => g.id);
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+      try { await api("/site-groups/reorder", { method: "POST", body: JSON.stringify({ ids }) }); await refresh(); }
+      catch (err) { errEl.textContent = err.message; }
+    }));
+  }
+
+  function renderEdit() {
+    const edit = modal.querySelector("#group-edit");
+    const g = groups.find(x => x.id === current);
+    if (!g) { edit.innerHTML = '<p class="text-sm text-muted">Create a group to choose its sites.</p>'; return; }
+    const members = new Set(g.slugs);
+    edit.innerHTML = `
+      <label>Name
+        <input type="text" id="group-edit-name" value="${esc(g.name)}" maxlength="60">
+      </label>
+      <div class="group-sites-head">
+        <input type="text" id="group-site-filter" placeholder="Filter sites…" autocomplete="off">
+        <span class="text-sm text-muted" id="group-site-count"></span>
+      </div>
+      <div class="group-sites" id="group-sites">
+        ${sites.map(s => `
+          <label class="group-site" data-search="${esc((s.name + " " + s.slug).toLowerCase())}">
+            <input type="checkbox" value="${esc(s.slug)}" ${members.has(s.slug) ? "checked" : ""}>
+            <span>${s.pinned_at ? "📌 " : ""}${esc(s.name)} <code>/${esc(s.slug)}</code></span>
+          </label>`).join("")}
+      </div>
+      <div class="group-edit-actions">
+        <button type="button" class="btn btn-sm btn-danger" id="group-delete">Delete group</button>
+        <span style="flex:1"></span>
+        <span class="text-sm" id="group-saved"></span>
+        <button type="button" class="btn btn-sm btn-primary" id="group-save">Save</button>
+      </div>`;
+    const count = () => { edit.querySelector("#group-site-count").textContent = `${edit.querySelectorAll("#group-sites input:checked").length} selected`; };
+    count();
+    edit.querySelectorAll("#group-sites input").forEach(cb => cb.addEventListener("change", count));
+    edit.querySelector("#group-site-filter").addEventListener("input", (e) => {
+      const q = e.target.value.trim().toLowerCase();
+      edit.querySelectorAll(".group-site").forEach(row => { row.hidden = !!q && !row.dataset.search.includes(q); });
+    });
+    edit.querySelector("#group-save").addEventListener("click", async () => {
+      errEl.textContent = "";
+      const slugs = Array.from(edit.querySelectorAll("#group-sites input:checked")).map(cb => cb.value);
+      try {
+        await api(`/site-groups/${g.id}`, { method: "POST", body: JSON.stringify({ name: edit.querySelector("#group-edit-name").value, slugs }) });
+        await refresh();
+        const saved = modal.querySelector("#group-saved");
+        if (saved) { saved.textContent = "Saved"; setTimeout(() => { saved.textContent = ""; }, 1500); }
+      } catch (err) { errEl.textContent = err.message; }
+    });
+    edit.querySelector("#group-delete").addEventListener("click", async () => {
+      if (!confirm(`Delete the group "${g.name}"? Its sites are not affected.`)) return;
+      errEl.textContent = "";
+      try { await api(`/site-groups/${g.id}`, { method: "DELETE" }); current = null; await refresh(); }
+      catch (err) { errEl.textContent = err.message; }
+    });
+  }
+
+  modal.querySelector("#group-new-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    errEl.textContent = "";
+    const input = modal.querySelector("#group-new-name");
+    if (!input.value.trim()) return;
+    try {
+      const { group } = await api("/site-groups", { method: "POST", body: JSON.stringify({ name: input.value }) });
+      input.value = "";
+      current = group.id;
+      await refresh();
+      modal.querySelector("#group-site-filter")?.focus();
+    } catch (err) { errEl.textContent = err.message; }
+  });
+
+  if (focusId) current = focusId;
+  await refresh();
+};
 
 // Download a repository's full backup archive (current files + every stored
 // version + metadata). A GET, so the session cookie authorizes it.
@@ -3595,7 +3783,7 @@ function collectionSettingsPanels(slug, site, siteName) {
           <label>
             Display Name
             <input type="text" id="settings-name" value="${esc(siteName || "")}" maxlength="200" placeholder="Shown as the collection's title">
-            <small>The page heading and browser title. The slug (<code>/${esc(slug)}/</code>) is unchanged.</small>
+            <small>The page heading and browser title. To change the slug (<code>/${esc(slug)}/</code>), use the Aliases tab.</small>
           </label>
           <label>
             Description <small>(optional, shown under the title)</small>
@@ -3930,6 +4118,16 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
     aliases = (data && data.aliases) || [];
     hostAliases = (data && data.host_aliases) || [];
   } catch (_) {}
+  // Group membership (administrators edit it; site users don't see it).
+  let allGroups = [];
+  let memberOf = new Set();
+  if (isSuperAdmin) {
+    try {
+      const [g, m] = await Promise.all([api("/site-groups"), api(`/sites/${slug}/groups`)]);
+      allGroups = g.groups || [];
+      memberOf = new Set(m.group_ids || []);
+    } catch (_) {}
+  }
 
   const isRepo = !!siteRecord && siteRecord.site_type === "repository";
   const isColl = !!siteRecord && siteRecord.site_type === "collection";
@@ -3940,7 +4138,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
           <label>
             Display Name
             <input type="text" id="settings-name" value="${esc(siteName || "")}" maxlength="200" placeholder="Friendly name shown as the repository title">
-            <small>Shown as the title of the repository page and in the admin. The slug (<code>/${esc(slug)}/</code>) is unchanged.</small>
+            <small>Shown as the title of the repository page and in the admin. To change the slug (<code>/${esc(slug)}/</code>), use the Aliases tab.</small>
           </label>
           <label>
             Description <small>(optional, shown under the title)</small>
@@ -4091,7 +4289,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
           <label>
             Display Name
             <input type="text" id="settings-name" value="${esc(siteName || "")}" maxlength="200" placeholder="Friendly name shown in the admin">
-            <small>The site's label in the admin. The slug (URL <code>/${esc(slug)}/</code> and MCP identity) is unchanged.</small>
+            <small>The site's label in the admin. To change the slug (URL <code>/${esc(slug)}/</code> and MCP identity), use the Aliases tab.</small>
           </label>
           <label>
             Root Directory
@@ -4215,6 +4413,64 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
   document.body.appendChild(modal);
   modal.querySelector(".modal-backdrop").addEventListener("click", () => modal.remove());
   modal.querySelector(".close-modal").addEventListener("click", () => modal.remove());
+
+  // --- Groups (General tab, administrators) ---
+  const generalPanel = modal.querySelector('.settings-tab-panel[data-panel="general"]');
+  if (isSuperAdmin && generalPanel) {
+    const block = document.createElement("div");
+    block.innerHTML = `
+      <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+      <label>Groups
+        <small>Filter buttons on the Sites page. A ${kindWord} can be in any number of groups.</small>
+      </label>
+      <div class="settings-groups">
+        ${allGroups.length ? allGroups.map(g => `
+          <label class="settings-group-check"><input type="checkbox" data-group-check value="${g.id}" ${memberOf.has(g.id) ? "checked" : ""}> ${esc(g.name)}</label>`).join("")
+          : '<span class="text-sm text-muted">No groups yet.</span>'}
+      </div>
+      <button type="button" class="btn btn-sm btn-ghost" id="settings-manage-groups" style="margin-top:6px">Manage groups…</button>`;
+    generalPanel.appendChild(block);
+    block.querySelector("#settings-manage-groups").addEventListener("click", () => { modal.remove(); showManageGroups(); });
+  }
+
+  // --- Change slug (Aliases tab, administrators) ---
+  const aliasPanel = modal.querySelector('.settings-tab-panel[data-panel="aliases"]');
+  if (isSuperAdmin && aliasPanel) {
+    const block = document.createElement("div");
+    block.innerHTML = `
+      <label>Slug
+        <small>The ${kindWord}'s URL path (<code>/${esc(slug)}/</code>), folder name, and MCP identity. Changing it updates every reference — versions, aliases, custom domains, users, tokens, analytics, collections, and groups. Visitors with a protected-path cookie will need to re-enter their code.</small>
+      </label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="text-muted">/</span>
+        <input type="text" id="settings-new-slug" value="${esc(slug)}" style="flex:1" autocomplete="off" spellcheck="false" pattern="[a-z0-9][a-z0-9\\-]*[a-z0-9]?">
+        <button type="button" class="btn btn-sm btn-primary" id="change-slug-btn">Change slug</button>
+      </div>
+      <label style="display:flex;align-items:center;gap:6px;font-weight:normal;margin:8px 0 0;flex-direction:row;color:var(--text)">
+        <input type="checkbox" id="settings-slug-keep-alias" checked style="width:auto;margin:0"> Keep <code>/${esc(slug)}/</code> working as an alias, so existing links don't break
+      </label>
+      <div class="form-error" id="slug-error" style="margin-top:4px"></div>
+      <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">`;
+    aliasPanel.prepend(block);
+    const slugInput = block.querySelector("#settings-new-slug");
+    slugInput.addEventListener("input", () => { slugInput.value = slugInput.value.toLowerCase().replace(/[^a-z0-9-]/g, ""); });
+    block.querySelector("#change-slug-btn").addEventListener("click", async () => {
+      const errEl = block.querySelector("#slug-error");
+      errEl.textContent = "";
+      const newSlug = slugInput.value.trim();
+      if (!newSlug || newSlug === slug) { errEl.textContent = "Enter a different slug."; return; }
+      const keep = block.querySelector("#settings-slug-keep-alias").checked;
+      if (!confirm(`Change /${slug}/ to /${newSlug}/?${keep ? `\n\n/${slug}/ will keep working as an alias.` : `\n\nLinks to /${slug}/ will stop working.`}\n\nUnsaved changes in this dialog are discarded.`)) return;
+      try {
+        await api(`/sites/${slug}/slug`, { method: "POST", body: JSON.stringify({ new_slug: newSlug, keep_alias: keep }) });
+        modal.remove();
+        if (currentView === "explorer") {
+          if (explorerSelectedSlug === slug) { explorerSelectedSlug = newSlug; try { localStorage.setItem("explorer.selectedSlug", newSlug); } catch (_) {} }
+          loadExplorer();
+        } else loadSites();
+      } catch (err) { errEl.textContent = err.message; }
+    });
+  }
 
   // Download current version as a ZIP. It's a GET — the session cookie
   // authorizes it (no CSRF needed) and the attachment response keeps the SPA in
@@ -4778,6 +5034,16 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
   modal.querySelector("#site-settings-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const newName = document.getElementById("settings-name").value.trim();
+    // Group membership first: it's independent of the site-type branches below.
+    const groupChecks = modal.querySelectorAll("[data-group-check]");
+    if (groupChecks.length) {
+      const chosen = Array.from(groupChecks).filter(cb => cb.checked).map(cb => Number(cb.value));
+      const changed = chosen.length !== memberOf.size || chosen.some(id => !memberOf.has(id));
+      if (changed) {
+        try { await api(`/sites/${slug}/groups`, { method: "POST", body: JSON.stringify({ group_ids: chosen }) }); memberOf = new Set(chosen); }
+        catch (err) { document.getElementById("settings-error").textContent = err.message; return; }
+      }
+    }
     if (isColl) {
       try {
         await api(`/sites/${slug}/settings`, {

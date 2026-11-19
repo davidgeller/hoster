@@ -44,3 +44,4 @@ await import("../src/analytics");
 await import("../src/auth");
 await import("../src/webauthn");
 await import("../src/collection");
+await import("../src/groups");

@@ -6,6 +6,7 @@ import { invalidateBlockedCache } from "./analytics";
 import { invalidateShieldConfig } from "./shield";
 import { invalidateOriginConfig } from "./origin";
 import "./collection"; // creates the collection_items table backups read
+import "./groups"; // creates the site_groups tables backups read
 import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync, statSync, unlinkSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { randomBytes, createCipheriv, createDecipheriv, pbkdf2Sync } from "crypto";
@@ -132,6 +133,9 @@ function exportDatabase(): Record<string, any[]> {
   tables.protect_codes = db.prepare("SELECT * FROM protect_codes").all();
   // Collection cards (the images ride along under sites/<slug>/_collection).
   tables.collection_items = db.prepare("SELECT * FROM collection_items").all();
+  // Site groups (v2.9.0).
+  tables.site_groups = db.prepare("SELECT * FROM site_groups").all();
+  tables.site_group_members = db.prepare("SELECT * FROM site_group_members").all();
 
   return tables;
 }
@@ -148,6 +152,8 @@ function importDatabase(tables: Record<string, any[]>) {
     db.exec("DELETE FROM protect_codes");
     db.exec("DELETE FROM protect_rules");
     db.exec("DELETE FROM collection_items");
+    db.exec("DELETE FROM site_group_members");
+    db.exec("DELETE FROM site_groups");
     db.exec("DELETE FROM admin_users");
     db.exec("DELETE FROM site_aliases");
     db.exec("DELETE FROM site_versions");
@@ -224,7 +230,7 @@ function importDatabase(tables: Record<string, any[]>) {
       // Older backups lack the v1.5 columns; the `?? default` fills them in and
       // the legacy config-table admin is migrated right after the transaction.
       const cols = ["id", "username", "password_hash", "created_at", "last_login",
-        "is_admin", "totp_secret", "totp_enabled", "totp_recovery_codes", "webauthn_user_handle"];
+        "is_admin", "totp_secret", "totp_enabled", "totp_recovery_codes", "webauthn_user_handle", "selected_site_group"];
       const placeholders = cols.map(() => "?").join(", ");
       const stmt = db.prepare(`INSERT INTO admin_users (${cols.join(", ")}) VALUES (${placeholders})`);
       for (const row of tables.admin_users) {
@@ -306,6 +312,21 @@ function importDatabase(tables: Record<string, any[]>) {
       for (const row of tables.collection_items) {
         if (!siteExists.get(row.collection_slug) || !siteExists.get(row.item_slug)) continue;
         stmt.run(...cols.map(c => c === "position" ? (row[c] ?? 0) : (row[c] ?? null)));
+      }
+    }
+
+    // Site groups. Backups from before v2.9.0 have neither table. Group ids
+    // are kept verbatim so each account's remembered selection still matches.
+    if (tables.site_groups) {
+      const stmt = db.prepare("INSERT INTO site_groups (id, name, position, created_at) VALUES (?, ?, ?, ?)");
+      for (const row of tables.site_groups) stmt.run(row.id, row.name, row.position ?? 0, row.created_at ?? null);
+      if (tables.site_group_members) {
+        const mstmt = db.prepare("INSERT OR IGNORE INTO site_group_members (group_id, site_slug) VALUES (?, ?)");
+        const siteExists = db.prepare("SELECT 1 FROM sites WHERE slug = ?");
+        const groupExists = db.prepare("SELECT 1 FROM site_groups WHERE id = ?");
+        for (const row of tables.site_group_members) {
+          if (siteExists.get(row.site_slug) && groupExists.get(row.group_id)) mstmt.run(row.group_id, row.site_slug);
+        }
       }
     }
 

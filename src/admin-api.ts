@@ -19,7 +19,7 @@ import {
 import {
   listSites, getSite, deploySite, createBlankSite, deleteSite, toggleSite,
   listVersions, switchVersion, deleteVersion, commitVersion, setVersionMeta, updateSiteSettings,
-  setSitePinned, renameSite, zipCurrentVersion,
+  setSitePinned, renameSite, zipCurrentVersion, changeSiteSlug,
   getAliases, addAlias, removeAlias,
   getHostAliases, addHostAlias, removeHostAlias, listAllHostAliases,
   listSiteTree, reloadSite, uploadFileToSite,
@@ -28,6 +28,7 @@ import {
   getCmsStatus, cmsInit,
   setSiteAllowedCountries, updateRepoSettings, setSiteBlockAiBots,
 } from "./sites";
+import { listGroups, createGroup, updateGroup, deleteGroup, reorderGroups, setSiteGroups, getSiteGroupIds, getSelectedGroup, setSelectedGroup } from "./groups";
 import {
   createRepositorySite, repoStats, exportRepoBackup, importRepoBackup, setRepoBanner, clearRepoBanner,
 } from "./repo";
@@ -315,6 +316,13 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     // Creating/deleting whole sites is a provisioning action — administrators only.
     const siteRootDelete = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)$/);
     if (siteRootDelete && req.method === "DELETE") return forbidden();
+    // Changing a slug moves a site's URL — a provisioning action too. Groups
+    // are shared across accounts, so only administrators edit them; site users
+    // may read them and remember their own selection.
+    if (/^\/_admin\/api\/sites\/[a-z0-9-]+\/(slug|groups)$/.test(path) && req.method !== "GET") return forbidden();
+    if (path.startsWith("/_admin/api/site-groups") &&
+        !(path === "/_admin/api/site-groups" && req.method === "GET") &&
+        path !== "/_admin/api/site-groups/selected") return forbidden();
 
     // 2) Per-site surfaces — must own the slug. The reserved words blank/repair
     // are handled by the platform list above; everything else is a real slug.
@@ -599,6 +607,81 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     const ok = toggleSite(slug, action === "enable");
     if (ok) audit(action === "enable" ? "site_enabled" : "site_disabled", slug);
     return ok ? json({ ok: true }) : json({ error: "Not found" }, 404);
+  }
+
+  // --- Site groups (Sites-page filter buttons) ---
+  if (path === "/_admin/api/site-groups" && req.method === "GET") {
+    return json({ groups: listGroups(allowedSlugs), selected: getSelectedGroup(principal.userId) });
+  }
+  if (path === "/_admin/api/site-groups" && req.method === "POST") {
+    const body = await readJsonBody<{ name?: string; slugs?: string[] }>(req);
+    if (!body) return json({ error: "Invalid request body" }, 400);
+    try {
+      const group = createGroup(body.name, body.slugs ?? []);
+      audit("site_group_created", group.name);
+      return json({ group });
+    } catch (e: any) { return json({ error: e.message }, 400); }
+  }
+  if (path === "/_admin/api/site-groups/selected" && req.method === "POST") {
+    const body = await readJsonBody<{ group_id?: number | null }>(req);
+    if (!body) return json({ error: "Invalid request body" }, 400);
+    const id = body.group_id == null ? null : Number(body.group_id);
+    if (id !== null && !Number.isInteger(id)) return json({ error: "group_id must be an integer or null" }, 400);
+    try { return json({ selected: setSelectedGroup(principal.userId, id) }); }
+    catch (e: any) { return json({ error: e.message }, 400); }
+  }
+  if (path === "/_admin/api/site-groups/reorder" && req.method === "POST") {
+    const body = await readJsonBody<{ ids?: number[] }>(req);
+    if (!body) return json({ error: "Invalid request body" }, 400);
+    try { return json({ groups: reorderGroups(body.ids) }); }
+    catch (e: any) { return json({ error: e.message }, 400); }
+  }
+  const groupMatch = path.match(/^\/_admin\/api\/site-groups\/(\d+)$/);
+  if (groupMatch) {
+    const id = Number(groupMatch[1]);
+    if (req.method === "POST") {
+      const body = await readJsonBody<{ name?: string; slugs?: string[] }>(req);
+      if (!body) return json({ error: "Invalid request body" }, 400);
+      try {
+        const group = updateGroup(id, { name: body.name, slugs: body.slugs });
+        audit("site_group_updated", `${group.name} (${group.slugs.length} site${group.slugs.length === 1 ? "" : "s"})`);
+        return json({ group });
+      } catch (e: any) { return json({ error: e.message }, e.message === "Group not found" ? 404 : 400); }
+    }
+    if (req.method === "DELETE") {
+      const ok = deleteGroup(id);
+      if (ok) audit("site_group_deleted", String(id));
+      return ok ? json({ ok: true }) : json({ error: "Not found" }, 404);
+    }
+  }
+  const siteGroupsMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/groups$/);
+  if (siteGroupsMatch) {
+    const slug = siteGroupsMatch[1];
+    if (!getSite(slug)) return json({ error: "Not found" }, 404);
+    if (req.method === "GET") return json({ group_ids: getSiteGroupIds(slug) });
+    if (req.method === "POST") {
+      const body = await readJsonBody<{ group_ids?: number[] }>(req);
+      if (!body) return json({ error: "Invalid request body" }, 400);
+      try {
+        const ids = setSiteGroups(slug, body.group_ids);
+        audit("site_groups_updated", `${slug}: ${ids.length} group${ids.length === 1 ? "" : "s"}`);
+        return json({ group_ids: ids });
+      } catch (e: any) { return json({ error: e.message }, 400); }
+    }
+  }
+
+  // --- Change a site's slug (URL path, folder, and every reference) ---
+  const slugChangeMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/slug$/);
+  if (slugChangeMatch && req.method === "POST") {
+    const slug = slugChangeMatch[1];
+    const body = await readJsonBody<{ new_slug?: string; keep_alias?: boolean }>(req);
+    if (!body) return json({ error: "Invalid request body" }, 400);
+    if (!getSite(slug)) return json({ error: "Not found" }, 404);
+    try {
+      const result = changeSiteSlug(slug, String(body.new_slug ?? ""), { keepAlias: !!body.keep_alias });
+      audit("site_slug_changed", `${slug} -> ${result.slug}${result.alias_kept ? " (old slug kept as alias)" : ""}`);
+      return json(result);
+    } catch (e: any) { return json({ error: e.message }, 400); }
   }
 
   // --- Pin/unpin (sorts to top of site listings, shared across admins) ---

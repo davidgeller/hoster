@@ -1,5 +1,5 @@
 import db from "./db";
-import { deleteRulesForSite } from "./protect";
+import { deleteRulesForSite, invalidateProtectCache } from "./protect";
 import { mkdirSync, rmSync, rmdirSync, existsSync, readdirSync, statSync, symlinkSync, readlinkSync, unlinkSync, realpathSync, lstatSync, writeFileSync, readFileSync, renameSync, copyFileSync } from "fs";
 import { join, resolve, sep } from "path";
 import { tmpdir } from "os";
@@ -327,7 +327,14 @@ export function validateSlug(slug: string): void {
   if (slug.startsWith("_")) {
     throw new Error("Slugs starting with _ are reserved");
   }
+  // These words are admin API sub-paths (/_admin/api/sites/<word>); a site
+  // with one of them as its slug could never be managed.
+  if (RESERVED_SLUGS.has(slug)) {
+    throw new Error(`'${slug}' is a reserved word and can't be used as a slug`);
+  }
 }
+
+const RESERVED_SLUGS = new Set(["blank", "repair", "repository", "collection"]);
 
 const BLANK_INDEX_HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -1390,6 +1397,105 @@ export function reloadSite(slug: string): boolean {
   invalidateSiteCache(slug);
 
   return true;
+}
+
+// --- Changing a site's slug ---
+//
+// The slug is the site's primary key everywhere: its URL path, its folder
+// under sites/, and a column in every table that belongs to a site. Changing
+// it renames the folder and rewrites every one of those columns in a single
+// transaction (foreign keys are deferred so parent and children can move
+// together), then repoints the absolute _current symlink. Every column named
+// below is discovered from the live schema rather than listed by hand, so a
+// table added later is carried along automatically.
+//
+// Collisions: the new slug must not be another site's slug or another site's
+// path alias, and no folder of that name may exist on disk (an orphan from a
+// failed delete is never overwritten). Renaming onto one of the site's OWN
+// aliases is allowed — the alias is consumed.
+//
+// keepAlias leaves the old slug behind as a path alias, so existing links and
+// bookmarks to /<old>/ keep working.
+const SLUG_COLUMNS = new Set(["site_slug", "collection_slug", "item_slug"]);
+
+export interface SlugChangeResult {
+  old_slug: string;
+  slug: string;
+  alias_kept: boolean;
+}
+
+export function changeSiteSlug(oldSlug: string, newSlug: string, opts: { keepAlias?: boolean } = {}): SlugChangeResult {
+  const site = getSite(oldSlug);
+  if (!site) throw new Error(`Site '${oldSlug}' does not exist`);
+  newSlug = (newSlug || "").trim().toLowerCase();
+  if (!newSlug) throw new Error("New slug is required");
+  if (newSlug === oldSlug) throw new Error("The new slug is the same as the current one");
+  validateSlug(newSlug);
+
+  invalidateSiteCache(newSlug);
+  if (getSite(newSlug)) throw new Error(`A site with the slug '${newSlug}' already exists`);
+  const aliasOwner = db.query("SELECT site_slug FROM site_aliases WHERE alias = ?").get(newSlug) as { site_slug: string } | null;
+  if (aliasOwner && aliasOwner.site_slug !== oldSlug) {
+    throw new Error(`'${newSlug}' is already an alias of the site '${aliasOwner.site_slug}'`);
+  }
+  const oldDir = join(SITES_DIR, oldSlug);
+  const newDir = join(SITES_DIR, newSlug);
+  if (existsSync(newDir) || (() => { try { lstatSync(newDir); return true; } catch { return false; } })()) {
+    throw new Error(`A folder named '${newSlug}' already exists in the sites directory; remove it before using this slug`);
+  }
+
+  // Every (table, column) pair that holds a site slug, read from the schema.
+  const tables = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as { name: string }[];
+  const targets: { table: string; column: string }[] = [];
+  for (const { name } of tables) {
+    if (name === "sites") continue;
+    const cols = db.query(`PRAGMA table_info("${name.replace(/"/g, '""')}")`).all() as { name: string }[];
+    for (const c of cols) if (SLUG_COLUMNS.has(c.name)) targets.push({ table: name, column: c.name });
+  }
+
+  const movedDir = existsSync(oldDir);
+  if (movedDir) renameSync(oldDir, newDir);
+
+  try {
+    const tx = db.transaction(() => {
+      db.exec("PRAGMA defer_foreign_keys = ON");
+      // The alias being consumed must go before anything else claims the name.
+      if (aliasOwner) db.run("DELETE FROM site_aliases WHERE alias = ?", newSlug);
+      db.run("UPDATE sites SET slug = ?, updated_at = datetime('now') WHERE slug = ?", newSlug, oldSlug);
+      for (const t of targets) {
+        db.run(`UPDATE "${t.table}" SET "${t.column}" = ? WHERE "${t.column}" = ?`, newSlug, oldSlug);
+      }
+      if (opts.keepAlias) {
+        db.run("INSERT INTO site_aliases (alias, site_slug) VALUES (?, ?)", oldSlug, newSlug);
+      }
+      // A default landing page that named the old slug follows the site.
+      const landing = getDefaultSite();
+      if (landing.target === oldSlug) {
+        const value = JSON.stringify({ ...landing, target: newSlug });
+        db.run("UPDATE config SET value = ? WHERE key = 'default_site'", value);
+      }
+    });
+    tx();
+  } catch (e) {
+    if (movedDir) { try { renameSync(newDir, oldDir); } catch (_) {} }
+    throw e;
+  }
+
+  // _current is an absolute symlink into the old folder; repoint it.
+  if (site.site_type === "web" && site.current_version && existsSync(join(newDir, site.current_version))) {
+    const link = join(newDir, "_current");
+    try { unlinkSync(link); } catch (_) {}
+    try { symlinkSync(join(newDir, site.current_version), link); } catch (_) {}
+  }
+
+  invalidateSiteCache();
+  invalidateHostAliasCache();
+  invalidateDefaultSiteCache();
+  invalidateProtectCache();
+  for (const key of realPathCache.keys()) {
+    if (key === oldDir || key.startsWith(oldDir + sep)) realPathCache.delete(key);
+  }
+  return { old_slug: oldSlug, slug: newSlug, alias_kept: !!opts.keepAlias };
 }
 
 // --- Site aliases ---
