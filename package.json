@@ -1,6 +1,6 @@
 {
   "name": "hoster",
-  "version": "2.9.0",
+  "version": "2.10.0",
   "description": "Lightweight self-hosted web hosting and content-management platform (single Linux binary)",
   "type": "module",
   "scripts": {

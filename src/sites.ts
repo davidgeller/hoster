@@ -347,7 +347,7 @@ export function validateSlug(slug: string): void {
   }
 }
 
-const RESERVED_SLUGS = new Set(["blank", "repair", "repository", "collection"]);
+const RESERVED_SLUGS = new Set(["blank", "repair", "repository", "collection", "api"]);
 
 const BLANK_INDEX_HTML = `<!DOCTYPE html>
 <html lang="en">

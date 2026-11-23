@@ -133,7 +133,8 @@ export function isSharedInfraPath(path: string): boolean {
   return path === "/_mcp" || path.startsWith("/_mcp/") ||
     path === "/oauth/token" || path === "/oauth/register" || path === "/oauth/revoke" ||
     path.startsWith("/.well-known/oauth-") ||
-    path.startsWith("/_cms/") || path === "/_hoster/instance";
+    path.startsWith("/_cms/") || path === "/_hoster/instance" ||
+    path === "/api/v1" || path.startsWith("/api/v1/");
 }
 
 // Does `hostPort` reach this installation? Fetches its /_hoster/instance the

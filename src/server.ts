@@ -2,6 +2,7 @@ import { existsSync, statSync } from "fs";
 import { join, resolve } from "path";
 import { handleAdminApi } from "./admin-api";
 import { handleMcp } from "./mcp";
+import { handleApiV1, isApiV1Path } from "./api-v1";
 import {
   handleAsMetadata, handleProtectedResourceMetadata,
   handleRegister, handleAuthorize, handleToken, handleRevoke,
@@ -59,8 +60,8 @@ const ADMIN_DIR = join(BASE_DIR, "admin");
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
   ".htm": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
   ".js": "application/javascript; charset=utf-8",
   ".json": "application/json",
   ".png": "image/png",
@@ -345,7 +346,8 @@ export function createServer(port: number) {
           path.startsWith("/_admin") ||
           path === "/_mcp" || path.startsWith("/_mcp/") ||
           path.startsWith("/oauth/") ||
-          path.startsWith("/.well-known/oauth-");
+          path.startsWith("/.well-known/oauth-") ||
+          isApiV1Path(path);
 
         // Block reserved infra paths on host-aliased hostnames. Admin, OAuth,
         // and MCP must only be reachable via the canonical hostname so an
@@ -472,6 +474,26 @@ export function createServer(port: number) {
           siteSlug = mcpSlug ?? urlSlug;
           logReq(response);
           return addSecurityHeaders(response);
+        }
+
+        // --- External repository API (bearer keys; never redirects) ---
+        if (isApiV1Path(path)) {
+          // The API skips the site-visitor gates above (country lists, the
+          // per-IP visitor ceiling) but still honours the IP blocklist: an
+          // address an administrator or the shield blocked stays blocked.
+          if (isIpBlocked(meta.ip)) {
+            status = 403;
+            flag = "blocked";
+            const res = new Response(JSON.stringify({ error: { code: "forbidden", message: "Access denied." } }), {
+              status: 403, headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" },
+            });
+            logReq(res);
+            return res;
+          }
+          const res = await handleApiV1(req, path);
+          status = res.status;
+          logReq(res);
+          return res;
         }
 
         // --- Admin API ---
@@ -822,7 +844,7 @@ export function createServer(port: number) {
         // already counted). Static assets (.js/.css/fonts) aren't tracked, so a
         // site with a broken asset link can't get its visitors blocked.
         // Admin/MCP/OAuth surfaces are exempt, like the other shield checks.
-        if (status === 404 && flag !== "trap" && !/^\/(_admin|_mcp|oauth\/|\.well-known\/oauth-)/.test(path)) {
+        if (status === 404 && flag !== "trap" && !/^\/(_admin|_mcp|api\/v1(\/|$)|oauth\/|\.well-known\/oauth-)/.test(path)) {
           recordNotFound(meta.ip, meta.user_agent);
         }
         const elapsed = performance.now() - start;

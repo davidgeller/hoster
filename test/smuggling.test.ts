@@ -53,3 +53,37 @@ test("oversized unlock bodies never smuggle a request", async () => {
     s.stop(true);
   }
 });
+
+// The same guarantee for the repository API's JSON bodies (16 KB cap): a
+// request hidden past the cap is never executed, whether the body is chunked
+// or carries a (truthful) Content-Length.
+test("oversized /api/v1 bodies never smuggle a request", async () => {
+  const { createRepositorySite, putRepoFile, getRepoFile } = await import("../src/repo");
+  const { getSite, deleteSite } = await import("../src/sites");
+  const { createApiKey } = await import("../src/api-v1");
+  if (!getSite("smug-repo")) createRepositorySite("smug-repo", "Smuggle");
+  if (!getRepoFile("smug-repo", "a.txt")) await putRepoFile("smug-repo", "a.txt", "a");
+  const repoId = getSite("smug-repo")!.id;
+  const itemId = (db.query("SELECT id FROM repo_files WHERE site_slug = 'smug-repo' AND path = 'a.txt'").get() as { id: number }).id;
+  const { key } = createApiKey("smug-repo", { label: "smuggle" }, "test");
+  const s = createServer(0);
+  try {
+    const head = `POST /api/v1/repositories/${repoId}/items/${itemId}/shares HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer ${key}\r\nContent-Type: application/json\r\nX-Real-IP: 10.77.0.1\r\n`;
+    const inner = "A".repeat(20000) + hidden("api-smug-chunked");
+    const r1 = await raw(s.port, `${head}Transfer-Encoding: chunked\r\n\r\n${inner.length.toString(16)}\r\n${inner}\r\n0\r\n\r\n` + hidden("api-after-chunked"));
+    const servedChunked = refusedThenMaybeNext(r1);
+
+    const body = "B".repeat(20000) + hidden("api-smug-mid");
+    const r2 = await raw(s.port, `${head}Content-Length: ${body.length}\r\n\r\n${body}` + hidden("api-after-mid"));
+    const servedMid = refusedThenMaybeNext(r2);
+
+    for (const m of ["api-smug-chunked", "api-smug-mid"]) expect(logged(m)).toBe(0);
+    expect(logged("api-after-chunked")).toBe(servedChunked ? 1 : 0);
+    expect(logged("api-after-mid")).toBe(servedMid ? 1 : 0);
+    // Nothing was created by the refused requests.
+    expect((db.query("SELECT COUNT(*) AS n FROM repo_shares WHERE site_slug = 'smug-repo'").get() as { n: number }).n).toBe(0);
+  } finally {
+    s.stop(true);
+    try { deleteSite("smug-repo"); } catch (_) {}
+  }
+});

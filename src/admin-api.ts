@@ -51,6 +51,7 @@ import { listCountries } from "./countries";
 import { listRules, createRule, updateRule, deleteRule, addCode, updateCode, deleteCode, generateCode } from "./protect";
 import { getDefaultSite, setDefaultSite } from "./sites";
 import { createMcpToken, listMcpTokens, deleteMcpToken, getMcpAuditLog } from "./mcp";
+import { listApiKeys, createApiKey, revokeApiKey, deleteApiKey } from "./api-v1";
 import {
   listOauthGrants, revokeOauthGrant, listOauthClients, deleteOauthClient,
   listSiteDelegates, createSiteDelegate, deleteSiteDelegate,
@@ -525,8 +526,8 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
 
     try {
       const result = await deploySite(slug, name, await file.arrayBuffer(), label, notes);
-      audit(existed ? "site_updated" : "site_created", `${slug} -> ${result.version.version}${notes ? " (with notes)" : ""}`);
       if (!existed) joinSelectedGroup(principal.userId, slug);
+      audit(existed ? "site_updated" : "site_created", `${slug} -> ${result.version.version}${notes ? " (with notes)" : ""}`);
       return json(result);
     } catch (e: any) {
       return json({ error: e.message }, 400);
@@ -541,8 +542,8 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     if (!slug) return json({ error: "Slug is required" }, 400);
     try {
       const result = createBlankSite(slug, name!);
-      audit("site_created_blank", slug);
       joinSelectedGroup(principal.userId, slug);
+      audit("site_created_blank", slug);
       return json(result);
     } catch (e: any) {
       return json({ error: e.message }, 400);
@@ -558,8 +559,8 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
       const site = createRepositorySite(slug, body.name || slug, {
         quota_bytes: body.quota_bytes, max_versions: body.max_versions, visibility: body.visibility, description: body.description,
       });
-      audit("site_created_repository", `${slug} (${site.repo_visibility}, ${Math.round(site.repo_quota_bytes / (1024 * 1024))} MB)`);
       joinSelectedGroup(principal.userId, slug);
+      audit("site_created_repository", `${slug} (${site.repo_visibility}, ${Math.round(site.repo_quota_bytes / (1024 * 1024))} MB)`);
       return json({ site });
     } catch (e: any) {
       return json({ error: e.message }, 400);
@@ -573,8 +574,8 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     if (!slug) return json({ error: "Slug is required" }, 400);
     try {
       const site = createCollectionSite(slug, body.name || slug, { description: body.description, layout: body.layout, bg_color: body.bg_color });
-      audit("site_created_collection", `${slug} (${site.coll_layout})`);
       joinSelectedGroup(principal.userId, slug);
+      audit("site_created_collection", `${slug} (${site.coll_layout})`);
       return json({ site });
     } catch (e: any) {
       return json({ error: e.message }, 400);
@@ -1465,6 +1466,40 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     const ok = deleteMcpToken(id);
     if (ok) audit("mcp_token_revoked", `id:${id}`);
     return ok ? json({ ok: true }) : json({ error: "Token not found" }, 404);
+  }
+
+  // --- Repository API keys (/api/v1) ---
+  // Each key belongs to one repository. These routes sit under
+  // /sites/<slug>/, so the per-site gate above already limits site users to
+  // repositories they manage.
+  const apiKeysMatch = path.match(/^\/_admin\/api\/sites\/([a-z0-9-]+)\/api-keys(?:\/(\d+)(\/revoke)?)?$/);
+  if (apiKeysMatch) {
+    const [, slug, idStr, revoke] = apiKeysMatch;
+    try {
+      if (!idStr && req.method === "GET") return json({ keys: listApiKeys(slug) });
+      if (!idStr && req.method === "POST") {
+        const body = await readJsonBodyOrEmpty<{ label?: string; can_share?: boolean; expires_at?: string | null; expires_in_days?: number | null; confirm_password?: string }>(req);
+        // A key is lasting access that outlives the session: password first.
+        const denied = await stepUp(body.confirm_password);
+        if (denied) return denied;
+        const { key, info } = createApiKey(slug, body, actor);
+        audit("api_key_created", `${slug}: ${info.label} (${info.key_id})${info.scopes.includes("share") ? "" : " read-only"}`);
+        return json({ key, api_key: info });
+      }
+      if (idStr && revoke && req.method === "POST") {
+        const info = revokeApiKey(slug, parseInt(idStr));
+        if (!info) return json({ error: "Key not found" }, 404);
+        audit("api_key_revoked", `${slug}: ${info.label} (${info.key_id})`);
+        return json({ ok: true, api_key: info });
+      }
+      if (idStr && !revoke && req.method === "DELETE") {
+        const ok = deleteApiKey(slug, parseInt(idStr));
+        if (ok) audit("api_key_deleted", `${slug}: id ${idStr}`);
+        return ok ? json({ ok: true }) : json({ error: "Key not found" }, 404);
+      }
+    } catch (e: any) {
+      return json({ error: e.message }, /not found/i.test(e.message) ? 404 : 400);
+    }
   }
 
   // --- MCP audit log ---

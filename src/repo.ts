@@ -923,8 +923,8 @@ export function renameRepoPath(slug: string, fromPath: string, toPath: string, a
     moved = 1;
     if (src.kind === "dir") {
       const children = db.query(
-        "SELECT id, path FROM repo_files WHERE site_slug = ? AND deleted_at IS NULL AND path LIKE ? ESCAPE '\\'"
-      ).all(slug, escapeLike(from) + "/%") as { id: number; path: string }[];
+        "SELECT id, path FROM repo_files WHERE site_slug = ? AND deleted_at IS NULL AND path LIKE ? ESCAPE '\\'" + CASE_SENSITIVE_PREFIX
+      ).all(slug, escapeLike(from) + "/%", from + "/") as { id: number; path: string }[];
       for (const c of children) {
         const newPath = to + c.path.slice(from.length);
         db.run("UPDATE repo_files SET path = ? WHERE id = ?", newPath, c.id);
@@ -1013,8 +1013,8 @@ export function copyRepoPaths(slug: string, relPaths: string[], destDir: string,
       const rows: FileRow[] = [liveRow(slug, p.from)!];
       if (p.kind === "dir") {
         rows.push(...(db.query(
-          "SELECT * FROM repo_files WHERE site_slug = ? AND deleted_at IS NULL AND path LIKE ? ESCAPE '\\' ORDER BY path"
-        ).all(slug, escapeLike(p.from) + "/%") as FileRow[]));
+          "SELECT * FROM repo_files WHERE site_slug = ? AND deleted_at IS NULL AND path LIKE ? ESCAPE '\\'" + CASE_SENSITIVE_PREFIX + " ORDER BY path"
+        ).all(slug, escapeLike(p.from) + "/%", p.from + "/") as FileRow[]));
       }
       // Descriptions and tags travel with copies.
       const copyMeta = (fromId: number, toId: number) => {
@@ -1051,6 +1051,14 @@ export function copyRepoPaths(slug: string, relPaths: string[], destDir: string,
   return { copied: plan, files };
 }
 
+// SQLite's LIKE ignores ASCII case, but repository paths are case-sensitive:
+// "Public/" and "public/" are different folders. Every "everything under this
+// folder" query pairs its LIKE (which narrows the scan) with this exact,
+// case-sensitive prefix test, so acting on one folder can never reach a
+// sibling that differs only in case. Bind the raw prefix (with its trailing
+// "/") right after the LIKE pattern.
+const CASE_SENSITIVE_PREFIX = " AND instr(path, ?) = 1";
+
 function escapeLike(s: string): string {
   return s.replace(/[\\%_]/g, ch => "\\" + ch);
 }
@@ -1082,8 +1090,8 @@ export function deleteRepoPaths(slug: string, relPaths: string[], actor?: string
       if (r.kind === "dir") {
         db.run(
           `UPDATE repo_files SET deleted_at = datetime('now'), deleted_by = ?
-           WHERE site_slug = ? AND deleted_at IS NULL AND path LIKE ? ESCAPE '\\'`,
-          who, slug, escapeLike(r.path) + "/%"
+           WHERE site_slug = ? AND deleted_at IS NULL AND path LIKE ? ESCAPE '\\'${CASE_SENSITIVE_PREFIX}`,
+          who, slug, escapeLike(r.path) + "/%", r.path + "/"
         );
       }
       deleted.push({ path: r.path, kind: r.kind });
@@ -1130,8 +1138,8 @@ export function restoreRepoTrash(slug: string, ids: number[], actor?: string | n
       restored.push(target);
       if (r.kind === "dir") {
         const children = db.query(
-          "SELECT id, path FROM repo_files WHERE site_slug = ? AND deleted_at = ? AND path LIKE ? ESCAPE '\\'"
-        ).all(slug, r.deleted_at, escapeLike(r.path) + "/%") as { id: number; path: string }[];
+          "SELECT id, path FROM repo_files WHERE site_slug = ? AND deleted_at = ? AND path LIKE ? ESCAPE '\\'" + CASE_SENSITIVE_PREFIX
+        ).all(slug, r.deleted_at, escapeLike(r.path) + "/%", r.path + "/") as { id: number; path: string }[];
         for (const c of children) {
           const newPath = target + c.path.slice(r.path.length);
           if (liveRow(slug, newPath)) continue; // leave the conflicting child in the trash
@@ -1172,8 +1180,8 @@ function purgeRow(slug: string, r: FileRow): number {
   const targets: FileRow[] = [r];
   if (r.kind === "dir") {
     targets.push(...(db.query(
-      "SELECT * FROM repo_files WHERE site_slug = ? AND deleted_at IS NOT NULL AND path LIKE ? ESCAPE '\\'"
-    ).all(slug, escapeLike(r.path) + "/%") as FileRow[]));
+      "SELECT * FROM repo_files WHERE site_slug = ? AND deleted_at IS NOT NULL AND path LIKE ? ESCAPE '\\'" + CASE_SENSITIVE_PREFIX
+    ).all(slug, escapeLike(r.path) + "/%", r.path + "/") as FileRow[]));
   }
   for (const t of targets) {
     const versions = db.query("SELECT sha256 FROM repo_versions WHERE file_id = ?").all(t.id) as { sha256: string }[];
@@ -1312,8 +1320,8 @@ export async function zipRepoPaths(slug: string, relPaths: string[], archiveName
     const base = parentOf(p);
     if (row.kind === "file") { addFile(row, base); continue; }
     const children = db.query(
-      "SELECT * FROM repo_files WHERE site_slug = ? AND deleted_at IS NULL AND kind = 'file' AND path LIKE ? ESCAPE '\\'"
-    ).all(slug, escapeLike(p) + "/%") as FileRow[];
+      "SELECT * FROM repo_files WHERE site_slug = ? AND deleted_at IS NULL AND kind = 'file' AND path LIKE ? ESCAPE '\\'" + CASE_SENSITIVE_PREFIX
+    ).all(slug, escapeLike(p) + "/%", p + "/") as FileRow[];
     for (const c of children) addFile(c, base);
     if (!children.length) entries.push({ archivePath: (base ? p.slice(base.length + 1) : p) + "/", sha256: "" });
   }
@@ -1672,32 +1680,48 @@ function shareRow(r: any): RepoShare {
   };
 }
 
-export function createRepoShare(slug: string, relPath: string, opts: { expires_in_hours?: number | null; label?: string | null; actor?: string | null } = {}): { share: RepoShare; token: string } {
+export function createRepoShare(slug: string, relPath: string, opts: { expires_in_hours?: number | null; expires_at?: string | null; label?: string | null; actor?: string | null; token?: string } = {}): { share: RepoShare; token: string } {
   requireRepoSite(slug);
   const path = normalizeRepoPath(relPath);
   const row = liveRow(slug, path);
   if (!row) throw new Error(`'${path}' does not exist`);
-  let hours: number | null = null;
-  if (opts.expires_in_hours != null) {
+  // Expiry: either relative (hours from now) or an absolute SQLite UTC
+  // timestamp ("YYYY-MM-DD HH:MM:SS") the caller has already validated.
+  let expiresSql = "NULL";
+  const expiresArgs: string[] = [];
+  if (opts.expires_at != null) {
+    if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(opts.expires_at)) throw new Error("Invalid expiry timestamp");
+    expiresSql = "?";
+    expiresArgs.push(opts.expires_at);
+  } else if (opts.expires_in_hours != null) {
     const h = Number(opts.expires_in_hours);
     if (!Number.isFinite(h) || h <= 0 || h > MAX_SHARE_HOURS) throw new Error("Expiry must be between 1 hour and 1 year");
-    hours = h;
+    expiresSql = "datetime('now', ?)";
+    expiresArgs.push(`+${Math.round(h * 60)} minutes`);
   }
   const active = db.query("SELECT COUNT(*) AS n FROM repo_shares WHERE site_slug = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > datetime('now'))").get(slug) as { n: number };
   if (active.n >= MAX_ACTIVE_SHARES) throw new Error(`This repository already has ${MAX_ACTIVE_SHARES} active share links — revoke some first`);
-  const token = randomBytes(32).toString("base64url");
+  // A caller-supplied token (the external API derives one so an idempotent
+  // retry can hand back the same URL) must look like one we'd mint.
+  if (opts.token !== undefined && !/^[A-Za-z0-9_-]{20,64}$/.test(opts.token)) throw new Error("Invalid share token");
+  const token = opts.token ?? randomBytes(32).toString("base64url");
   const tokenHash = createHash("sha256").update(token).digest("hex");
   const label = sanitizeNote(opts.label);
   const ins = db.run(
     `INSERT INTO repo_shares (site_slug, token_hash, path, kind, label, created_by, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ${hours === null ? "NULL" : "datetime('now', ?)"})`,
-    ...(hours === null
-      ? [slug, tokenHash, path, row.kind, label, sanitizeActor(opts.actor)]
-      : [slug, tokenHash, path, row.kind, label, sanitizeActor(opts.actor), `+${Math.round(hours * 60)} minutes`])
+     VALUES (?, ?, ?, ?, ?, ?, ${expiresSql})`,
+    slug, tokenHash, path, row.kind, label, sanitizeActor(opts.actor), ...expiresArgs
   );
   const share = shareRow(db.query("SELECT * FROM repo_shares WHERE id = ?").get(Number(ins.lastInsertRowid)));
   return { share, token };
 }
+
+export function getRepoShareById(id: number): (RepoShare & { site_slug: string }) | null {
+  const r = db.query("SELECT * FROM repo_shares WHERE id = ?").get(id) as any;
+  return r ? { ...shareRow(r), site_slug: r.site_slug } : null;
+}
+
+export const MAX_SHARE_DURATION_HOURS = MAX_SHARE_HOURS;
 
 export function listRepoShares(slug: string, relPath?: string | null): RepoShare[] {
   requireRepoSite(slug);
@@ -1732,8 +1756,8 @@ export function resolveRepoShare(slug: string, token: string): RepoShare | null 
 // Files visible through a folder share, with paths relative to the folder.
 export function listSharedFolder(slug: string, share: RepoShare): { files: RepoFile[]; dirs: RepoFile[] } {
   const rows = db.query(
-    "SELECT * FROM repo_files WHERE site_slug = ? AND deleted_at IS NULL AND path LIKE ? ESCAPE '\\' ORDER BY path"
-  ).all(slug, escapeLike(share.path) + "/%") as FileRow[];
+    "SELECT * FROM repo_files WHERE site_slug = ? AND deleted_at IS NULL AND path LIKE ? ESCAPE '\\'" + CASE_SENSITIVE_PREFIX + " ORDER BY path"
+  ).all(slug, escapeLike(share.path) + "/%", share.path + "/") as FileRow[];
   const files: RepoFile[] = [], dirs: RepoFile[] = [];
   for (const r of rows) {
     const f = toRepoFile(r);

@@ -748,3 +748,91 @@ v2.6.0's `readBodyCapped` stopped reading and **cancelled** the request stream o
 - **The reachability check is an outbound request** from the server to an administrator-supplied hostname (admin-only, with password step-up, a 6 s timeout, and a response capped at 1 KB). It's the same trust level as every other admin action.
 
 *Verified by `bun test` (268 tests across 20 files, including `test/origin.test.ts` and `test/smuggling.test.ts`), by the browser run described above, and by the compile-and-boot preflight in `build-pi.sh`.*
+
+---
+
+## Review — Repository API `/api/v1` (2026-11-22, v2.10.0)
+
+**Scope:** the new external REST API for repository sites (`src/api-v1.ts`), its key management (`/_admin/api/sites/<slug>/api-keys`, Repository Settings → API Keys), its wiring in `src/server.ts` / `src/origin.ts`, the share-link code it drives in `src/repo.ts` / `src/repo-site.ts`, and backup/restore of its tables.
+
+**Threat model.** Each API key belongs to exactly one repository. A stolen key reading or sharing *its own* repository is accepted: it can be revoked. Everything else is in scope: reaching any other repository or site, learning that they exist, crashing or degrading the server, smuggling requests, injecting script into admin or repository pages, and weakening share-link secrecy.
+
+**Method.** Two independent passes:
+
+1. **Code review** by a reviewer given only the code, not the author's conclusions.
+2. **Live attacks** against a running dev server, using repository A's key against repository B (holding a canary file) and a web site:
+   - cross-repository ids for repositories, items, parents, content, shares and search;
+   - encoded segments (`%2F`, `%00`, `..`, `%2e%2e`), leading zeros, signs, hex, exponents and non-ASCII digits;
+   - `Host` / `X-Forwarded-Host` spoofing and method overrides;
+   - reusing the other key's `Idempotency-Key`;
+   - traversal out of folder shares, sent with `--path-as-is`;
+   - a 400 MB chunked body, a 200 KB `Authorization` header and a 100 KB query string;
+   - raw-socket request smuggling;
+   - a stored-XSS payload in a share label, rendered in the repository UI.
+
+**Result.** No path from one repository's key to another repository's data was found. Every item, folder, search, content, share and idempotency query is filtered on the key's repository. The following were found and fixed before release.
+
+### P1. Unbounded request-body buffering (High)
+**Location:** `src/api-v1.ts` — `readJsonBody`
+**Issue:** The 16 KB limit was checked against `Content-Length` and then against the text *after* `req.text()`. A chunked body has no `Content-Length`, so the server buffered all of it, up to Bun's ~2 GB `maxRequestBodySize`. A single 400 MB request with a valid share-capable key raised the server's RSS from 48 MB to 957 MB; a few concurrent ones would take down every hosted site.
+**Fix:**
+- The body is read as a stream to its end, keeping at most 16 KB.
+- It is never abandoned part-way: the v2.7.0 unlock-endpoint fix showed that cancelling a partly read chunked body lets some Bun versions parse the rest as a new request.
+- Declared oversize bodies are refused unread, with `Connection: close`.
+- Verified: three 400 MB chunked requests now each get `413` in about 1 ms, with no RSS growth.
+- `test/smuggling.test.ts` now also sends chunked and fixed-length oversize bodies with a request hidden inside, and asserts that it is never executed.
+
+### P2. Case-insensitive folder matching (High, pre-existing)
+**Location:** `src/repo.ts` — `listSharedFolder`, `zipRepoPaths`, rename/move, copy, delete, trash restore, trash purge; `src/api-v1.ts` — `childRows`
+**Issue:** "Everything under folder X" was selected with `path LIKE 'X/%'`. SQLite's `LIKE` ignores ASCII case, but repository paths are case-sensitive, so `Public/` and `public/` are different folders.
+- A folder share of `Public` listed `public/salaries.txt` to anonymous recipients and included it in the "download everything" ZIP. Reproduced live.
+- Deleting, renaming, moving, copying or restoring `Public` in the repository UI also acted on `public/…`.
+**Fix:** every folder-prefix query pairs its `LIKE` with a case-sensitive `instr(path, prefix) = 1` (`CASE_SENSITIVE_PREFIX`). Regression tests cover the share page, its ZIP, the API listing and folder delete.
+
+### P3. Revoked share links could be re-created (Medium)
+**Location:** `src/api-v1.ts` — `createShare`
+**Issue:** To return the same URL on an idempotent retry without storing tokens, the token was `HMAC(secret, keyId:Idempotency-Key)`. Purging a share (30 days after revocation) also removed its idempotency record, so a later retry with the same key re-created the *identical* token, and a leaked, revoked link worked again. It also tied share secrecy to how guessable clients' idempotency keys are.
+**Fix:** each share gets a random 256-bit nonce, stored with its idempotency record, and the token is `HMAC(secret, nonce)`. Once purged, a retry creates a new share with a new URL. A regression test revokes, purges, retries, and checks that the old URL stays dead.
+
+### P4. Repository-existence oracle (Low)
+**Location:** `src/api-v1.ts` — `repoFor`
+**Issue:** Another repository's id answered `403 forbidden`, while an unused id or a web site answered `404`. That let a key holder enumerate repository ids.
+**Fix:** any id but the key's own answers the identical `404 not_found`. Item and share lookups already behaved this way.
+
+### P5. Account names in responses (Low)
+**Location:** `src/api-v1.ts` — `serializeItems`
+**Issue:** Items carried `created_by` / `updated_by`, which are Hoster usernames (sign-in identifiers) that an external client has no need for.
+**Fix:** removed from the API.
+
+### P6. Valid keys locked out by others' bad guesses (Low)
+**Location:** `src/api-v1.ts` — `authenticate`
+**Issue:** The 30-per-minute unknown-key limit per IP ran before the key lookup, so anyone sharing the client's outbound address (NAT, an integration platform) could lock out its valid key.
+**Fix:** the IP limit is applied only after a lookup fails. Expired and revoked keys don't count, so they keep receiving their real error code.
+
+### P7. IP blocklist not applied (Low)
+**Location:** `src/server.ts`
+**Issue:** `/api/v1` sat in the infrastructure-path list, which skips the blocklist, the visitor rate limit and country checks.
+**Fix:** blocked IPs now get `403` on the API. Country allow-lists deliberately still don't apply (owner decision), so a client hosted abroad keeps working.
+
+### P8. Unbounded rate-limit map under spoofed floods (Low)
+**Location:** `src/api-v1.ts` — `hit`
+**Issue:** The client IP comes from `CF-Connecting-IP` / `X-Real-IP`, so an origin reachable without Cloudflare lets a flood of spoofed addresses grow the per-IP failure map without bound. Once past the cleanup threshold, every request walked the whole map.
+**Fix:** the map is capped at 10,000 entries (oldest dropped), with at most one full sweep per second.
+
+### Checked and held up
+- **SQL:** every query uses placeholders. Template literals interpolate only constants and placeholder lists.
+- **Ids:** digit-only and length-capped, so encoded slashes, NULs and dot-segments are rejected before any lookup.
+- **Keys:** 256-bit, shown once, looked up by SHA-256 hash with a constant-time confirm, and capped at 200 characters. Admin routes sit under `/sites/<slug>/`, so the per-site permission gate applies. Revoke and delete are bound to both slug and id. Creating a key requires CSRF plus a password step-up.
+- **Escaping:** share labels from the API render escaped in the repository UI (verified in a browser) and in the admin panel.
+- **Downloads:** `Content-Disposition` is sanitised (RFC 5987 encoding, now including `'()*`). Files are sent as attachments with `nosniff` and a sandbox CSP.
+- **Share links:** folder-share sub-paths reject `..`, `%2e%2e`, backslashes and NULs. Collapsed dot-segments only redirect to the repository's own front page.
+- **Limits:** oversized headers and URLs get `431` from Bun before Hoster runs.
+- **Restore:** keys are restored only when their repository came back (site ids are now preserved across a platform restore).
+
+### Residual risks
+- **A stolen key** can read and share its own repository until it's revoked.
+- **Share links outlive the key** that created them. Revoke them from the repository's 🔗 list.
+- **Share-capable keys** can revoke links that people created in the same repository.
+- **A database or backup copy** holds the share secret and nonces, so it can rebuild idempotent share URLs. It also holds the documents themselves, so this exposes nothing new.
+
+*Verified by `bun test` (347 tests across 26 files, including `test/api-v1.test.ts` and `test/smuggling.test.ts`) and by the live attack runs described above.*

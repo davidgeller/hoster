@@ -55,6 +55,7 @@ In every case the Hoster binary itself is identical — only the front-end TLS l
 - **Analytics dashboard** — request logs, visitor stats, countries, top pages, status codes, blocked request intelligence, min/avg/max response times
 - **Page analytics** — the Analytics page separates people from bots and page views from asset/polling noise, lists top pages per site, and breaks any site or single page down by country, referrer, browser, operating system, device, language, day-and-hour pattern (in your local time), bots, status codes, and access codes used. Works on existing history — nothing to backfill
 - **Country allow-list with a real picker** — search countries by name or code, add them from a list of who actually visited last week, and never look up an ISO code again; the server validates every code it saves
+- **Repository API** — an external REST API (`/api/v1`) for apps such as a CRM to browse, search, download from and share a repository. Keys are created in each repository's settings and can only ever reach that one repository; share links are idempotent and come back as relative paths. Reference: [`API.md`](API.md)
 - **Admin hostname** — serve the admin panel (and OAuth consent) on its own hostname so no hosted site can ever run script in the admin's origin; MCP connectors keep working unchanged, with a CLI and localhost escape hatch
 - **Bot protection** — scanner "trap" paths (`/.env`, `/.git/`, `/wp-login.php`, `*.php`, …) get an instant 404 and a few of them block the IP; bursts of 404s block too (search and link-preview crawlers exempt); optional per-IP rate limit; per-site refusal of AI-training crawlers; an allow-list, and never blocking an IP with a signed-in administrator
 - **IP auto-blocking** — automatically block IPs that accumulate too many geo-denied requests, block any IP by hand (Settings → Security or straight from the Logs page), with configurable thresholds and duration
@@ -113,6 +114,7 @@ What a repository gives you:
 - **Trash** — deletes are soft; restore from the trash for 30 days, or purge early.
 - **Storage limit** — a per-repository quota counted across every stored version (content-addressed, so re-uploads and restores are free).
 - **Share links** — *Share…* on any file or folder creates a link that works without an account, even on a private repository. Pick an expiry (1 hour to 90 days, or never), add a label, copy the link. A file link serves the current version (add `?dl=1` to force a download); a folder link opens a plain listing page with per-file links and a "download everything" ZIP. Links are random 256-bit tokens stored only as hashes, can be revoked at any time, and stop working if the item is moved, renamed, or deleted. The 🔗 button lists every link with its usage count.
+- **External API** — *Settings → API Keys* creates keys that let another application list, search, download and share this repository over `/api/v1`. See [Repository API](#repository-api-apiv1).
 - **Banner + description** — set from Site Settings; shown across the top of the page (best at 5:1, e.g. 1600 × 320 px).
 - **Backup & restore** — *Settings → Backup* downloads a ZIP with every current document as plain files (`files/`) plus the full history (`objects/`, `repository.json`); an administrator can restore it into any repository. Repositories are also included in the platform-wide configuration backup.
 
@@ -123,7 +125,18 @@ What a repository gives you:
 - **Sign-in on the repository page** accepts username + password (plus the account's 2FA code), or a **passkey**: a "Sign in with a passkey" button appears on the sign-in dialog and on the private-repository gate whenever an account has registered a passkey for that hostname (*Settings → Account → Passkeys*). Passkeys are hostname-bound, so register one on each address you use. On a custom domain (host alias) the admin panel isn't reachable, so a signed-in user gets an **Add passkey** button on the repository page itself (password confirmation required). Uploading, editing, renaming, deleting, and restoring always require signing in — the repository page has its own sign-in dialog that uses the same accounts, passwords, and TOTP as the admin panel.
 - Mutations require the session's CSRF token; raw file bytes are served with `nosniff`, a content-hash ETag, and — for HTML/SVG/XML — a `sandbox` Content-Security-Policy so a hostile document can never run script on the site's origin. Office documents and unknown types are always served as attachments.
 - **Share links** bypass visibility for exactly one path (and, for a folder, what's beneath it) until they expire or are revoked. Traversal outside a shared folder is refused, share pages carry a strict CSP and `noindex`, and creating or revoking links requires a writer session.
-- Per-site country restrictions apply to repositories too, including share links.
+- Per-site country restrictions apply to repositories too, including share links. They don't apply to `/api/v1` calls (see below).
+
+### Repository API (`/api/v1`)
+
+Repositories can be reached by other applications (a CRM, an integration) through a small REST API. The full reference, with every endpoint, object and error code, is [`API.md`](API.md).
+
+- **Keys belong to one repository.** Create them under the repository's *Settings → API Keys* (administrators, and site users assigned to the repository; your password is required). A key can list, browse, search, download from and share that repository and nothing else. Every other repository answers `not_found` as if it didn't exist. Deleting the repository deletes its keys, and changing its slug doesn't affect them.
+- **Scopes and lifetime.** A key is read-only or may also create and revoke share links. It can expire (the client reads `expires_at` from `GET /api/v1/whoami`) and can be revoked at any time. Hoster stores only a SHA-256 of each key.
+- **Shares.** `POST …/items/{id}/shares` honours `Idempotency-Key`: a retry with the same key returns the same share and URL. URLs are root-relative (`/<slug>/_repo/s/<token>`); the client prepends its configured Hoster base URL.
+- **Contract.** It never redirects (trailing slashes are answered in place). Errors are always `{ "error": { "code", "message" } }` with stable codes. Lists are bare arrays. Ids are strings and survive renames, moves and slug changes.
+- **Limits.** 240 requests per minute per key, request bodies up to 16 KB. The IP blocklist applies, but country allow-lists don't, so a client hosted abroad keeps working.
+- **Local testing.** `HOSTER_HOME=<dev dir> bun run scripts/seed-api-demo.ts` creates a demo repository with nested folders and prints a fresh key.
 
 Repositories store data under `sites/<slug>/_repo/objects/` (content-addressed blobs) with the tree and history in SQLite (`repo_files`, `repo_versions`, `repo_blobs`).
 
@@ -880,6 +893,7 @@ Sites whose on-disk state doesn't match the database appear in the admin UI with
 | All sites (files, versions, aliases) | Yes (current version only by default) |
 | Site groups and each account's selected group | Yes |
 | MCP tokens (hashed), blocked IPs | Yes |
+| Repository API keys (hashed) and their share-idempotency records | Yes |
 | Sessions, login attempts, analytics logs | No |
 
 ### File Format
@@ -942,10 +956,17 @@ hoster/
 │   ├── sites.ts        # Site management & versioning
 │   ├── backup.ts       # Configuration backup & restore
 │   ├── mcp.ts          # MCP server & token management
+│   ├── repo.ts         # Repository storage, versions, trash, share links
+│   ├── repo-site.ts    # Repository page UI + its _repo/api
+│   ├── api-v1.ts       # External repository API (/api/v1) and its keys
 │   ├── db.ts           # SQLite database setup
 │   └── setup.ts        # CLI password setup
 ├── deploy/
 │   └── install.sh      # Pi installer template
+├── scripts/
+│   └── seed-api-demo.ts # Demo repository + API key for a dev install
+├── API.md              # Repository API reference (/api/v1)
+├── SECURITY-AUDIT.md   # Security reviews and their fixes
 ├── build-pi.sh         # Build script (ARM64 default; `ARCH=x64 bash build-pi.sh` for x86_64)
 ├── package.json
 └── .gitignore
@@ -1124,6 +1145,16 @@ OAuth-issued tokens stored alongside static tokens (same hashing, expiration, an
 - **Static tokens still permit cross-site access** when their scope is "All sites" — that's by design for CLI batch tools. OAuth-issued tokens are always single-site, so prefer OAuth when narrower blast radius matters.
 - **Site delegate passwords are shared secrets.** Once you send the delegate name and password to a collaborator, they can authorize any number of clients against that site. Treat delegate credentials like any other shared password — share over a secure channel, set an expiry, and revoke when the relationship ends. Delegates can also create OAuth tokens that survive after the delegate row is deleted (up to refresh-token TTL); revoke those tokens explicitly in **Settings → OAuth Connections**.
 
+### Repository API
+
+- **One key, one repository.** Each key row carries the repository's site id; every query the API runs (items, folders, search, content, shares, idempotency records) is filtered on it. A foreign repository id, item id or share id gets the same `404` as one that doesn't exist, so a key can't even learn that other repositories exist. Responses carry no Hoster account names.
+- **Keys** are 256-bit random values (`hk_…`), shown once, stored as SHA-256, looked up by hash. Creating one needs the per-site admin permission, CSRF and a password step-up. Expired and revoked keys get distinct error codes; deleting the repository deletes its keys.
+- **Share tokens** stay stored as hashes only. For idempotent replays the token is an HMAC of a server secret and a random per-share nonce, so a revoked link that has been purged can never be re-created by a retry.
+- **Folder shares** reach only their own folder: path traversal is refused, and folder matching is case-sensitive, so `Public/` never exposes a sibling `public/`.
+- **Resource limits:** request bodies are read as a stream to the end, keeping at most 16 KB, so neither oversized chunked bodies (memory) nor abandoned bodies (request smuggling) are possible. Rate limits are 240 requests per minute per key, plus 30 unknown-key attempts per minute per IP (valid keys are never caught by the IP limit). Oversized headers are refused by Bun.
+- **Network:** `/api/v1` uses no cookies (CORS `*` is safe), honours the IP blocklist, and is not served on custom-domain (host-alias) hostnames. Country allow-lists deliberately don't apply to it.
+- **Accepted risks.** A stolen key can read and share its own repository until revoked. Share links it created outlive it; revoke them from the repository's 🔗 list. A share-capable key can also revoke links people created in its repository.
+
 ### Configuration Backup
 
 - Backup export and import require an authenticated admin session with valid CSRF token
@@ -1171,6 +1202,21 @@ v2.0.0 is the first release where a Hoster instance can present itself as a **we
 - A site whose display name contained an apostrophe (e.g. *David's Software Projects*) broke every action button on its Sites card. Names embedded in inline event handlers were HTML-escaped but not JavaScript-escaped, so the apostrophe terminated the handler's string literal. Values are now emitted as properly quoted JS string literals; any name is safe.
 
 **Upgrading** needs no action. Existing instances keep redirecting `/` to the admin sign-in until an administrator picks a landing page.
+
+### Security Hardening Log — v2.10.0
+
+v2.10.0 adds the repository API (`/api/v1`). Before release it went through an adversarial review: an independent code review, plus live attacks against a running server using one repository's key against a second repository and a web site (about 40 cross-repository probes, encoded-path and id tricks, Host spoofing, folder-share traversal, oversized bodies and headers, raw-socket request smuggling, and script injection through share labels). No way for a key to reach another repository was found. Issues found and fixed before release (details in [`SECURITY-AUDIT.md`](SECURITY-AUDIT.md), November 2026 section):
+
+| # | Severity | Issue | Fix |
+|---|----------|-------|-----|
+| 1 | High | A chunked request body was buffered whole before the 16 KB check; one 400 MB request took the server from 48 MB to 957 MB of memory. | Bodies are read as a stream, keeping at most 16 KB and draining the rest (no early cancel, which can smuggle requests on some Bun versions). |
+| 2 | High (pre-existing) | Folder operations matched child paths with case-insensitive `LIKE`: a share of `Public/` listed and zipped `public/…`, and deleting, renaming, moving, copying or restoring `Public` also hit `public/`. | Every folder-prefix query adds a case-sensitive prefix test. |
+| 3 | Medium | Idempotent share tokens were derived from the API key and `Idempotency-Key` alone, so after a revoked share was purged, a retry re-created the identical, leaked URL. | Tokens are derived from a random per-share nonce. |
+| 4 | Low | Another repository's id answered `403`, an unused id `404`, revealing which ids are repositories. | Both answer `404`. |
+| 5 | Low | Items included Hoster account usernames (`created_by` / `updated_by`). | Removed from the API. |
+| 6 | Low | 30 bad keys from one IP also locked out valid keys on that IP (shared NAT / integration platforms). | The IP limit applies to unknown keys only. |
+| 7 | Low | The API skipped the IP blocklist. | Blocked IPs get `403`. |
+| 8 | Low | The bad-key tracker could grow without bound under a flood from spoofed addresses. | Capped, with at most one sweep per second. |
 
 ### Security Hardening Log — v1.5.0
 

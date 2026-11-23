@@ -1972,6 +1972,85 @@ async function loadMcpTokens() {
   } catch (_) {}
 }
 
+// --- Repository API keys (/api/v1), inside Repository Settings → API Keys ---
+function bindRepoApiKeys(modal, slug) {
+  const listEl = modal.querySelector("#settings-apikeys-list");
+  const errEl = modal.querySelector("#settings-apikey-error");
+  const render = async () => {
+    try {
+      const { keys } = await api(`/sites/${slug}/api-keys`);
+      if (!keys.length) { listEl.innerHTML = '<span class="text-muted">No keys yet.</span>'; return; }
+      listEl.innerHTML = `<table style="width:100%;font-size:0.85rem">
+        <thead><tr><th style="text-align:left">Label</th><th style="text-align:left">Expires</th><th style="text-align:left">Last used</th><th></th></tr></thead><tbody>
+        ${keys.map(k => {
+          const status = k.status === "revoked" ? '<span style="color:var(--danger)">Revoked</span>'
+            : k.status === "expired" ? '<span style="color:var(--danger)">Expired</span>' : timeUntil(k.expires_at);
+          return `<tr>
+            <td>${esc(k.label)}${k.scopes.includes("share") ? "" : ' <small class="text-muted">(read-only)</small>'}<br><code style="font-size:0.75rem">${esc(k.key_id)}</code></td>
+            <td>${status}</td>
+            <td>${k.last_used_at ? esc(new Date(k.last_used_at).toLocaleString()) : '<span class="text-muted">Never</span>'}</td>
+            <td style="text-align:right;white-space:nowrap">${k.status === "revoked"
+              ? `<button type="button" class="btn btn-sm" data-delete-apikey="${k.id}">Remove</button>`
+              : `<button type="button" class="btn btn-sm btn-danger" data-revoke-apikey="${k.id}">Revoke</button>`}</td>
+          </tr>`;
+        }).join("")}</tbody></table>`;
+      listEl.querySelectorAll("[data-revoke-apikey]").forEach(btn => btn.addEventListener("click", async () => {
+        if (!confirm("Revoke this key? Apps using it get key_revoked immediately.")) return;
+        try { await api(`/sites/${slug}/api-keys/${btn.dataset.revokeApikey}/revoke`, { method: "POST" }); } catch (e) { errEl.textContent = e.message; }
+        render();
+      }));
+      listEl.querySelectorAll("[data-delete-apikey]").forEach(btn => btn.addEventListener("click", async () => {
+        try { await api(`/sites/${slug}/api-keys/${btn.dataset.deleteApikey}`, { method: "DELETE" }); } catch (e) { errEl.textContent = e.message; }
+        render();
+      }));
+    } catch (e) { listEl.textContent = e.message; }
+  };
+  render();
+
+  modal.querySelector("#settings-apikey-create").addEventListener("click", async () => {
+    errEl.textContent = "";
+    const labelEl = modal.querySelector("#settings-apikey-label");
+    const label = labelEl.value.trim();
+    if (!label) { errEl.textContent = "Label is required"; return; }
+    const expiresVal = modal.querySelector("#settings-apikey-expires").value;
+    const confirm_password = confirmPasswordPrompt(`Create API key "${label}" for ${slug}?`);
+    if (!confirm_password) return;
+    try {
+      const { key } = await api(`/sites/${slug}/api-keys`, {
+        method: "POST",
+        body: JSON.stringify({ label, can_share: modal.querySelector("#settings-apikey-share").checked,
+          expires_in_days: expiresVal ? parseInt(expiresVal) : null, confirm_password }),
+      });
+      labelEl.value = "";
+      showApiKey(key, label);
+      render();
+    } catch (e) { errEl.textContent = e.message; }
+  });
+}
+
+function showApiKey(key, label) {
+  const modal = document.createElement("div");
+  modal.className = "modal";
+  modal.innerHTML = `
+    <div class="modal-backdrop"></div>
+    <div class="modal-content" style="max-width:560px">
+      <h2>API key for ${esc(label)}</h2>
+      <p style="margin-bottom:12px;color:var(--text-muted)">Copy this key now — it won't be shown again. It works for this repository only. The app sends it as <code>Authorization: Bearer &lt;key&gt;</code> to <code>&lt;Hoster base URL&gt;/api/v1/…</code>.</p>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-family:monospace;font-size:0.85rem;word-break:break-all;margin-bottom:16px;user-select:all">${esc(key)}</div>
+      <div class="modal-actions" style="gap:8px">
+        <button class="btn btn-sm" id="apikey-copy">Copy key</button>
+        <button class="btn btn-primary btn-sm" id="apikey-close">Done</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.querySelector(".modal-backdrop").addEventListener("click", close);
+  modal.querySelector("#apikey-close").addEventListener("click", close);
+  modal.querySelector("#apikey-copy").addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(key); modal.querySelector("#apikey-copy").textContent = "Copied!"; } catch (_) {}
+  });
+}
+
 function showDelegateShareModal(label, password, connectorUrl) {
   const shareText = `Hi! Here are the details to connect your AI tool to my site:
 
@@ -4177,6 +4256,29 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
             <span class="text-sm" id="settings-banner-status"></span>
           </div>
         </div>
+        <div class="settings-tab-panel" data-panel="apikeys">
+          <label>
+            API keys
+            <small>Keys let an external app (a CRM, an integration) browse and search <strong>this repository only</strong> and create share links to its files, through <code>/api/v1</code>. A key can never reach another repository or anything else on Hoster. Each key is shown once, when it's created.</small>
+          </label>
+          <div id="settings-apikeys-list" class="text-sm text-muted">Loading…</div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
+          <label>New key</label>
+          <div style="display:grid;grid-template-columns:1fr 120px auto;gap:6px;align-items:center">
+            <input type="text" id="settings-apikey-label" placeholder="Label, e.g. CRM production" maxlength="100" autocomplete="off">
+            <select id="settings-apikey-expires" title="When the key stops working">
+              <option value="90">90 days</option>
+              <option value="180">180 days</option>
+              <option value="365" selected>1 year</option>
+              <option value="">Never</option>
+            </select>
+            <button type="button" class="btn btn-sm btn-primary" id="settings-apikey-create">Create key</button>
+          </div>
+          <label style="display:flex;align-items:center;gap:6px;font-weight:normal;margin:8px 0 0;flex-direction:row;color:var(--text)">
+            <input type="checkbox" id="settings-apikey-share" checked style="width:auto;margin:0"> May create and revoke share links
+          </label>
+          <div class="form-error" id="settings-apikey-error" style="margin-top:4px"></div>
+        </div>
         <div class="settings-tab-panel" data-panel="backup">
           <label>
             Backup
@@ -4213,6 +4315,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
         ${isRepo ? "" : '<button type="button" class="settings-tab" role="tab" data-tab="protection">Protection</button>'}
         ${isSuperAdmin ? '<button type="button" class="settings-tab" role="tab" data-tab="users">Users</button>' : ""}
         <button type="button" class="settings-tab" role="tab" data-tab="aliases">Aliases</button>
+        ${isRepo ? '<button type="button" class="settings-tab" role="tab" data-tab="apikeys">API Keys</button>' : ""}
         ${isRepo ? '<button type="button" class="settings-tab" role="tab" data-tab="backup">Backup</button>' : isColl ? "" : '<button type="button" class="settings-tab" role="tab" data-tab="cms">CMS</button>'}
       </div>
       <form id="site-settings-form">
@@ -4995,6 +5098,8 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
         modal.querySelector("#settings-banner-upload").textContent = "Upload banner";
       } catch (e) { bannerStatus.textContent = e.message; }
     });
+
+    bindRepoApiKeys(modal, slug);
 
     api(`/sites/${slug}/repo/stats`).then(st => {
       modal.querySelector("#settings-repo-stats").innerHTML =

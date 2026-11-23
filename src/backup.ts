@@ -7,6 +7,7 @@ import { invalidateShieldConfig } from "./shield";
 import { invalidateOriginConfig } from "./origin";
 import "./collection"; // creates the collection_items table backups read
 import "./groups"; // creates the site_groups tables backups read
+import "./api-v1"; // creates the repo_api_keys tables backups read
 import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync, statSync, unlinkSync } from "fs";
 import { join, dirname, resolve } from "path";
 import { randomBytes, createCipheriv, createDecipheriv, pbkdf2Sync } from "crypto";
@@ -137,12 +138,18 @@ function exportDatabase(): Record<string, any[]> {
   tables.site_groups = db.prepare("SELECT * FROM site_groups").all();
   tables.site_group_members = db.prepare("SELECT * FROM site_group_members").all();
 
+  // Repository API keys (v2.10.0). Only key hashes are stored.
+  tables.repo_api_keys = db.prepare("SELECT * FROM repo_api_keys").all();
+  tables.repo_api_idempotency = db.prepare("SELECT * FROM repo_api_idempotency").all();
+
   return tables;
 }
 
 function importDatabase(tables: Record<string, any[]>) {
   const tx = db.transaction(() => {
     // Clear existing data in import order (respecting foreign keys)
+    db.exec("DELETE FROM repo_api_idempotency");
+    db.exec("DELETE FROM repo_api_keys");
     db.exec("DELETE FROM admin_user_sites");
     db.exec("DELETE FROM webauthn_credentials");
     db.exec("DELETE FROM repo_versions");
@@ -176,7 +183,9 @@ function importDatabase(tables: Record<string, any[]>) {
 
     // Import sites
     if (tables.sites) {
-      const cols = ["slug", "name", "created_at", "updated_at", "size_bytes", "file_count", "active", "current_version", "root_dir", "spa", "mcp_enabled", "mcp_read_only", "mcp_auto_commit", "cms_enabled", "cms_lib_version", "pinned_at",
+      // `id` is kept so external API repository ids survive a restore
+      // (backups older than v2.10.0 also carry it: they were SELECT *).
+      const cols = ["id", "slug", "name", "created_at", "updated_at", "size_bytes", "file_count", "active", "current_version", "root_dir", "spa", "mcp_enabled", "mcp_read_only", "mcp_auto_commit", "cms_enabled", "cms_lib_version", "pinned_at",
         "site_type", "allowed_countries", "repo_quota_bytes", "repo_max_versions", "repo_visibility", "repo_description", "repo_banner", "block_ai_bots",
         "coll_layout", "coll_description", "coll_bg_color", "coll_bg_image", "coll_banner"];
       const placeholders = cols.map(() => "?").join(", ");
@@ -338,6 +347,26 @@ function importDatabase(tables: Record<string, any[]>) {
       const stmt = db.prepare(`INSERT INTO webauthn_credentials (${cols.join(", ")}) VALUES (${placeholders})`);
       for (const row of tables.webauthn_credentials) {
         stmt.run(...cols.map(c => row[c] ?? null));
+      }
+    }
+
+    // Repository API keys. Backups predating v2.10.0 have none. Site ids are
+    // restored verbatim (above), so each key still points at its repository;
+    // keys whose repository didn't come back are dropped.
+    if (tables.repo_api_keys) {
+      const cols = ["id", "public_id", "key_hash", "label", "site_id", "can_share", "expires_at", "revoked_at", "created_at", "created_by", "last_used_at", "last_used_ip"];
+      const stmt = db.prepare(`INSERT INTO repo_api_keys (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`);
+      const repoExists = db.prepare("SELECT 1 FROM sites WHERE id = ? AND site_type = 'repository'");
+      for (const row of tables.repo_api_keys) {
+        if (repoExists.get(row.site_id)) stmt.run(...cols.map(c => c === "can_share" ? (row[c] ?? 1) : (row[c] ?? null)));
+      }
+      if (tables.repo_api_idempotency) {
+        const istmt = db.prepare("INSERT OR IGNORE INTO repo_api_idempotency (key_id, idem_hash, fingerprint, share_id, nonce, created_at) VALUES (?, ?, ?, ?, ?, ?)");
+        const keyExists = db.prepare("SELECT 1 FROM repo_api_keys WHERE id = ?");
+        const shareExists = db.prepare("SELECT 1 FROM repo_shares WHERE id = ?");
+        for (const row of tables.repo_api_idempotency) {
+          if (row.nonce && keyExists.get(row.key_id) && shareExists.get(row.share_id)) istmt.run(row.key_id, row.idem_hash, row.fingerprint, row.share_id, row.nonce, row.created_at ?? null);
+        }
       }
     }
   });
