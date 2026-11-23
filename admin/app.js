@@ -2808,8 +2808,11 @@ async function loadAbout() {
     const data = await api("/version");
     const el = document.getElementById("about-version");
     const rel = releaseVersion(data);
+    // Link to the release list, not /releases/tag/v<version>: not every
+    // deployed version is published as a GitHub release (direct deploys with
+    // deploy.sh aren't), and a tag page for an unpublished one is a 404.
     el.innerHTML = rel
-      ? `Version <strong>${esc(rel)}</strong> · build ${esc(data.version)} · <a href="https://github.com/davidgeller/hoster/releases/tag/v${esc(rel)}" target="_blank" rel="noopener">release notes</a>`
+      ? `Version <strong>${esc(rel)}</strong> · build ${esc(data.version)} · <a href="https://github.com/davidgeller/hoster/releases" target="_blank" rel="noopener">release notes</a>`
       : `Development build ${esc(data.version)}`;
   } catch (_) {}
 }
