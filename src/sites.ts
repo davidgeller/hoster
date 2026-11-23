@@ -1,7 +1,7 @@
 import db from "./db";
 import { deleteRulesForSite, invalidateProtectCache } from "./protect";
 import { mkdirSync, rmSync, rmdirSync, existsSync, readdirSync, statSync, symlinkSync, readlinkSync, unlinkSync, realpathSync, lstatSync, writeFileSync, readFileSync, renameSync, copyFileSync } from "fs";
-import { join, resolve, sep } from "path";
+import { basename, join, resolve, sep } from "path";
 import { tmpdir } from "os";
 import { getScaffoldFiles, CMS_LIB_VERSION } from "./cms-scaffold";
 import { normalizeCountryCodes } from "./countries";
@@ -254,6 +254,19 @@ function verifyNoEscape(dir: string): void {
   walk(dir);
 }
 
+// Directory index documents, in order of preference. index.htm is the older
+// 8.3-era spelling some tools and legacy sites still produce.
+export const INDEX_FILES = ["index.html", "index.htm"];
+
+// The first index document present in `dir`, or null.
+export function findIndexFile(dir: string): string | null {
+  for (const name of INDEX_FILES) {
+    const p = join(dir, name);
+    if (existsSync(p) && statSync(p).isFile()) return p;
+  }
+  return null;
+}
+
 // Recursively search for the shallowest directory containing index.html
 // Returns the relative path from baseDir, or null if not found
 // Prefers well-known directory names at each level (browser, dist, build, etc.)
@@ -272,10 +285,10 @@ function findIndexHtmlRoot(baseDir: string, dir: string, maxDepth = 4): string |
     return a.name.localeCompare(b.name);
   });
 
-  // First pass: check immediate children for index.html
+  // First pass: check immediate children for an index document
   for (const entry of sorted) {
     const candidate = join(dir, entry.name);
-    if (existsSync(join(candidate, "index.html"))) {
+    if (findIndexFile(candidate)) {
       const relative = candidate.slice(baseDir.length + 1); // strip baseDir/ prefix
       return relative;
     }
@@ -457,17 +470,17 @@ export async function deploySite(
   // Validated — move staging to final version directory (atomic rename)
   Bun.spawnSync(["mv", stagingDir, versionDir]);
 
-  // Auto-detect root directory by finding index.html recursively
+  // Auto-detect root directory by finding index.html (or index.htm) recursively
   // Handles varying zip structures like browser/, dist/browser/, dashboard_pwa/browser/, etc.
   let detectedRoot: string | null = null;
   let detectedSpa = 0;
-  const topIndex = join(versionDir, "index.html");
-  if (!existsSync(topIndex)) {
+  const topIndex = findIndexFile(versionDir);
+  if (!topIndex) {
     detectedRoot = findIndexHtmlRoot(versionDir, versionDir);
   }
 
   // Auto-detect SPA: look for JS bundles (Angular, React, Vue)
-  if (detectedRoot || existsSync(topIndex)) {
+  if (detectedRoot || topIndex) {
     const checkDir = detectedRoot ? join(versionDir, detectedRoot) : versionDir;
     const files = readdirSync(checkDir);
     const hasJsBundle = files.some(f => /^(main|chunk|polyfills|vendor|runtime)[\w.-]*\.js$/.test(f));
@@ -1260,26 +1273,38 @@ export function resolveSitePath(slug: string, filePath: string, opts: { spaFallb
     return { filePath: resolved, version: ver };
   }
 
-  // Try with index.html for directories
+  // The server asks for "index.html" when the URL names a directory (/slug/),
+  // so a missing index.html falls back to its index.htm sibling.
+  if (basename(resolved) === "index.html") {
+    const htm = resolved.slice(0, -1);
+    if (existsSync(htm) && statSync(htm).isFile()) {
+      const realPath = realpathSync(htm);
+      if (within(realPath, realSiteDirResolved)) return { filePath: htm, version: ver };
+    }
+  }
+
+  // Try the index document for directories
   if (existsSync(resolved) && statSync(resolved).isDirectory()) {
-    const index = join(resolved, "index.html");
-    if (existsSync(index)) {
+    const index = findIndexFile(resolved);
+    if (index) {
       const realPath = realpathSync(index);
       if (within(realPath, realSiteDirResolved)) return { filePath: index, version: ver };
     }
   }
 
-  // Try appending .html
-  const htmlPath = resolved + ".html";
-  if (existsSync(htmlPath)) {
-    const realPath = realpathSync(htmlPath);
-    if (within(realPath, realSiteDirResolved)) return { filePath: htmlPath, version: ver };
+  // Try appending .html, then .htm (extensionless URLs)
+  for (const ext of [".html", ".htm"]) {
+    const htmlPath = resolved + ext;
+    if (existsSync(htmlPath) && statSync(htmlPath).isFile()) {
+      const realPath = realpathSync(htmlPath);
+      if (within(realPath, realSiteDirResolved)) return { filePath: htmlPath, version: ver };
+    }
   }
 
-  // SPA fallback: serve index.html for any unmatched route
+  // SPA fallback: serve the root index document for any unmatched route
   if (site.spa && opts.spaFallback !== false) {
-    const spaIndex = join(contentDir, "index.html");
-    if (existsSync(spaIndex)) return { filePath: spaIndex, version: ver };
+    const spaIndex = findIndexFile(contentDir);
+    if (spaIndex) return { filePath: spaIndex, version: ver };
   }
 
   return null;

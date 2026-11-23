@@ -60,6 +60,7 @@ const ADMIN_DIR = join(BASE_DIR, "admin");
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
+  ".htm": "text/html; charset=utf-8",
   ".js": "application/javascript; charset=utf-8",
   ".json": "application/json",
   ".png": "image/png",
@@ -687,8 +688,8 @@ export function createServer(port: number) {
           !hostAliasSlug &&
           resolved &&
           !path.endsWith("/") &&
-          !path.endsWith(".html") &&
-          resolved.filePath.endsWith("index.html")
+          !/\.html?$/i.test(path) &&
+          /\/index\.html?$/.test(resolved.filePath)
         ) {
           status = 301;
           const res = addSiteHeaders(new Response(null, {
@@ -703,7 +704,7 @@ export function createServer(port: number) {
           siteSlug = candidateSlug;
           // For HTML files, rewrite <base href="/"> to the appropriate prefix:
           // path-based routing: "/<slug>/"; host-aliased: "/".
-          if (resolved.filePath.endsWith(".html")) {
+          if (/\.html?$/i.test(resolved.filePath)) {
             // The admin footer only appears on the canonical host: a custom
             // domain must never advertise the admin panel (which is 404 there).
             const withFooter = !hostAliasSlug && getDefaultSiteFooterSlug() === candidateSlug;

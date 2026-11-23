@@ -174,8 +174,8 @@ async function runDeploy(args: string[], io: CliIO): Promise<number> {
   const listing = inspectZip(zipPath);
   if (typeof listing === "string") return fail(listing);
   if (listing.files.length === 0) return fail("The ZIP contains no files.");
-  if (!listing.files.some(f => basename(f).toLowerCase() === "index.html")) {
-    return fail("The ZIP has no index.html anywhere, so the site would have nothing to serve.");
+  if (!listing.files.some(f => /^index\.html?$/.test(basename(f).toLowerCase()))) {
+    return fail("The ZIP has no index.html or index.htm anywhere, so the site would have nothing to serve.");
   }
 
   // Staging holds a copy of the ZIP plus the extracted tree.

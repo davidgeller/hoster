@@ -151,6 +151,16 @@ export function setSiteGroups(slug: string, groupIds: unknown): number[] {
   return getSiteGroupIds(slug);
 }
 
+// A newly created site joins the group the creating account has selected, so
+// it shows up in the filtered list they're looking at. Returns the group id it
+// joined, or null when "All sites" is selected (or the group is gone).
+export function joinSelectedGroup(userId: number, slug: string): number | null {
+  const id = getSelectedGroup(userId);
+  if (id === null) return null;
+  db.run("INSERT OR IGNORE INTO site_group_members (group_id, site_slug) VALUES (?, ?)", id, slug);
+  return id;
+}
+
 export function getSiteGroupIds(slug: string): number[] {
   return (db.query("SELECT group_id FROM site_group_members WHERE site_slug = ? ORDER BY group_id").all(slug) as { group_id: number }[])
     .map(r => r.group_id);

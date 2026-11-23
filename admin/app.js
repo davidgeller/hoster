@@ -4294,7 +4294,7 @@ window.showSiteSettings = async function (slug, rootDir, spa, mcpEnabled, mcpRea
           <label>
             Root Directory
             <input type="text" id="settings-root-dir" value="${esc(rootDir || "")}" placeholder="e.g. browser, dist, build (leave empty for top level)">
-            <small>Subdirectory containing index.html. Auto-detected for Angular/React/Vue builds.</small>
+            <small>Subdirectory containing index.html (or index.htm). Auto-detected for Angular/React/Vue builds.</small>
           </label>
           <label style="display:flex;align-items:center;gap:10px;flex-direction:row">
             <input type="checkbox" id="settings-spa" ${spa ? "checked" : ""} style="width:auto;margin:0">

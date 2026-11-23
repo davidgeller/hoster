@@ -20,7 +20,7 @@ import {
 } from "../src/sites";
 import {
   listGroups, createGroup, updateGroup, deleteGroup, reorderGroups,
-  setSiteGroups, getSiteGroupIds, getSelectedGroup, setSelectedGroup,
+  setSiteGroups, getSiteGroupIds, getSelectedGroup, setSelectedGroup, joinSelectedGroup,
 } from "../src/groups";
 import { createAdminUser, createSession, getUserSiteSlugs } from "../src/auth";
 import { createRule, listRules } from "../src/protect";
@@ -104,6 +104,23 @@ describe("site groups", () => {
     expect(() => setSelectedGroup(root, 12345)).toThrow(/not found/);
     deleteGroup(g.id);
     expect(getSelectedGroup(root)).toBeNull();
+  });
+
+  test("a new site, repository or collection joins the creator's selected group", async () => {
+    const root = await createAdminUser("root", PW, { isAdmin: true });
+    const other = await createAdminUser("other", PW, { isAdmin: true });
+    const g = createGroup("Clients");
+    setSelectedGroup(root, g.id);
+
+    expect((await asUser(root, "POST", "/_admin/api/sites/blank", { slug: "new-blank" })).status).toBe(200);
+    expect((await asUser(root, "POST", "/_admin/api/sites/repository", { slug: "new-repo" })).status).toBe(200);
+    expect((await asUser(root, "POST", "/_admin/api/sites/collection", { slug: "new-coll" })).status).toBe(200);
+    // Another account with "All sites" selected adds nothing to the group.
+    expect((await asUser(other, "POST", "/_admin/api/sites/blank", { slug: "elsewhere" })).status).toBe(200);
+
+    expect(listGroups().find(x => x.id === g.id)!.slugs).toEqual(["new-blank", "new-coll", "new-repo"]);
+    expect(getSiteGroupIds("elsewhere")).toEqual([]);
+    expect(joinSelectedGroup(other, "elsewhere")).toBeNull();
   });
 
   test("admin API: administrators manage groups; site users see a filtered view and store only their selection", async () => {

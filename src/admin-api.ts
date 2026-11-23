@@ -28,7 +28,7 @@ import {
   getCmsStatus, cmsInit,
   setSiteAllowedCountries, updateRepoSettings, setSiteBlockAiBots,
 } from "./sites";
-import { listGroups, createGroup, updateGroup, deleteGroup, reorderGroups, setSiteGroups, getSiteGroupIds, getSelectedGroup, setSelectedGroup } from "./groups";
+import { listGroups, createGroup, updateGroup, deleteGroup, reorderGroups, setSiteGroups, getSiteGroupIds, getSelectedGroup, setSelectedGroup, joinSelectedGroup } from "./groups";
 import {
   createRepositorySite, repoStats, exportRepoBackup, importRepoBackup, setRepoBanner, clearRepoBanner,
 } from "./repo";
@@ -526,6 +526,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     try {
       const result = await deploySite(slug, name, await file.arrayBuffer(), label, notes);
       audit(existed ? "site_updated" : "site_created", `${slug} -> ${result.version.version}${notes ? " (with notes)" : ""}`);
+      if (!existed) joinSelectedGroup(principal.userId, slug);
       return json(result);
     } catch (e: any) {
       return json({ error: e.message }, 400);
@@ -541,6 +542,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     try {
       const result = createBlankSite(slug, name!);
       audit("site_created_blank", slug);
+      joinSelectedGroup(principal.userId, slug);
       return json(result);
     } catch (e: any) {
       return json({ error: e.message }, 400);
@@ -557,6 +559,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
         quota_bytes: body.quota_bytes, max_versions: body.max_versions, visibility: body.visibility, description: body.description,
       });
       audit("site_created_repository", `${slug} (${site.repo_visibility}, ${Math.round(site.repo_quota_bytes / (1024 * 1024))} MB)`);
+      joinSelectedGroup(principal.userId, slug);
       return json({ site });
     } catch (e: any) {
       return json({ error: e.message }, 400);
@@ -571,6 +574,7 @@ export async function handleAdminApi(req: Request, path: string): Promise<Respon
     try {
       const site = createCollectionSite(slug, body.name || slug, { description: body.description, layout: body.layout, bg_color: body.bg_color });
       audit("site_created_collection", `${slug} (${site.coll_layout})`);
+      joinSelectedGroup(principal.userId, slug);
       return json({ site });
     } catch (e: any) {
       return json({ error: e.message }, 400);

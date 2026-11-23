@@ -399,7 +399,7 @@ From a shell on the host, the same deploy works without signing in:
 sudo -u <service-user> /path/to/hoster deploy <slug> /absolute/path/to/site.zip [--label "..."] [--notes "..."] [--yes] [--dry-run]
 ```
 
-It only updates existing web sites (it never creates one), must run as the account that owns `data/hoster.db` (never root), checks the ZIP (a real file with a ZIP signature, under 500 MB, containing an `index.html`, and enough free disk space) and asks for confirmation. When there's no terminal, `--yes` is required. Each run is recorded in the audit log as `site_updated_cli` with the OS user and the ZIP's SHA-256. When running from source, set `HOSTER_HOME`.
+It only updates existing web sites (it never creates one), must run as the account that owns `data/hoster.db` (never root), checks the ZIP (a real file with a ZIP signature, under 500 MB, containing an `index.html` or `index.htm`, and enough free disk space) and asks for confirmation. When there's no terminal, `--yes` is required. Each run is recorded in the audit log as `site_updated_cli` with the OS user and the ZIP's SHA-256. When running from source, set `HOSTER_HOME`.
 
 For piecemeal edits to an existing version, use **Upload File** instead — the modal accepts one or more files at once and supports dropping entire folders (directory structure is preserved). Use the **Destination Path** field as an optional prefix to place the dropped files into a subdirectory.
 
@@ -407,9 +407,10 @@ For piecemeal edits to an existing version, use **Upload File** instead — the 
 
 Hoster automatically detects Angular, React, and Vue builds:
 
-- **Root directory detection** — Hoster recursively searches for the shallowest directory containing `index.html`, handling nested structures like `dashboard_pwa/browser/` automatically. Well-known directories (`browser/`, `dist/`, `build/`, `public/`, `out/`, `www/`) are preferred. The root directory is re-detected on each deploy, so changing your build output structure between versions just works.
+- **Root directory detection** — Hoster recursively searches for the shallowest directory containing `index.html` (or `index.htm`), handling nested structures like `dashboard_pwa/browser/` automatically. Well-known directories (`browser/`, `dist/`, `build/`, `public/`, `out/`, `www/`) are preferred. The root directory is re-detected on each deploy, so changing your build output structure between versions just works.
 - **Base href rewriting** — `<base href="/">` is automatically rewritten to `<base href="/your-slug/">` so asset paths work correctly under a subpath
-- **SPA routing** — enable SPA mode in site Settings to serve `index.html` for all unmatched routes (required for client-side routing)
+- **Index documents** — a folder URL serves its `index.html`, or `index.htm` when there's no `index.html`; extensionless URLs try `.html` then `.htm`
+- **SPA routing** — enable SPA mode in site Settings to serve `index.html` (or `index.htm`) for all unmatched routes (required for client-side routing)
 
 You can adjust these settings per site via the **Settings** button on each site card.
 
@@ -499,6 +500,8 @@ An administrator can rename a site's slug — its URL path, folder, and MCP iden
 ### Site Groups
 
 With many sites, groups give the **Sites** page one-click filter buttons. Click **Manage groups** (or **+ Create a group**) above the site cards to add groups and tick their sites; or tick groups for one site under its **Settings → General**. A site can be in any number of groups, and pinned sites still sort to the top within each group.
+
+Creating a site, repository or collection while a group is selected adds it to that group, so it appears in the list you're looking at. Redeploying an existing site doesn't change its groups.
 
 The selected group is remembered per account on the server, so it survives sign-out and follows you to another browser. Groups are shared by every administrator and only administrators can edit them; a site user sees each group narrowed to the sites assigned to them (groups with none of their sites are hidden).
 
